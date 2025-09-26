@@ -11,18 +11,22 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 from pathlib import Path
 from datetime import timedelta
-import os
+import os, environ
+
+env = environ.Env()
+
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATICFILES_DIRS = [BASE_DIR / "static"]  # adjust if yours differs
 
-
+environ.Env.read_env(os.path.join(BASE_DIR, ".env")) 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-7^uze)9(a$8&l#o&$h&6%x)t!es*(uvf3gqpcod$z%xrqi@)2y'
+SECRET_KEY = env('DJANGO_SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -125,7 +129,7 @@ DATABASES = {
         'ENGINE':  "django.db.backends.postgresql",
         "NAME": "mymind",
         "USER": "postgres",
-        "PASSWORD":"root",
+        "PASSWORD":env("DATA_PWD"),
         "HOST": "localhost",
         "PORT": "5432",
     }
@@ -187,7 +191,7 @@ EMAIL_USE_TLS =  "1" in ("1","true","True")
 EMAIL_USE_SSL = "0" in ("1","true","True")  # must NOT be true with TLS
 
 EMAIL_HOST_USER =  "info@mindmines.eu"
-EMAIL_HOST_PASSWORD = "Pranawie@23"
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD")
 
 # IMPORTANT: send *from* the same address (or a verified alias)
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
@@ -260,8 +264,8 @@ AUTHENTICATION_BACKENDS = [
 
 
 
-SOCIAL_AUTH_GOOGLE_OAUTH2_KEY = "470072510265-n9sf1kcklcplraqvcpd1bfqd55ikf600.apps.googleusercontent.com"
-SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET ="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"
+SOCIAL_AUTH_GOOGLE_OAUTH2_KEY = env("GOOGLE_OAUTH_CLIENT_ID")
+SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET =env("GOOGLE_OAUTH_CLIENT_SECRET")
 SOCIAL_AUTH_GOOGLE_OAUTH2_SCOPE = [
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
@@ -281,8 +285,8 @@ PASSWORD_RESET_TIMEOUT = 60 * 60 * 3
 
 
 # --- Payments env (use .env in real) ---
-PAYPAL_CLIENT_ID ="ARp8vHkeHU7hdNsvQjGMC5yUq-oBJCyql4q6m4NAmgt0c35pUwNj4Ic_QNde0Qcxvj3robvLIZbdc5PD"
-PAYPAL_CLIENT_SECRET = "EI3fU5q-IGr5FyvlljxicLONUQ2e6OgzjSIpk58sf3zN8W9pXAVY1_M_VM0tnT4MS1z4f6a43gmPANsn"
+PAYPAL_CLIENT_ID =env("PAY_PAL_CLIENT_ID")
+PAYPAL_CLIENT_SECRET = env("PAY_PAL_SECRET_KEY")
 PAYPAL_ENV ="sandbox" # "sandbox" | "live"
 
 KLARNA_USERNAME =  ""
