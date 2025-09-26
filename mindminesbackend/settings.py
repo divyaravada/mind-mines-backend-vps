@@ -26,12 +26,12 @@ environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = env('DJANGO_SECRET_KEY')
+SECRET_KEY = 'django-insecure-7^uze)9(a$8&l#o&$h&6%x)t!es*(uvf3gqpcod$z%xrqi@)2y'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = False
 
-ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+ALLOWED_HOSTS = ["mindmines.eu", "www.mindmines.eu"]
 
 AUTH_USER_MODEL = 'server.User'
 
@@ -127,9 +127,9 @@ WSGI_APPLICATION = 'mindminesbackend.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE':  "django.db.backends.postgresql",
-        "NAME": "mymind",
-        "USER": "postgres",
-        "PASSWORD":env("DATA_PWD"),
+        "NAME": env("POST_DB_NAME"),
+        "USER": env("POST_DB_USER"),
+        "PASSWORD":env('POST_DB_PWD'),
         "HOST": "localhost",
         "PORT": "5432",
     }
@@ -171,8 +171,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = "/static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"  # for collectstatic
-MEDIA_URL = "/media/"
+STATIC_ROOT =  "/mindminesbackend/static"  # for collectstatic
+MEDIA_URL = "/mindminesbackend/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -228,8 +228,8 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_ALL_ORIGINS = True   # dev only
 CORS_ALLOW_CREDENTIALS = True   # <-- correct name (not CORS_ALLOWS_*)
 CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
+    "http://mindmines.eu",
+    "http://www.mindmines.eu",
 ]
 # If you deploy to a domain, add it here too.
 
