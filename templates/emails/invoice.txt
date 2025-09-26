@@ -1,0 +1,4 @@
+Payment received — thank you!
+
+Your invoice {{ order.invoice.number }} for order {{ order.number }} is attached.
+You can also download it from your account: {{ orders_url }}

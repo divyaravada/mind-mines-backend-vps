@@ -1,0 +1,8 @@
+We received your cancellation request
+
+Order: {{ order.number }}
+Placed: {{ created_at_display }}
+Total: {{ total_display }}
+Reason: {{ message|default:"—" }}
+
+You can follow updates here: {{ orders_url }}

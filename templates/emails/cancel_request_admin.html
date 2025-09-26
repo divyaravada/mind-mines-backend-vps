@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+  <body style="margin: 0; padding: 0; background: #f6f7fb">
+    <table
+      role="presentation"
+      width="100%"
+      cellpadding="0"
+      cellspacing="0"
+      style="background: #f6f7fb"
+    >
+      <tr>
+        <td align="center" style="padding: 28px 12px">
+          <table
+            role="presentation"
+            width="600"
+            cellpadding="0"
+            cellspacing="0"
+            style="
+              background: #fff;
+              border-radius: 12px;
+              overflow: hidden;
+              box-shadow: 0 6px 18px rgba(20, 20, 20, 0.06);
+            "
+          >
+            <tr>
+              <td style="background: #16150f; padding: 18px 24px">
+                {% if logo_cid %}<img
+                  src="cid:{{ logo_cid }}"
+                  width="80"
+                  alt="MindMines"
+                  style="display: block"
+                />{% endif %}
+              </td>
+            </tr>
+            <tr>
+              <td style="font-family: Inter, Arial; padding: 28px">
+                <h1 style="margin: 0 0 6px; font-size: 20px">
+                  New cancellation request
+                </h1>
+                <p
+                  style="
+                    margin: 0 0 14px;
+                    color: #444;
+                    font-size: 14px;
+                    line-height: 1.6;
+                  "
+                >
+                  Order <strong>{{ order.number }}</strong> placed on
+                  <strong>{{ created_at_display }}</strong> • Total
+                  <strong>{{ total_display }}</strong><br />
+                  Customer: {{ customer_name }} ({{ customer_email }})
+                </p>
+
+                {% if message %}
+                <p style="margin: 0 0 6px">
+                  <strong>Reason:</strong><br />{{ message|linebreaksbr }}
+                </p>
+                {% endif %} {% if items %}
+                <div style="font-weight: 600; margin: 12px 0 6px">Items</div>
+                <table
+                  role="presentation"
+                  width="100%"
+                  cellpadding="0"
+                  cellspacing="0"
+                  style="
+                    border-collapse: collapse;
+                    font-family: Inter, Arial;
+                    font-size: 14px;
+                  "
+                >
+                  <tr style="background: #fafafa">
+                    <th
+                      align="left"
+                      style="
+                        padding: 10px 12px;
+                        border: 1px solid #eee;
+                        font-weight: 600;
+                      "
+                    >
+                      Item
+                    </th>
+                    <th
+                      align="center"
+                      style="
+                        padding: 10px 12px;
+                        border: 1px solid #eee;
+                        font-weight: 600;
+                      "
+                    >
+                      Qty
+                    </th>
+                    <th
+                      align="right"
+                      style="
+                        padding: 10px 12px;
+                        border: 1px solid #eee;
+                        font-weight: 600;
+                      "
+                    >
+                      Total
+                    </th>
+                  </tr>
+                  {% for i in items %}
+                  <tr>
+                    <td style="padding: 10px 12px; border: 1px solid #eee">
+                      {{ i.name }}
+                    </td>
+                    <td
+                      align="center"
+                      style="padding: 10px 12px; border: 1px solid #eee"
+                    >
+                      {{ i.qty }}
+                    </td>
+                    <td
+                      align="right"
+                      style="padding: 10px 12px; border: 1px solid #eee"
+                    >
+                      {{ i.total }}
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </table>
+                {% endif %}
+
+                <p style="margin: 14px 0 0; color: #666; font-size: 13px">
+                  Admin: /admin/server/order/{{ order.id }}/change/
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td
+                align="center"
+                style="
+                  padding: 0 0 26px;
+                  color: #9aa;
+                  font-family: Inter, Arial;
+                  font-size: 12px;
+                "
+              >
+                © {{ year }} MindMines — All rights reserved
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

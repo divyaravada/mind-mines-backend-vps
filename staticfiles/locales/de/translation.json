@@ -1,0 +1,314 @@
+{
+  "navbar": {
+    "home": "Startseite",
+    "about": "Über uns",
+    "decorativeProducts": "Decorative Products",
+    "naturalStone": "Natural Stone",
+    "contact": "Kontakt",
+    "cart": "Warenkorb",
+    "searchPlaceholder": "Nach Produkten suchen...",
+    "language": "Sprache",
+    "login": "Anmelden",
+    "logout": "Abmelden",
+    "register": "Registrieren",
+    "myAccount": "Mein Konto",
+    "wishlist": "Wunschliste",
+    "orderHistory": "Bestellverlauf",
+    "customerService": "Kundenservice",
+    "terms": "AGB",
+    "privacyPolicy": "Datenschutz",
+    "imprint": "Impressum",
+    "legal": "Daten & Recht",
+    "shippingInfo": "Versandinformationen",
+    "returnPolicy": "Rückgaberecht",
+    "newsletter": "Newsletter",
+    "subscribe": "Anmelden",
+    "subscribeSuccess": "Vielen Dank für Ihre Anmeldung! Überprüfen Sie Ihre E-Mail auf Updates.",
+    "subscribeError": "Bei der Anmeldung ist ein Fehler aufgetreten. Bitte versuchen Sie es später erneut."
+  },
+  "filter": {
+    "material": "Material",
+    "allMaterials": "Alle Materialien",
+    "marble": "Marmor",
+    "granite": "Granit"
+  },
+  "Shopping Cart": "Shopping Cart",
+  "Your cart is empty": "Your cart is empty.",
+  "Remove": "Remove",
+  "Clear Cart": "Clear Cart",
+  "Subtotal": "Subtotal",
+  "items": "items",
+  "Proceed to Checkout": "Proceed to Checkout",
+  "Add to Cart": "In den Warenkorb",
+  "In stock": "Auf Lager",
+  "Out of stock": "Nicht vorrätig",
+  "Qty": "Menge",
+  "Reviews": "Bewertungen",
+  "You might also like": "Das könnte dir auch gefallen",
+  "added to cart": "zum Warenkorb hinzugefügt",
+  "Key": "Schlüssel",
+  "Not found": "Nicht gefunden",
+  "All": "All",
+  "No products found in this category.": "No products found in this category.",
+  "short_description": "Kurze Beschreibung",
+  "categories": {
+    "home_decor": {
+      "heading": " WOHNDEKOR & ACCESSOIRES",
+      "description": "Verleihen Sie Ihrem Zuhause mit zeitlosen Marmor-Dekorationen und Accessoires für jeden Stil eine besondere Note.",
+      "button": "Wohnaccessoires shoppen"
+    },
+    "storage": {
+      "heading": "AUFBEWAHRUNG UND ORGANISATION",
+      "description": "Entdecken Sie elegante und langlebige Aufbewahrungslösungen aus hochwertigem Marmor und Granit.",
+      "button": "Aufbewahrung shoppen"
+    },
+    "kitchen": {
+      "heading": "KÜCHE UND GERÄTE",
+      "description": "Verwandeln Sie Ihre Küche mit unserer exklusiven Auswahl an Accessoires in einen luxuriösen und funktionalen Raum – für mehr Schönheit und Alltagstauglichkeit beim Kochen.",
+      "button": "Küchenzubehör shoppen"
+    },
+    "office": {
+      "heading": "BÜROBEDARF",
+      "description": "Verschönern Sie Ihren Arbeitsplatz mit eleganten Marmor-Accessoires, die Design und Funktionalität vereinen.",
+      "button": "Shop Storage"
+    },
+    "bathroom": {
+      "heading": "BADEZIMMER-ACCESSOIRES",
+      "description": "Bringen Sie Luxus in Ihr Bad mit unseren einzigartigen Marmor-Accessoires – dort, wo Stil auf täglichen Komfort trifft.",
+      "button": "Bürobedarf shoppen"
+    },
+    "sculpture": {
+      "heading": "SKULPTUREN & INDIVIDUALISIERUNG",
+      "description": "Entdecken Sie exklusive Skulpturen oder gestalten Sie Marmorelemente individuell nach Ihrem Geschmack und Bedarf.",
+      "button": "Skulpturen shoppen"
+    }
+  },
+  "home": {
+    "ourCollection": "Unsere Kollektion",
+    "collection": {
+      "mobileHolder": "Handyhalter",
+      "multipurpose": "Mehrzweckhalter",
+      "kitchenBowl": "Küchenschüssel",
+      "tray": "Tablett"
+    },
+    "aboutUs": {
+      "heading": "Über Uns",
+      "text": "Wir verbinden südasiatisches Handwerk mit europäischem Minimalismus und schaffen zeitlose Marmorstücke für jedes Zuhause. Mit Sitz in Deutschland sorgt unser Team für höchste Qualität und ethische Beschaffung. ",
+      "secText": "Entdecken Sie einzigartige Designs aus Naturstein – mit Sorgfalt gefertigt und für die Ewigkeit gemacht."
+    },
+    "features": {
+      "materials": "Natürliche Materialien",
+      "germany": "Ansässig in Deutschland",
+      "stones": "Aus hochwertigen Steinen",
+      "return": "14 Tage Rückgaberecht"
+    }
+  },
+  "auth": {
+    "customerTab": "Kunde",
+    "adminTab": "Admin",
+    "loginTitle": "Ich bin bereits Kunde",
+    "loginSub": "Schon Kunde? Dann loggen Sie sich direkt mit Ihren Benutzerdaten ein.",
+    "registerTitle": "Ich bin ein neuer Kunde",
+    "registerSub": "Noch kein Konto? Jetzt registrieren und alle Vorteile genießen!",
+    "adminLoginTitle": "Admin Login",
+    "adminLoginSub": "Nur für Seitenadministratoren.",
+    "email": "E-Mail-Adresse",
+    "password": "Passwort",
+    "passwordHint": "Passwort (mind. 12 Zeichen)",
+    "login": "Anmelden",
+    "register": "Registrieren",
+    "forgot": "Passwort vergessen?",
+    "newsletter": "Ich möchte regelmäßige E-Mail-Newsletter, Erinnerungen, Gutscheine, Umfragen und Produktbewertungen erhalten. Meine Einwilligung kann ich jederzeit widerrufen.",
+    "terms": "Unsere Allgemeinen Geschäftsbedingungen und Datenschutzbestimmungen.",
+    "forgotDialogTitle": "Passwort zurücksetzen",
+    "forgotDialogMsg": "Geben Sie Ihre E-Mail-Adresse ein und Sie erhalten Anweisungen.",
+    "sendReset": "Link zum Zurücksetzen senden",
+    "resetSent": "Wenn Ihre E-Mail existiert, erhalten Sie einen Link.",
+    "invalidEmail": "Bitte geben Sie eine gültige E-Mail-Adresse ein.",
+    "passwordTooShort": "Das Passwort muss mindestens 12 Zeichen lang sein.",
+    "passwordWeak": "Das Passwort sollte Buchstaben und Zahlen enthalten.",
+    "or": "oder",
+    "googleLogin": "Mit Google fortfahren"
+  },
+  "logout": {
+    "message": "Sie wurden abgemeldet.",
+    "thanks": "Vielen Dank für Ihren Besuch! Wir hoffen, Sie bald wiederzusehen.",
+    "cta": "Zur Startseite"
+  },
+  "about": {
+    "heading": "Über Uns",
+    "intro": "Unsere Reise begann als leidenschaftliche Marmorhändler, die mit großer Sorgfalt exquisite Steine aus dem Herzen Italiens bezogen. So knüpften wir Kontakte zu begeisterten Kunden auf den lebendigen Märkten Dubais, in den vielfältigen Landschaften Indiens und im kulturell reichen Deutschland. Inspiriert von unserer tiefen Liebe zur zeitlosen Schönheit des Natursteins wagten wir bald den Schritt in die faszinierende Welt der Handwerkskunst. So konnten wir Marmor, Granit und sogar Kieselsteine in einzigartige und geheimnisvolle Dekorationsobjekte verwandeln, die eine Geschichte erzählen.",
+    "founded": "Im Jahr 2022 gründeten wir unser eigenes Unternehmen mit einer klaren Mission: Unsere Leidenschaft für edle Materialien und künstlerische Handwerkskunst mit einem weltweiten Publikum zu teilen. Wir glauben, dass jeder Stein einen einzigartigen Charakter besitzt – und unsere Kreationen feiern diese Individualität.",
+    "today": "Heute werden wir von der Zufriedenheit und Inspiration unserer geschätzten Kunden getragen. Das motiviert uns, stets zu innovieren und zu wachsen. Unser Anspruch ist zweifach: Materialien ethisch und nachhaltig zu beschaffen und dabei eng mit erfahrenen Handwerkern zusammenzuarbeiten, die unseren Ideen Leben einhauchen. Gemeinsam schaffen wir bemerkenswerte Steinobjekte – von eleganten Skulpturen bis hin zu ausdrucksstarken Wohnaccessoires – jedes Stück gestaltet, um mit Schönheit und Raffinesse zu begeistern.",
+    "vision": "Unsere Vision ist eine Welt, in der der Zauber des Steins jeden Raum bereichert – mit Wärme, Eleganz und einem Hauch von Natur, sowohl im privaten als auch im geschäftlichen Umfeld. Begleiten Sie uns auf dieser Reise und entdecken Sie, wie unsere Kunstfertigkeit Ihr Zuhause oder Ihr Unternehmen in eine Oase voller Stil und Anmut verwandeln kann.",
+    "contactHeading": "Kontakt",
+    "contactSub": "Sie möchten mit uns zusammenarbeiten, mehr erfahren oder Teil unseres Teams werden? Bitte teilen Sie uns Ihre Informationen mit – wir melden uns innerhalb von 48 Stunden.",
+    "name": "Name",
+    "email": "E-Mail",
+    "message": "Nachricht",
+    "send": "Senden",
+    "success": "Vielen Dank! Wir melden uns bald bei Ihnen."
+  },
+  "naturalStone": {
+    "title": "Naturstein",
+    "description": "Entdecken Sie unsere exquisite Kollektion von Natursteinen, jedes Stück ein Zeugnis zeitloser Schönheit und Handwerkskunst. Von elegantem Marmor bis robustem Granit – finden Sie den perfekten Stein, um Ihren Raum zu bereichern.",
+    "gallery": {
+      "title": "Galerie",
+      "description": "Durchsuchen Sie unsere Galerie mit atemberaubenden Natursteinprodukten, die in verschiedenen Stilen und Anwendungen präsentiert werden."
+    },
+    "details": {
+      "origin": "Herkunft",
+      "type": "Typ",
+      "color": "Farbe",
+      "finish": "Oberfläche",
+      "dimensions": "Abmessungen",
+      "weight": "Gewicht"
+    },
+    "stone1": {
+      "title": "Granit",
+      "availableColors": "Verfügbare Farben",
+      "features": "Hauptmerkmale",
+      "usedFor": "Verwendet für",
+      "featureList": [
+        "Langlebig & kratzfest",
+        "Hitzebeständig bis 250°C",
+        "Geeignet für Küche & Bad"
+      ],
+      "usage": "Arbeitsplatten, Böden, Wandverkleidungen, Denkmäler"
+    }
+  },
+  "footer": {
+    "secure": "Sichere Bezahlung",
+    "shipping": "Versand nach Deutschland und EU",
+    "start": "@ 2023 - ",
+    "rightreserv": " MindMines | Alle Rechte vorbehalten. ",
+    "welcomeTitle": "Willkommen bei MindMines",
+    "welcomeText": " Unsere Mission: Hochwertiges Stein- und Marmor-Design für Ihr Zuhause, inspiriert von moderner Wohnkultur und südasiatischer Handwerkskunst. Wir helfen Ihnen, ein Stück Identität und Zugehörigkeit in Ihr Zuhause zu bringen – egal, woher Sie kommen.",
+    "help": {
+      "title": "Kundenservice & Kontakt",
+      "order": "Bestellübersicht",
+      "trck": "Sendung verfolgen",
+      "returnOrder": "Rücksendung",
+      "AllTopics": "Alle Hilfethemen",
+      "contact": "Kontakt:",
+      "contactno": " +49 170 4658288",
+      "emailtitle": "E-Mail:",
+      "email": "info@mindmines.eu",
+      "timings": "Timings: Mon–Fri, 9:00am–6:00pm (CET)",
+      "address": "Anschrift: Horneburg, Deutschland"
+    },
+    "legal": {
+      "title": "Rechtliches & Infos",
+      "data": "Datenschutz",
+      "termsConditions": "AGB",
+      "shorttcs": "T&Cs",
+      "imprint": "Impressum",
+      "info": "Versandbedingungen",
+      "about": "Über uns"
+    },
+    "newsletter": {
+      "title": "Newsletter",
+      "text": "Jetzt anmelden und 10% Willkommensrabatt erhalten! Keine Neuheiten und Aktionen mehr verpassen.",
+      "emailPlaceholder": "Geben Sie Ihre E-Mail-Adresse ein",
+      "subscribeButton": " Anmelden",
+      "successMessage": "Thank you for subscribing! Check your email for updates.",
+      "errorMessage": "There was an error subscribing. Please try again later.",
+      "note": " Ich habe die",
+      "privacy": " Datenschutzbestimmungen ",
+      "end": "gelesen und akzeptiere sie."
+    },
+    "payment": {
+      "bank": "SEPA-Überweisung"
+    }
+  },
+
+  "privacy": {
+    "title": "Datenschutzerklärung",
+    "updated": "Zuletzt aktualisiert: 23. August 2025",
+    "sections": [
+      {
+        "heading": "1. Verantwortlicher",
+        "body": [
+          "MindMines GmbH",
+          "Adresse Zeile 1",
+          "E-Mail: info@mindmines.eu"
+        ]
+      },
+      {
+        "heading": "2. Verarbeitete personenbezogene Daten",
+        "body": [
+          "Kontodaten (E-Mail, Name).",
+          "Bestelldaten (Lieferadresse, Zahlungsmetadaten).",
+          "Nutzungsdaten (nur mit Ihrer Einwilligung für Analysen)."
+        ]
+      },
+      {
+        "heading": "3. Rechtsgrundlagen & Zwecke",
+        "body": [
+          "Vertragserfüllung (Art. 6 Abs. 1 lit. b DSGVO).",
+          "Einwilligung (Art. 6 Abs. 1 lit. a DSGVO) für Analyse/Marketing.",
+          "Rechtliche Pflichten (Art. 6 Abs. 1 lit. c DSGVO) für Rechnungen & Steuern."
+        ]
+      }
+    ]
+  },
+  "imprint": {
+    "title": "Impressum",
+    "sections": [
+      {
+        "heading": "Unternehmen",
+        "body": ["MindMines GmbH", "Geschäftsführer: ...", "USt-IdNr.: DE..."]
+      },
+      {
+        "heading": "Kontakt",
+        "body": ["E-Mail: info@mindmines.eu", "Telefon: +49 ..."]
+      }
+    ]
+  },
+  "terms": {
+    "title": "Allgemeine Geschäftsbedingungen (AGB)",
+    "sections": [
+      {
+        "heading": "Geltungsbereich",
+        "body": ["Diese AGB gelten für alle Käufe über unseren Webshop."]
+      },
+      {
+        "heading": "Lieferung",
+        "body": ["Standardlieferung 6–11 Werktage innerhalb der EU."]
+      }
+    ]
+  },
+  "cookies": {
+    "bannerTitle": "Ihre Privatsphäre ist uns wichtig",
+    "bannerText": "Wir verwenden Cookies zum Betrieb der Website (essenziell) und—mit Ihrer Zustimmung—für Analyse und Marketing.",
+    "manage": "Einstellungen",
+    "acceptAll": "Alle akzeptieren",
+    "rejectAll": "Nur essenzielle",
+    "save": "Auswahl speichern",
+    "categories": {
+      "essential": "Essenziell (immer aktiv)",
+      "analytics": "Analyse",
+      "marketing": "Marketing"
+    },
+    "learnMore": "Mehr erfahren"
+  },
+  "myaccount": {
+    "welcome": "Willkommen",
+    "logemail": "Sie sind mit der E-Mail-Adresse eingeloggt",
+    "update": "Aktualisieren Sie Ihre Daten",
+    "order": "Bestellungen",
+    "orderdetails": "Hier können Sie Ihre Bestellungen finden, Details einsehen und verwalten (stornieren / zurücksenden).",
+    "persinfo": "Persönliche Daten",
+    "perdet": "Hier können Sie Ihre Kontodaten einsehen und ändern.",
+    "shopadd": "Lieferadressen",
+    "shopdet": "Hier können Sie Ihre Lieferadressen überprüfen und bearbeiten.",
+    "wishli": "Ihre Wunschliste",
+    "wishdet": "Hier können Sie Ihre Lieblingsprodukte ansehen und bearbeiten.",
+    "review": "Ihre Bewertungen",
+    "reviewde": "Hier können Sie Ihre erstellten Bewertungen einsehen und bearbeiten."
+  },
+  "german": "Deutsch",
+  "eu": "European Union",
+  "english": "Englisch",
+  "language": "Language"
+}

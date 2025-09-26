@@ -1,0 +1,14 @@
+We received your return request for order {{ order.number }}
+
+Submitted: {{ created_at_display }}
+Order date: {{ order_created_at_display }}
+Total: {{ order_total_display }}
+
+Your message:
+{{ message|default:"(no message)" }}
+
+You can track this request in your account:
+{{ orders_url }}
+
+— {{ customer_name }} ({{ customer_email }})
+© {{ now|date:"Y" }} {{ SITE_NAME|default:"MindMines" }}

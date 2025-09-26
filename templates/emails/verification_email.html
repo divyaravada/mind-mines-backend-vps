@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Verify Your Email</title>
+    <style>
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background-color: #f8f9fa;
+        color: #333;
+        padding: 2rem;
+      }
+      .container {
+        max-width: 600px;
+        margin: auto;
+        background: white;
+        border-radius: 10px;
+        padding: 2rem;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.05);
+      }
+      .header {
+        text-align: center;
+        margin-bottom: 2rem;
+      }
+      .button {
+        display: inline-block;
+        margin-top: 1rem;
+        padding: 12px 24px;
+        background-color: #f4a300;
+        color: white;
+        text-decoration: none;
+        border-radius: 6px;
+        font-weight: bold;
+      }
+      .footer {
+        margin-top: 3rem;
+        font-size: 0.9rem;
+        color: #888;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h2>Welcome to <span style="color: #f4a300">MindMines</span></h2>
+      </div>
+      <p>Hi <strong>{{ user.username }}</strong>,</p>
+      <p>
+        Thank you for registering with us. Please confirm your email address to
+        activate your account:
+      </p>
+      <p>
+        <a class="button" href="{{ verification_link }}">Verify My Email</a>
+      </p>
+      <p>This link is valid for <strong>3 hours</strong>.</p>
+      <div class="footer">
+        &mdash; The MindMines Team<br />
+        <a href="https://mindmines.eu">www.mindmines.eu</a>
+      </div>
+    </div>
+  </body>
+</html>

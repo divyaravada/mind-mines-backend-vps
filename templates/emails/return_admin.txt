@@ -1,0 +1,10 @@
+[Return] {{ order.number }} • {{ created_at_display }}
+
+Customer: {{ customer_name }} ({{ customer_email }})
+Order date: {{ order_created_at_display }}
+Total: {{ order_total_display }}
+
+Message:
+{{ message|default:"(no message)" }}
+
+Attachments are included with this email if any were provided.

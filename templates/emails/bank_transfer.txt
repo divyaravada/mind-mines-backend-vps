@@ -1,0 +1,13 @@
+Thanks for your order {{ order.number }}
+
+Amount: {{ amount_display }}
+Reference: {{ reference }}
+IBAN: {{ iban }}
+BIC: {{ bic }}
+Beneficiary: {{ bank.account_name }}
+
+Items:
+{{ items_text }}
+
+We’ll email your invoice automatically once the payment is received.
+View your order: {{ orders_url }}

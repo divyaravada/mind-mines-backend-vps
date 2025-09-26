@@ -1,0 +1,12 @@
+New cancellation request
+
+Order: {{ order.number }} 
+Placed: {{ created_at_display }}
+Customer: {{ customer_name }} <{{ customer_email }}>
+Total: {{ total_display }}
+
+{% if message %}Reason:
+{{ message }}
+{% endif %}
+
+Admin: /admin/server/order/{{ order.id }}/change/

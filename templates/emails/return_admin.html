@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+  <body style="font-family: Arial, sans-serif">
+    <div
+      style="
+        max-width: 700px;
+        margin: auto;
+        background: #fff;
+        border: 1px solid #eee;
+        border-radius: 10px;
+        overflow: hidden;
+      "
+    >
+      <div style="background: #16150f; padding: 16px">
+        {% if logo_cid %}<img
+          src="cid:{{ logo_cid }}"
+          alt="Logo"
+          width="80"
+          style="display: block"
+        />{% endif %}
+      </div>
+      <div style="padding: 20px">
+        <h2 style="margin: 0 0 10px">Return request</h2>
+        <p style="margin: 0 0 10px">
+          Order <strong>{{ order.number }}</strong> • {{ created_at_display }}
+        </p>
+        <p style="margin: 0 0 10px">
+          Customer: <strong>{{ customer_name }}</strong> (<strong
+            >{{ customer_email }}</strong
+          >)<br />
+          Order date: {{ order_created_at_display }}<br />
+          Total: {{ order_total_display }}
+        </p>
+        <p style="margin: 0 0 6px"><strong>Message</strong></p>
+        <p style="white-space: pre-wrap; margin: 0 0 12px">
+          {{ message|default:"(no message)" }}
+        </p>
+        <p style="margin: 0">
+          Attachments are attached to this email (if any).
+        </p>
+      </div>
+      <div
+        style="text-align: center; color: #9aa; padding: 12px; font-size: 12px"
+      >
+        © {{ now|date:"Y" }} {{ SITE_NAME|default:"MindMines" }}
+      </div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,75 @@
+{% load i18n %} <!DOCTYPE html><meta charset="utf-8" />
+<div
+  style="
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    max-width: 640px;
+    margin: auto;
+    padding: 16px;
+  "
+>
+  <h2 style="margin: 0 0 8px">
+    {% blocktrans with num=order.number %}Thank you for your order {{ num }}!{%
+    endblocktrans %}
+  </h2>
+  <p style="margin: 0 0 16px">
+    {% trans "We’re preparing your items. Here’s your summary:" %}
+  </p>
+
+  <table
+    width="100%"
+    cellpadding="0"
+    cellspacing="0"
+    style="border-collapse: collapse; margin: 12px 0"
+  >
+    <thead>
+      <tr>
+        <th align="left" style="border-bottom: 1px solid #eee; padding: 8px 0">
+          {% trans "Item" %}
+        </th>
+        <th align="right" style="border-bottom: 1px solid #eee; padding: 8px 0">
+          {% trans "Qty" %}
+        </th>
+        <th align="right" style="border-bottom: 1px solid #eee; padding: 8px 0">
+          {% trans "Total" %}
+        </th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for it in items %}
+      <tr>
+        <td style="padding: 8px 0">{{ it.name }}</td>
+        <td align="right" style="padding: 8px 0">{{ it.qty }}</td>
+        <td align="right" style="padding: 8px 0">{{ it.total_display }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <table width="100%" style="margin: 8px 0 16px">
+    <tr>
+      <td>{% trans "Subtotal" %}</td>
+      <td align="right">{{ totals.subtotal_display }}</td>
+    </tr>
+    <tr>
+      <td>{% trans "Shipping" %}</td>
+      <td align="right">{{ totals.shipping_display }}</td>
+    </tr>
+    <tr>
+      <td><strong>{% trans "Total" %}</strong></td>
+      <td align="right"><strong>{{ totals.total_display }}</strong></td>
+    </tr>
+  </table>
+
+  <h3 style="margin: 16px 0 8px">{% trans "Billing / Shipping address" %}</h3>
+  <p style="margin: 0 0 16px">
+    {{ address.full_name }}<br />
+    {{ address.street_name }} {{ address.house_number }} {{ address.apartment
+    }}<br />
+    {{ address.postal_code }} {{ address.city }}, {{ address.country }}<br />
+    {{ address.phone }}
+  </p>
+
+  <p style="color: #666; font-size: 13px">
+    {% trans "Your invoice PDF is attached to this email." %}
+  </p>
+</div>
