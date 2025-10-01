@@ -16,7 +16,7 @@ from .views import (
      PaypalCreateOrder, PaypalCaptureOrder,OrderCreateView,
      InvoiceDownloadView, KlarnaCreateSession, KlarnaConfirm,OrderAdminUpdateAPIView,AccountDeleteRequestView,
      CreateBankTransferOrder, StoneEnquiryCreateView,OrderDetailAPIView,SetTrackingAPIView,OrderInvoiceAPIView,
-     OrderCancelRequestAPIView,OrderRequestReturnAPIView
+     OrderCancelRequestAPIView,OrderRequestReturnAPIView,StripeCreateSetupIntent,StripeCreateInstallments
 )
 
 router = DefaultRouter()
@@ -74,6 +74,10 @@ urlpatterns = [
      # PayPal
     path("payments/paypal/create-order/", PaypalCreateOrder.as_view()),
     path("payments/paypal/capture/<str:order_id>/", PaypalCaptureOrder.as_view()),
+
+    #Stripe
+    path("api/payments/stripe/create-setup-intent/", StripeCreateSetupIntent.as_view()),
+    path("api/payments/stripe/create-installments/", StripeCreateInstallments.as_view()),
 
     # Klarna
     path("payments/klarna/session/", KlarnaCreateSession.as_view()),

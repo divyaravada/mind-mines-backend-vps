@@ -536,7 +536,7 @@ class OrderCreateSerializer(serializers.Serializer):
             order_items.append(oi)
             subtotal += Product.vat_included_price(product) * qty
 
-        shipping_fee = Decimal("0.00") if subtotal >= Decimal("100.00") or subtotal == 0 else Decimal("4.99")
+        shipping_fee = Decimal("0.00")  
         total = (subtotal + shipping_fee).quantize(Decimal("0.01"))
         
         order = Order.objects.create(
