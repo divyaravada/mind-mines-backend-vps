@@ -1,5 +1,6 @@
 
 from django.contrib.auth.models import AbstractUser,BaseUserManager
+from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from decimal import Decimal, ROUND_HALF_UP
 from django.db.models import Q, UniqueConstraint
@@ -378,6 +379,9 @@ class Order(models.Model):
     invoice_number = models.CharField(max_length=32, blank=True, null=True, default=None)
     invoice_pdf = models.FileField(upload_to="invoices/", blank=True, null=True)
 
+    coupon = models.ForeignKey("Coupon", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders")
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+
     subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     shipping_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     total_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
@@ -454,6 +458,183 @@ class Order(models.Model):
         if self.status != "delivered" or not self.delivered_at:
             return False
         return timezone.now() <= (self.delivered_at + timedelta(days=1))
+    
+#--------------Coupon code------------
+
+DISCOUNT_TYPES = [("percent", "Percent"), ("fixed", "Fixed amount")]
+
+class Coupon(models.Model):
+    code = models.CharField(max_length=32, unique=True, db_index=True)
+    kind = models.CharField(max_length=10, choices=DISCOUNT_TYPES, default="percent")
+    value = models.DecimalField(max_digits=10, decimal_places=2)  # percent (e.g. 10) or fixed EUR
+    active = models.BooleanField(default=True)
+
+    starts_at = models.DateTimeField(null=True, blank=True)
+    ends_at   = models.DateTimeField(null=True, blank=True)
+
+    min_subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    max_uses = models.PositiveIntegerField(null=True, blank=True)          # across everyone
+    max_uses_per_user = models.PositiveIntegerField(null=True, blank=True)
+
+    # target filters (leave both empty = applies to all)
+    products = models.ManyToManyField("Product", blank=True, related_name="coupons")
+    categories = ArrayField(models.CharField(max_length=30), default=list, blank=True)  # store category keys like "kitchen", "office"
+    # optional cap for percent coupons
+    max_discount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "code"]
+
+    def __str__(self):
+        return self.code.upper()
+
+    # ---- helpers
+    def is_time_ok(self, now=None):
+        from django.utils import timezone
+        now = now or timezone.now()
+        if self.starts_at and now < self.starts_at: return False
+        if self.ends_at and now > self.ends_at:     return False
+        return True
+
+    def eligible_items_subtotal(self, items):
+        """
+        items: list of dicts with product_id & qty OR OrderItem qs.
+        Returns gross (VAT-included) subtotal of eligible items.
+        """
+        subtotal = Decimal("0.00")
+        # prefetch target sets
+        allowed_products = set(self.products.values_list("id", flat=True)) if self.pk else set()
+        allowed_categories = set((self.categories or []))
+
+        for it in items:
+            # item can be {'product_id': x, 'qty': y} or OrderItem instance
+            if hasattr(it, "product_id"):
+                pid = it.product_id
+                qty = it.quantity
+                unit = it.unit_price  # already gross in your app
+                cat = it.product.category
+            else:
+                pid = int(it.get("product_id"))
+                qty = int(it.get("qty"))
+                p = Product.objects.get(pk=pid)
+                unit = Product.vat_included_price(p)  # gross
+                cat = p.category
+
+            ok = True
+            if allowed_products:
+                ok = pid in allowed_products
+            if ok and allowed_categories:
+                ok = cat in allowed_categories
+
+            if ok:
+                subtotal += (unit * qty)
+
+        return subtotal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    def can_apply(self, user, items, cart_subtotal):
+        """
+        Return (ok, reason). Usage limits are checked against PAID redemptions.
+        """
+        if not self.active:
+            return False, "Coupon is not active."
+        if not self.is_time_ok():
+            return False, "Coupon is not currently valid."
+        if cart_subtotal < self.min_subtotal:
+            return False, f"Minimum order amount is {self.min_subtotal:.2f} €."
+
+        # usage limits
+        paid_q = CouponRedemption.objects.filter(coupon=self, order__status="paid")
+        if self.max_uses is not None and paid_q.count() >= self.max_uses:
+            return False, "Coupon usage limit reached."
+        if user and self.max_uses_per_user is not None:
+            from server.models import Order as O  # local import to avoid cycles
+            user_paid = paid_q.filter(user=user).count()
+            # Also block if the user already has an open order using this coupon
+            has_open = O.objects.filter(
+                user=user, coupon=self
+            ).exclude(status__in=["cancelled", "failed"]).exists()
+            if user_paid >= self.max_uses_per_user or has_open:
+                return False, "You have already used this coupon."
+
+        # if targeted and nothing matches, block
+        elig = self.eligible_items_subtotal(items)
+        if (self.products.exists() or (self.categories or [])) and elig <= 0:
+            return False, "Coupon does not apply to selected products."
+
+        return True, ""
+
+    def discount_amount(self, user, items, cart_subtotal):
+        """
+        Compute discount in EUR (gross), capped and only on eligible subtotal if targeted.
+        """
+        elig_subtotal = self.eligible_items_subtotal(items)
+        base = elig_subtotal if (self.products.exists() or (self.categories or [])) else cart_subtotal
+        if base <= 0:
+            return Decimal("0.00")
+        if self.kind == "percent":
+            disc = (base * (self.value / Decimal("100")))
+        else:
+            disc = Decimal(self.value)
+
+        if self.max_discount:
+            disc = min(disc, self.max_discount)
+
+        disc = min(disc, base)  # never exceed base
+        return disc.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+class CouponRedemption(models.Model):
+    coupon = models.ForeignKey(Coupon, on_delete=models.CASCADE, related_name="redemptions")
+    user   = models.ForeignKey(User, on_delete=models.CASCADE, related_name="coupon_redemptions")
+    order  = models.OneToOneField("Order", on_delete=models.CASCADE, related_name="coupon_redemption")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = (("coupon", "order"),)
+        indexes = [models.Index(fields=["coupon", "user"])]
+
+#------------------------------Promotion----------------
+
+class Promotion(models.Model):
+    name = models.CharField(max_length=64)  # "Easter 2025", "Summer Sale", ...
+    coupon = models.ForeignKey("Coupon", null=True, blank=True,
+                               on_delete=models.SET_NULL, related_name="promotions")
+    code = models.CharField(max_length=32, blank=True, help_text="Optional manual code (used if coupon FK empty)")
+
+    headline = models.CharField(max_length=120)      # e.g. “Easter Sale”
+    subheadline = models.CharField(max_length=180, blank=True)  # “10% off everything”
+    start_at = models.DateTimeField()
+    end_at   = models.DateTimeField()
+    is_enabled = models.BooleanField(default=True)
+
+    # Styling / placement
+    bg_color = models.CharField(max_length=16, default="#111827")   # hex
+    text_color = models.CharField(max_length=16, default="#ffffff")
+    link_url = models.URLField(blank=True)                          # optional “Shop Now” link
+    image = models.ImageField(upload_to="promos/", null=True, blank=True)
+
+    # Target markets (empty = all)
+    country_whitelist = ArrayField(models.CharField(max_length=2), default=list, blank=True)
+    priority = models.IntegerField(default=0)  # higher wins when overlapping
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-priority", "-updated_at"]
+
+    def __str__(self):
+        return self.name
+
+    def current_code(self) -> str:
+        return (self.coupon.code if self.coupon_id else (self.code or "")).upper()
+
+    def active_now(self, now=None) -> bool:
+        now = now or timezone.now()
+        return self.is_enabled and self.start_at <= now <= self.end_at
 
 # ----------Order Returns ----------
 class ReturnRequest(models.Model):

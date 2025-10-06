@@ -398,8 +398,8 @@ def build_order_context(order):
         "city": getattr(address, "city", getattr(address, "state", "")) or "",
         "phone": getattr(address, "phone", "") or "",
     }
-    print(order)
-    print(total)
+   
+    
     return {
         "order": order,
         "items": items,

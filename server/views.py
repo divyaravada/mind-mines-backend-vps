@@ -16,8 +16,7 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.db import transaction
 from django.utils import timezone
-from datetime import timedelta
-from django.db.models import Avg, Count, Q, UniqueConstraint
+from django.db.models import Avg, Count, Q
 
 
 
@@ -39,12 +38,12 @@ from .pagination import StandardResultsSetPagination
 from .serializers import (
     ProfileSerializer, RegisterSerializer, MyTokenObtainPairSerializer,
     ProductSerializer, ContactMessageSerializer,ReviewWriteSerializer,
-    NewsletterSubscriberSerializer, AddressSerializer, 
-    ReviewSerializer, WishlistSerializer, NaturalStoneSerializer,
+    NewsletterSubscriberSerializer, AddressSerializer, PromotionSerializer,
+    ReviewSerializer, WishlistSerializer, NaturalStoneSerializer,CouponPreviewIn,
     StoneEnquirySerializer, AccountSerializer, OrderCreateSerializer, OrderReadSerializer, 
 )
 from .models import (
-    User, Product, ContactMessage, NewsletterSubscriber,
+    User, Product, ContactMessage, NewsletterSubscriber,CouponRedemption,Promotion,
     Address, Order, Review, Wishlist, NaturalStone, NaturalStoneImage,ReturnRequest,ReturnAttachment
 )
 from .utils.invoices import generate_invoice_pdf
@@ -208,27 +207,40 @@ class GoogleLoginAPIView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
         token = request.data.get("token")
+        if not token:
+            return Response({"detail": "Missing token"}, status=400)
         try:
             idinfo = id_token.verify_oauth2_token(
-                token, GoogleRequest(), settings.SOCIAL_AUTH_GOOGLE_OAUTH2_KEY
+                token,
+                GoogleRequest(),
+                settings.SOCIAL_AUTH_GOOGLE_OAUTH2_KEY,  # must match frontend client ID exactly
             )
+            if idinfo.get("iss") not in {"accounts.google.com", "https://accounts.google.com"}:
+                return Response({"detail": "Invalid issuer"}, status=400)
+
             email = idinfo["email"]
             username = email.split("@")[0]
             full_name = idinfo.get("name", "")
-            user, created = User.objects.get_or_create(email=email, defaults={
-                "username": username, "is_active": True,
-            })
+
+            user, created = User.objects.get_or_create(
+                email=email,
+                defaults={"username": username, "is_active": True},
+            )
             if created and hasattr(user, "profile"):
                 user.profile.full_name = full_name
                 user.profile.save()
+
             refresh = RefreshToken.for_user(user)
             return Response({
                 "refresh": str(refresh),
                 "access": str(refresh.access_token),
                 "user": {"id": user.id, "email": user.email, "username": user.username},
             })
-        except Exception:
-            return Response({"detail": "Google token invalid"}, status=400)
+        except ValueError as e:
+            # token parse/verify issues (audience, exp, etc.)
+            return Response({"detail": f"Google token invalid: {e}"}, status=400)
+        except Exception as e:
+            return Response({"detail": f"Auth error: {e}"}, status=400)
 
 class FacebookLoginAPIView(APIView):
     permission_classes = [AllowAny]
@@ -736,7 +748,7 @@ class OrderDetailAPIView(generics.RetrieveAPIView):
     permission_classes = [IsAuthenticated]
     def get_queryset(self):
         return Order.objects.filter(user=self.request.user)
-    print("OrderDetailAPIView loaded")
+    
 
 class OrderInvoiceAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -806,6 +818,73 @@ class SetTrackingAPIView(APIView):
         inv = generate_invoice_pdf(order)
         send_invoice_email(order)
         return Response({"status": "ok", "invoice": inv.number})
+    
+
+#-----------------------coupon-------------------
+class CouponPreviewAPIView(APIView):
+    permission_classes = [AllowAny]  # if you require auth, switch
+    def post(self, request):
+        s = CouponPreviewIn(data=request.data)
+        s.is_valid(raise_exception=True)
+        code  = s.validated_data["code"]
+        items = s.validated_data["items"]
+
+        # compute subtotal (gross)
+        subtotal = Decimal("0.00")
+        for it in items:
+            p = Product.objects.get(pk=it["product_id"])
+            subtotal += Product.vat_included_price(p) * int(it["qty"])
+
+        from server.models import Coupon
+        coup = Coupon.objects.filter(code__iexact=code.strip()).first()
+        if not coup:
+            return Response({"ok": False, "error": "Coupon not found"}, status=404)
+
+        ok, reason = coup.can_apply(request.user if request.user.is_authenticated else None, items, subtotal)
+        if not ok:
+            return Response({"ok": False, "error": reason}, status=400)
+
+        discount = coup.discount_amount(request.user if request.user.is_authenticated else None, items, subtotal)
+        total = (subtotal - discount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return Response({
+            "ok": True,
+            "code": coup.code,
+            "kind": coup.kind,
+            "value": str(coup.value),
+            "discount": f"{discount:.2f}",
+            "subtotal": f"{subtotal:.2f}",
+            "total": f"{total:.2f}",
+        })
+
+#------------------Promotion-------------
+class ActivePromotionAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        # Use Europe/Berlin by default
+        now = timezone.now()
+        # Optional country targeting (from query or headers)
+        country = (request.GET.get("country")
+                   or request.headers.get("X-Country")
+                   or "DE").upper()
+
+        qs = Promotion.objects.filter(
+            is_enabled=True,
+            start_at__lte=now,
+            end_at__gte=now,
+        ).order_by("-priority", "-updated_at")
+
+        # allow empty whitelist or list containing country
+        qs = qs.filter(Q(country_whitelist=[]) | Q(country_whitelist__contains=[country]))
+
+        promo = qs.first()
+        if not promo:
+            # No active promo
+            return Response({"active": False}, status=200)
+
+        data = PromotionSerializer(promo, context={"request": request}).data
+        data["active"] = True
+        return Response(data, status=200)
 
 # -------------------- Misc --------------------
 
@@ -907,7 +986,7 @@ def _order_lines(items):
             "total_tax_amount": int(tax * 100),
         })
         total_tax += tax
-        print(f"Item {p.id}: unit {unit} total {total} net {net} tax {tax}")
+       
     return lines, int(total_tax * 100)
 
 def _compute_from_items(items):
@@ -1093,6 +1172,14 @@ def stripe_webhook(request):
             changed = True or changed
         if changed:
             order.save(update_fields=["status", "payment_id"])
+
+        #record coupon redemption
+        try:
+            if order.coupon and not hasattr(order, "coupon_redemption"):
+                CouponRedemption.objects.create(coupon=order.coupon, user=order.user, order=order)
+        except Exception:
+            pass
+
             # Generate invoice & send emails (guarded)
             try:
                 inv = generate_invoice_pdf(order)
@@ -1155,6 +1242,34 @@ def _get_or_create_stripe_customer(user, payment_method_id=None):
 
 
 # --- 1) Create SetupIntent so we can save the card ------------------------
+
+class StripeCreateIntent(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        s = OrderCreateSerializer(data=request.data, context={"request": request})
+        s.is_valid(raise_exception=True)
+        with transaction.atomic():
+            order = s.save()
+            order.payment_method = "card"
+            order.status = "pending"
+            order.save(update_fields=["payment_method", "status"])
+
+        amount_cents = int((order.total_price * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        if amount_cents <= 0:
+            return Response({"detail": "Amount must be > 0"}, status=400)
+
+        intent = stripe.PaymentIntent.create(
+            amount=amount_cents,
+            currency=settings.STRIPE_CURRENCY,
+            payment_method_types=["card"],
+            metadata={"order_id": str(order.id)},
+            description=f"Order {order.number or order.id} — MindMines",
+        )
+        order.payment_ref = intent.id
+        order.save(update_fields=["payment_ref"])
+
+        return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
 
 class StripeCreateSetupIntent(APIView):
     permission_classes = [IsAuthenticated]
@@ -1292,7 +1407,26 @@ class StripeCreateInstallments(APIView):
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
 
+class StripeFinalizeOrder(APIView):
+    permission_classes = [IsAuthenticated]
 
+    def post(self, request):
+        order_id = request.data.get("order_id")
+        pi_id    = request.data.get("payment_intent_id")
+        order = get_object_or_404(Order, pk=order_id, user=request.user)
+        pi = stripe.PaymentIntent.retrieve(pi_id)
+
+        if pi.status == "succeeded" and order.payment_ref == pi.id:
+            if order.status != "paid":
+                order.status = "paid"
+                order.payment_id = pi.latest_charge or pi.id
+                order.save(update_fields=["status","payment_id"])
+                try: generate_invoice_pdf(order)
+                except Exception: pass
+                try: send_invoice_email(order)
+                except Exception: pass
+            return Response({"ok": True})
+        return Response({"detail": "Not paid"}, status=400)
 
 # -------------------- Klarna (class-based only) --------------------
 

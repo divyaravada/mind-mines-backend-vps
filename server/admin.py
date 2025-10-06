@@ -4,8 +4,8 @@ from django.utils.html import format_html_join, format_html
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from .models import (
     Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage,
-    StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber,
-    Address, Order, Review,OrderItem, Invoice,ReturnRequest,ReturnAttachment
+    StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber,Coupon,
+    Address, Order, Review,OrderItem, Invoice,ReturnRequest,ReturnAttachment,Promotion
 )
 from .utils.invoices import generate_invoice_pdf 
 from .utils.emails import (
@@ -92,6 +92,23 @@ def set_tracking_and_send(modeladmin, request, queryset):
         inv = generate_invoice_pdf(order)
         send_invoice_email(order)
         
+@admin.register(Coupon)
+class CouponAdmin(admin.ModelAdmin):
+    list_display = ("code","kind","value","active","starts_at","ends_at","min_subtotal")
+    list_filter  = ("active","kind")
+    search_fields = ("code",)
+    filter_horizontal = ("products",)
+
+@admin.register(Promotion)
+class PromotionAdmin(admin.ModelAdmin):
+    list_display = ("name", "code_display", "start_at", "end_at", "is_enabled", "priority")
+    list_filter = ("is_enabled",)
+    search_fields = ("name", "code", "coupon__code")
+    readonly_fields = ("created_at", "updated_at")
+
+    def code_display(self, obj):
+        return obj.current_code()
+    code_display.short_description = "Coupon code"
 
 # ---------- Order ----------
 class OrderItemThroughInline(admin.TabularInline):

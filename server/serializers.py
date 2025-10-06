@@ -1,6 +1,7 @@
 #server/serializers.py
 from rest_framework import serializers
-from .models import ReturnRequest, NaturalStoneImage, OrderItem, User,Profile,Wishlist,NaturalStone,StoneEnquiry, Product,ProductMedia, ContactMessage, NewsletterSubscriber,Address, Order, Review
+from django.utils import timezone
+from .models import Promotion, ReturnRequest, NaturalStoneImage, OrderItem, User,Profile,Wishlist,NaturalStone,StoneEnquiry, Product,ProductMedia, ContactMessage, NewsletterSubscriber,Address, Order, Review
 from django.utils.http import urlsafe_base64_encode
 from django.utils.encoding import force_bytes 
 from django.contrib.auth.password_validation import validate_password
@@ -9,8 +10,7 @@ from django.conf import settings
 from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.core.mail import EmailMultiAlternatives
 from django.contrib.auth.tokens import default_token_generator
-from decimal import Decimal
-from django.utils.text import slugify
+from decimal import Decimal, ROUND_HALF_UP
 
 def _norm(s):
     return " ".join((s or "").strip().split()).lower()
@@ -401,15 +401,16 @@ class OrderReadSerializer(serializers.ModelSerializer):
     is_returnable = serializers.SerializerMethodField()
     return_deadline = serializers.SerializerMethodField()
     payment_method_label = serializers.SerializerMethodField()
+    coupon_code = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = [
             "id", "number", "status", "payment_method","payment_method_label",
-            "subtotal", "shipping_fee", "total_price",
+            "subtotal","discount_amount", "shipping_fee", "total_price",
             "created_at", "updated_at", "tracking_number",
             "items", "invoice_pdf", "is_returnable", "return_deadline",
-            "shipping_address",    
+            "shipping_address",    "coupon_code",
         ]
 
     def get_payment_method_label(self, obj):
@@ -439,6 +440,9 @@ class OrderReadSerializer(serializers.ModelSerializer):
         from datetime import timedelta
         return (obj.created_at + timedelta(days=1)).isoformat()
     
+    def get_coupon_code(self, obj):
+        return getattr(obj.coupon, "code", None)
+    
 # ✅ Return request
 class ReturnRequestSerializer(serializers.ModelSerializer):
     class Meta:
@@ -457,7 +461,7 @@ class OrderCreateSerializer(serializers.Serializer):
         choices=[c[0] for c in Order._meta.get_field("payment_method").choices],
         default="card",
     )
-
+    coupon_code = serializers.CharField(allow_blank=True, required=False)
     address_id = serializers.IntegerField(required=False)
     first_name = serializers.CharField(allow_blank=True, required=False)
     last_name  = serializers.CharField(allow_blank=True, required=False)
@@ -519,7 +523,19 @@ class OrderCreateSerializer(serializers.Serializer):
             addr.set_default_for_user()
         return addr
 
-    
+    def _apply_coupon(self, user, items, subtotal, code):
+        if not code:
+            return None, Decimal("0.00"), None
+        from server.models import Coupon
+        coup = Coupon.objects.filter(code__iexact=str(code).strip()).first()
+        if not coup:
+            raise serializers.ValidationError({"coupon_code": "Coupon not found."})
+        ok, reason = coup.can_apply(user, items, subtotal)
+        if not ok:
+            raise serializers.ValidationError({"coupon_code": reason})
+        disc = coup.discount_amount(user, items, subtotal)
+        return coup, disc, None
+
     def create(self, validated):
         user = self.context["request"].user
         # create/update address
@@ -536,8 +552,16 @@ class OrderCreateSerializer(serializers.Serializer):
             order_items.append(oi)
             subtotal += Product.vat_included_price(product) * qty
 
+        coupon_code = validated.get("coupon_code", "").strip()
+        coupon_obj, discount, _ = self._apply_coupon(user, items_in, subtotal, coupon_code)
+        
         shipping_fee = Decimal("0.00")  
         total = (subtotal + shipping_fee).quantize(Decimal("0.01"))
+
+        total = (subtotal - discount + shipping_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if total < 0:
+            total = Decimal("0.00")
+
         
         order = Order.objects.create(
             user=user,
@@ -547,6 +571,8 @@ class OrderCreateSerializer(serializers.Serializer):
             shipping_fee=shipping_fee,
             total_price=total,
             shipping_address=addr,
+            coupon=coupon_obj,
+            discount_amount=discount
         )
         order.items.add(*order_items)
         return order
@@ -567,6 +593,51 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             'product', 'shipping_address'
         ]
  
+
+#-------------- Coupon ---------------
+class CouponPreviewIn(serializers.Serializer):
+    code  = serializers.CharField()
+    items = OrderItemIn(many=True)
+
+#-----------Promotion---------------
+class PromotionSerializer(serializers.ModelSerializer):
+    code = serializers.SerializerMethodField()
+    image = serializers.SerializerMethodField()
+    remaining_seconds = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Promotion
+        fields = [
+            "id", "headline", "subheadline", "code",
+            "start_at", "end_at", "remaining_seconds",
+            "bg_color", "text_color", "link_url", "image"
+        ]
+
+    def _abs(self, request, url: str) -> str:
+        if not url:
+            return ""
+        if request and not str(url).startswith("http"):
+            return request.build_absolute_uri(url)
+        return url
+
+    def get_code(self, obj):
+        return obj.current_code()
+
+    def get_image(self, obj):
+        req = self.context.get("request")
+        try:
+            if obj.image and hasattr(obj.image, "url"):
+                return self._abs(req, obj.image.url)
+        except Exception:
+            pass
+        return ""
+
+    def get_remaining_seconds(self, obj):
+        now = timezone.now()
+        if obj.end_at <= now:
+            return 0
+        delta = obj.end_at - now
+        return max(0, int(delta.total_seconds()))
 
 class ReviewSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source="product.title_en", read_only=True)

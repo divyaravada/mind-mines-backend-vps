@@ -16,7 +16,9 @@ from .views import (
      PaypalCreateOrder, PaypalCaptureOrder,OrderCreateView,
      InvoiceDownloadView, KlarnaCreateSession, KlarnaConfirm,OrderAdminUpdateAPIView,AccountDeleteRequestView,
      CreateBankTransferOrder, StoneEnquiryCreateView,OrderDetailAPIView,SetTrackingAPIView,OrderInvoiceAPIView,
-     OrderCancelRequestAPIView,OrderRequestReturnAPIView,StripeCreateSetupIntent,StripeCreateInstallments
+   StripeFinalizeOrder,CouponPreviewAPIView,ActivePromotionAPIView,
+     
+     OrderCancelRequestAPIView,OrderRequestReturnAPIView,StripeCreateSetupIntent,StripeCreateInstallments,stripe_webhook,StripeCreateIntent
 )
 
 router = DefaultRouter()
@@ -76,8 +78,11 @@ urlpatterns = [
     path("payments/paypal/capture/<str:order_id>/", PaypalCaptureOrder.as_view()),
 
     #Stripe
-    path("api/payments/stripe/create-setup-intent/", StripeCreateSetupIntent.as_view()),
-    path("api/payments/stripe/create-installments/", StripeCreateInstallments.as_view()),
+    path("payments/stripe/create-intent/", StripeCreateIntent.as_view()),
+    path("payments/stripe/create-setup-intent/", StripeCreateSetupIntent.as_view()),
+    path("payments/stripe/create-installments/", StripeCreateInstallments.as_view()),
+    path("payments/stripe/webhook/", stripe_webhook),
+    path("payments/stripe/finalize/", StripeFinalizeOrder.as_view()),
 
     # Klarna
     path("payments/klarna/session/", KlarnaCreateSession.as_view()),
@@ -88,6 +93,12 @@ urlpatterns = [
 
     # Invoice
     path("orders/<int:pk>/invoice/", InvoiceDownloadView.as_view()),
+
+    #Coupon
+    path("coupons/apply/", CouponPreviewAPIView.as_view()),
+    
+    #Promotion
+    path("promos/active/", ActivePromotionAPIView.as_view()),
 ] 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

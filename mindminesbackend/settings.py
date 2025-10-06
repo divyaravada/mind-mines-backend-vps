@@ -29,9 +29,9 @@ environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
 SECRET_KEY = 'django-insecure-7^uze)9(a$8&l#o&$h&6%x)t!es*(uvf3gqpcod$z%xrqi@)2y'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
+DEBUG = True
 
-ALLOWED_HOSTS = ["mindmines.eu", "www.mindmines.eu"]
+ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
 
 AUTH_USER_MODEL = 'server.User'
 
@@ -171,8 +171,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = "/static/"
-STATIC_ROOT =  "/mindminesbackend/static"  # for collectstatic
-MEDIA_URL = "/mindminesbackend/media/"
+STATIC_ROOT = BASE_DIR / "staticfiles"  # for collectstatic
+MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -228,8 +228,8 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_ALL_ORIGINS = True   # dev only
 CORS_ALLOW_CREDENTIALS = True   # <-- correct name (not CORS_ALLOWS_*)
 CSRF_TRUSTED_ORIGINS = [
-    "http://mindmines.eu",
-    "http://www.mindmines.eu",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
 ]
 # If you deploy to a domain, add it here too.
 
@@ -247,6 +247,7 @@ REST_FRAMEWORK = {
 LOGGING = {
     "version": 1,
     "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "root": {"handlers": ["console"], "level": "INFO"},
     "loggers": {
         "django.request": {"handlers": ["console"], "level": "DEBUG"},
         "rest_framework": {"handlers": ["console"], "level": "DEBUG"},
@@ -288,6 +289,15 @@ PASSWORD_RESET_TIMEOUT = 60 * 60 * 3
 PAYPAL_CLIENT_ID =env("PAY_PAL_CLIENT_ID")
 PAYPAL_CLIENT_SECRET = env("PAY_PAL_SECRET_KEY")
 PAYPAL_ENV ="sandbox" # "sandbox" | "live"
+
+PAYPAL_BASE = (
+    "https://api-m.sandbox.paypal.com" if PAYPAL_ENV == "sandbox" else "https://api-m.paypal.com"
+)
+
+STRIPE_SECRET_KEY =env("STRIPE_SECRET_KEY",    default="")
+STRIPE_PUBLISHABLE_KEY = env("STRIPE_PUBLISHABLE_KEY",    default="")
+STRIPE_WEBHOOK_SECRET = env("STRIPE_WEBHOOK_SECRET",   default="")
+STRIPE_CURRENCY = "eur"
 
 KLARNA_USERNAME =  ""
 KLARNA_PASSWORD =""
