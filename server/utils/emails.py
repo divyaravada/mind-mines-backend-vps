@@ -31,7 +31,7 @@ MAX_ATTACH_BYTES = 14 * 1024 * 1024
 
 def _fmt(amount): return f"{float(amount):.2f} {CURRENCY}"
 
-FRONTEND_ORDERS_URL = getattr(settings, "FRONTEND_ORDERS_URL", "http://localhost:3000/account/orders")
+FRONTEND_ORDERS_URL = getattr(settings, "FRONTEND_ORDERS_URL", "https://mindmines.eu/account/orders")
 
 
 
@@ -48,8 +48,85 @@ def _payment_method_label(order) -> str:
             return str(disp)
     except Exception:
         pass
-    # Fallback to your manual mapping (covers unusual codes)
-    return _payment_method_label(getattr(order, "payment_method", ""))
+    # fallback mapping
+    mapping = {
+        "sepa_debit": "SEPA Direct Debit",
+        "card": "Card",
+        "paypal": "PayPal",
+        "klarna": "Klarna",
+        "bank": "Bank Transfer",
+    }
+    code = (getattr(order, "payment_method", "") or "").lower()
+    return mapping.get(code, code.title() or "Payment")
+
+def send_sepa_pending_email(order, user_locale="en"):
+    """
+    Immediate email telling the customer SEPA can take 2–5 banking days.
+    No invoice is attached here.
+    Idempotent: safe to call multiple times; the user just sees the same info.
+    """
+    prior = get_language()
+    try:
+        activate(user_locale or "en")
+
+        to_email = getattr(order.user, "email", None)
+        if not to_email:
+            return
+
+        created_display = localtime(order.created_at).strftime("%Y-%m-%d %H:%M")
+
+        # Build a minimal context
+        ctx = {
+            "order": order,
+            "created_at_display": created_display,
+            "payment_method_display": _payment_method_label(order),
+            "total_display": _fmt(order.total_price or 0),
+            "sepa_notice_days": "2–5",
+            "orders_url": getattr(settings, "FRONTEND_ORDERS_URL", "https://mindmines.eu/account/orders"),
+        }
+
+        # Try templates first; if missing, use inline fallbacks
+        try:
+            subject = render_to_string("emails/sepa_pending_subject.txt", ctx).strip()
+        except Exception:
+            subject = f"SEPA payment initiated for order {order.number}"
+
+        try:
+            text = render_to_string("emails/sepa_pending.txt", ctx)
+        except Exception:
+            text = (
+                f"Thanks! We’ve received your SEPA Direct Debit request for order {order.number}.\n\n"
+                f"The bank will process the payment in 2–5 working days. "
+                f"We’ll email your invoice once the payment succeeds.\n\n"
+                f"Order total: {ctx['total_display']}\n"
+                f"Placed at: {ctx['created_at_display']}\n\n"
+                f"You can review your order here: {ctx['orders_url']}\n"
+            )
+
+        try:
+            html = render_to_string("emails/sepa_pending.html", ctx)
+        except Exception:
+            html = (
+                f"<p>Thanks! We’ve received your <b>SEPA Direct Debit</b> request for order <b>{order.number}</b>.</p>"
+                f"<p>The bank will process the payment in <b>2–5 working days</b>. "
+                f"We’ll email your <b>invoice</b> once the payment succeeds.</p>"
+                f"<p><b>Order total:</b> {ctx['total_display']}<br>"
+                f"<b>Placed at:</b> {ctx['created_at_display']}</p>"
+                f"<p><a href='{ctx['orders_url']}'>View your orders</a></p>"
+            )
+
+        msg = EmailMultiAlternatives(
+            subject=subject or f"SEPA payment initiated for {order.number}",
+            body=text,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[to_email],
+            reply_to=getattr(settings, "ORDER_EMAIL_REPLY_TO", []),
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send(fail_silently=True)
+
+    finally:
+        activate(prior)
 
 
 def _build_items_table_and_totals(order):

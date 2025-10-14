@@ -29,9 +29,9 @@ environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
 SECRET_KEY = 'django-insecure-7^uze)9(a$8&l#o&$h&6%x)t!es*(uvf3gqpcod$z%xrqi@)2y'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = False
 
-ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+ALLOWED_HOSTS = ["mindmines.eu", "www.mindmines.eu"]
 
 AUTH_USER_MODEL = 'server.User'
 
@@ -52,7 +52,7 @@ ORDERS_ADMIN_EMAIL = "info@mindmines.eu"
 INSTALLED_APPS = [
     'jazzmin',
     
-    'django.contrib.admin',
+     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
@@ -74,12 +74,9 @@ INSTALLED_APPS = [
     'social_django',
     'djoser',
     'django_filters',
-    
 
-    #custom Apps    
-     "server.apps.ServerConfig",
+	 "server.apps.ServerConfig",
 ]
-
 SITE_ID = 1
 
 
@@ -135,7 +132,6 @@ DATABASES = {
     }
 }
 
-
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
@@ -166,14 +162,16 @@ USE_I18N = True
 
 USE_TZ = True
 
-
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = "/static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"  # for collectstatic
+STATIC_URL = "/djstatic/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# If using user uploads:
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Default primary key field type
@@ -203,7 +201,7 @@ ADMIN_EMAIL =EMAIL_HOST_USER
 ADMINS = [("Errors", "info@mindmines.eu")] 
 
 # Where to point verification links
-FRONTEND_URL =  "http://localhost:3000"
+FRONTEND_URL =  "https://mindmines.eu"
 
 # Templates DIR fix (use absolute path)
 TEMPLATES[0]["DIRS"] = [BASE_DIR / "templates"]
@@ -222,17 +220,29 @@ ACCOUNT_USER_MODEL_USERNAME_FIELD = None
 
 # CORS / CSRF for Vite dev on 5173
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
+    "https://mindmines.eu",
+    "https://www.mindmines.eu",
 ]
-CORS_ALLOW_ALL_ORIGINS = True   # dev only
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "content-type",
+    "origin",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+]
+CORS_ALLOW_METHODS = ["GET", "POST", "OPTIONS"]
 CORS_ALLOW_CREDENTIALS = True   # <-- correct name (not CORS_ALLOWS_*)
 CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
+    "https://mindmines.eu",
+    "https://www.mindmines.eu",
 ]
 # If you deploy to a domain, add it here too.
-
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
 
 
 REST_FRAMEWORK = {
@@ -286,15 +296,15 @@ PASSWORD_RESET_TIMEOUT = 60 * 60 * 3
 
 
 # --- Payments env (use .env in real) ---
-PAYPAL_CLIENT_ID =env("PAY_PAL_CLIENT_ID")
-PAYPAL_CLIENT_SECRET = env("PAY_PAL_SECRET_KEY")
-PAYPAL_ENV ="sandbox" # "sandbox" | "live"
+PAYPAL_CLIENT_ID = env("PAY_PAL_CLIENT_ID", default="")
+PAYPAL_CLIENT_SECRET = env("PAY_PAL_SECRET_KEY", default="")
+PAYPAL_ENV = env("PAYPAL_ENV", default="live")
 
 PAYPAL_BASE = (
-    "https://api-m.sandbox.paypal.com" if PAYPAL_ENV == "sandbox" else "https://api-m.paypal.com"
+    "https://api-m.paypal.com"
 )
 
-STRIPE_SECRET_KEY =env("STRIPE_SECRET_KEY",    default="")
+STRIPE_SECRET_KEY = env("STRIPE_SECRET_KEY",    default="")
 STRIPE_PUBLISHABLE_KEY = env("STRIPE_PUBLISHABLE_KEY",    default="")
 STRIPE_WEBHOOK_SECRET = env("STRIPE_WEBHOOK_SECRET",   default="")
 STRIPE_CURRENCY = "eur"
@@ -302,3 +312,4 @@ STRIPE_CURRENCY = "eur"
 KLARNA_USERNAME =  ""
 KLARNA_PASSWORD =""
 KLARNA_ENV =  "playground"  # playground | live            
+

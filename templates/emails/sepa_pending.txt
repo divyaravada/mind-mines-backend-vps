@@ -1,0 +1,12 @@
+Thanks! We’ve received your SEPA Direct Debit request for order {{ order.number }}.
+
+The bank will process the payment in {{ sepa_notice_days }} working days. We’ll email your invoice as soon as the payment succeeds.
+
+Order total: {{ total_display }}
+Placed at: {{ created_at_display }}
+Payment method: {{ payment_method_display }}
+
+You can review your order here:
+{{ orders_url }}
+
+If you didn’t authorize this payment, please reply to this email immediately.

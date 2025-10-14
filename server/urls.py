@@ -16,9 +16,9 @@ from .views import (
      PaypalCreateOrder, PaypalCaptureOrder,OrderCreateView,
      InvoiceDownloadView, KlarnaCreateSession, KlarnaConfirm,OrderAdminUpdateAPIView,AccountDeleteRequestView,
      CreateBankTransferOrder, StoneEnquiryCreateView,OrderDetailAPIView,SetTrackingAPIView,OrderInvoiceAPIView,
-   StripeFinalizeOrder,CouponPreviewAPIView,ActivePromotionAPIView,
-     
-     OrderCancelRequestAPIView,OrderRequestReturnAPIView,StripeCreateSetupIntent,StripeCreateInstallments,stripe_webhook,StripeCreateIntent
+   CouponPreviewAPIView,ActivePromotionAPIView,StripeCreateSepaIntent,StripeCreateSepaSetupIntent,StripeSepaCreateInstallments,
+stripe_webhook,StripeCreateIntent,StripeCreateGiropayIntent,
+     OrderCancelRequestAPIView,OrderRequestReturnAPIView
 )
 
 router = DefaultRouter()
@@ -70,8 +70,8 @@ urlpatterns = [
     path("admin/orders/<int:pk>/", OrderAdminUpdateAPIView.as_view()),
     path("orders/<int:pk>/request-cancel/", OrderCancelRequestAPIView.as_view()),
     path("orders/<int:pk>/request-return/", OrderRequestReturnAPIView.as_view()),
-    
-    
+
+
 
      # PayPal
     path("payments/paypal/create-order/", PaypalCreateOrder.as_view()),
@@ -79,10 +79,11 @@ urlpatterns = [
 
     #Stripe
     path("payments/stripe/create-intent/", StripeCreateIntent.as_view()),
-    path("payments/stripe/create-setup-intent/", StripeCreateSetupIntent.as_view()),
-    path("payments/stripe/create-installments/", StripeCreateInstallments.as_view()),
+    path("payments/stripe/sepa/create-intent/", StripeCreateSepaIntent.as_view()),
+    path("payments/stripe/sepa/create-setup-intent/", StripeCreateSepaSetupIntent.as_view()),
+    path("payments/stripe/create-installments/", StripeSepaCreateInstallments.as_view()),
+    path("payments/stripe/giropay/create-intent/", StripeCreateGiropayIntent.as_view()),
     path("payments/stripe/webhook/", stripe_webhook),
-    path("payments/stripe/finalize/", StripeFinalizeOrder.as_view()),
 
     # Klarna
     path("payments/klarna/session/", KlarnaCreateSession.as_view()),
@@ -96,10 +97,10 @@ urlpatterns = [
 
     #Coupon
     path("coupons/apply/", CouponPreviewAPIView.as_view()),
-    
+
     #Promotion
     path("promos/active/", ActivePromotionAPIView.as_view()),
-] 
+]
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 

@@ -1,0 +1,1 @@
+SEPA-Lastschrift für Bestellung {{ order.number }} gestartet

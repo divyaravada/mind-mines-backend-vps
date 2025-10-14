@@ -326,12 +326,6 @@ ORDER_STATUS = [
     ("failed", "Failed"),
 ]
 
-PAYMENT_METHODS = [
-    ("card", "Card"),
-    ("paypal", "PayPal"),
-    ("bank", "Bank Transfer"),
-    ("klarna", "Klarna"),
-]
 
 class OrderItem(models.Model):
     product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="order_items")
@@ -353,23 +347,30 @@ class OrderItem(models.Model):
         return f"{self.product_name} x {self.quantity}"
 
 class Order(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='orders')
+    PAYMENT_METHODS = [
+        ("card", "Card"),
+        ("sepa_debit", "SEPA Direct Debit"),
+        ("paypal", "PayPal"),
+        ("giropay", "giropay"),
+        ("sofort", "Sofort"),
+        ("klarna", "Klarna"),
+        ("bank_transfer", "Bank Transfer"),
+    ]
+    user = models.ForeignKey("server.User", on_delete=models.CASCADE, related_name='orders')
 
     # legacy (optional)
-    product = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True, blank=True)
+    product = models.ForeignKey("server.Product", on_delete=models.SET_NULL, null=True, blank=True)
     quantity = models.PositiveIntegerField(null=True, blank=True)
 
     # NEW
-    items = models.ManyToManyField('OrderItem', blank=True, related_name='orders')
+    items = models.ManyToManyField('server.OrderItem', blank=True, related_name='orders')
     payment_method = models.CharField(
-        max_length=16,
-        choices=[("paypal","PayPal"),("card","Card"),("klarna","Klarna"),("bank","Bank Transfer")],
-        default="paypal",
+        max_length=32,
+        choices=PAYMENT_METHODS, default="card"
     )
     status = models.CharField(
         max_length=32,
-        choices=[("pending","Pending"),("paid","Paid"),("processing","Processing"),
-                 ("shipped","Shipped"),("delivered","Delivered"),("cancelled","Cancelled")],
+        choices=ORDER_STATUS,
         default="pending",
     )
     payment_ref = models.CharField(max_length=128, blank=True, default="")
@@ -379,14 +380,14 @@ class Order(models.Model):
     invoice_number = models.CharField(max_length=32, blank=True, null=True, default=None)
     invoice_pdf = models.FileField(upload_to="invoices/", blank=True, null=True)
 
-    coupon = models.ForeignKey("Coupon", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders")
+    coupon = models.ForeignKey("server.Coupon", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders")
     discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
 
     subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     shipping_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     total_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     installments_months = models.PositiveIntegerField(null=True, blank=True)  
-    shipping_address = models.ForeignKey('Address', on_delete=models.SET_NULL, null=True, blank=True)
+    shipping_address = models.ForeignKey('server.Address', on_delete=models.SET_NULL, null=True, blank=True)
     number = models.CharField(max_length=32, unique=True, null=True, blank=True, default=None)  # ← avoid ""
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

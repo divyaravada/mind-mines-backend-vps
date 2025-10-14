@@ -1,0 +1,27 @@
+# Python / Django
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+
+# Django collectstatic & uploads
+staticfiles/
+media/
+
+# Env & local overrides
+.env
+.env.*
+*.local
+.nenv
+
+# Editors / misc
+.DS_Store
+*.swp
+*.swo
+nano.*.save
+
+# Build / temp
+*.bak

@@ -1,0 +1,1 @@
+SEPA payment initiated for order {{ order.number }}

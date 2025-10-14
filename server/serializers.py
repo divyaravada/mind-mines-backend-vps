@@ -458,7 +458,7 @@ class OrderItemIn(serializers.Serializer):
 class OrderCreateSerializer(serializers.Serializer):
     items = OrderItemIn(many=True)
     payment_method = serializers.ChoiceField(
-        choices=[c[0] for c in Order._meta.get_field("payment_method").choices],
+         choices=[c[0] for c in Order.PAYMENT_METHODS],
         default="card",
     )
     coupon_code = serializers.CharField(allow_blank=True, required=False)
@@ -475,6 +475,31 @@ class OrderCreateSerializer(serializers.Serializer):
     # Legacy (optional)
     house_number = serializers.CharField(allow_blank=True, required=False)
     street_name  = serializers.CharField(allow_blank=True, required=False)
+
+    def validate_payment_method(self, v: str) -> str:
+        # Accept common aliases and map them to your canonical choices
+        aliases = {
+            "sepa": "sepa_debit",
+            "stripe_sepa": "sepa_debit",
+            "stripe_card": "card",
+            "credit_card": "card",
+            "debit_card": "card",
+            "bancontact": "bancontact",   # only if present in your model choices
+            "giropay": "giropay",
+            "sofort": "sofort",
+            "klarna": "klarna",
+            "bank": "bank_transfer",
+            "bank_transfer": "bank_transfer",
+            "paypal": "paypal",
+        }
+        key = (v or "").strip().lower()
+        mapped = aliases.get(key, key)
+
+        # Re-validate against the model's actual choices
+        valid = {c[0] for c in Order.PAYMENT_METHODS}
+        if mapped not in valid:
+            raise serializers.ValidationError(f"'{v}' is not a valid choice.")
+        return mapped
 
     def _resolve_address(self, user, validated):
         aid = validated.get("address_id")
@@ -523,6 +548,7 @@ class OrderCreateSerializer(serializers.Serializer):
             addr.set_default_for_user()
         return addr
 
+
     def _apply_coupon(self, user, items, subtotal, code):
         if not code:
             return None, Decimal("0.00"), None
@@ -540,7 +566,7 @@ class OrderCreateSerializer(serializers.Serializer):
         user = self.context["request"].user
         # create/update address
         addr = self._resolve_address(user, validated)
-        
+
 
         # build order items
         items_in = validated["items"]
