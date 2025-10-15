@@ -1178,6 +1178,13 @@ class PaypalCaptureOrder(PaypalBase):
 # ------------ Stripe ---------------------------
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
+PAYMENT_METHOD_MAP = {
+    "card": "card",
+    "sepa_debit": "sepa_debit",
+    "giropay": "giropay",
+   
+}
+
 try:
     StripeError = stripe.error.StripeError
     CardError = stripe.error.CardError
@@ -1401,6 +1408,27 @@ class StripeCreateBankTransferIntent(APIView):
             status=201,
         )
 
+# ============================================================================
+# 1b) EU Credit Card Transfer via Customer Balance (SEPA credit transfer)
+# ============================================================================
+class StripeCreateCardSetupIntent(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            customer_id = _get_or_create_stripe_customer(request.user)
+            si = stripe.SetupIntent.create(
+                customer=customer_id,
+                payment_method_types=["card"],
+                usage="off_session",
+            )
+            return Response({"clientSecret": si.client_secret})
+        except CardError as e:
+            return Response({"detail": str(e)}, status=400)
+        except StripeError as e:
+            return Response({"detail": str(e)}, status=502)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=500)
 # ============================================================================
 # 2) SEPA SetupIntent (reusable mandate) for installments
 # ============================================================================
