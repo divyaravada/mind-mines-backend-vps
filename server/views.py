@@ -1321,94 +1321,69 @@ class StripeCreateBankTransferIntent(APIView):
 
     def post(self, request):
         data = request.data.copy()
-        data["payment_method"] = "bank_transfer_sepa"
+        # Don't let serializer validate "payment_method"
+        data.pop("payment_method", None)
 
-        # Build local order (pending)
         s = OrderCreateSerializer(data=data, context={"request": request})
-        s.is_valid(raise_exception=True)
+        if not s.is_valid():
+            # 👇 see exactly what field failed (items, address, coupon, etc.)
+            return Response({"ok": False, "errors": s.errors}, status=400)
+
         with transaction.atomic():
             order = s.save()
-            order.payment_method = "bank_transfer_sepa"
+            order.payment_method = "bank"  # keep consistent with your choices
             order.status = "pending"
             order.save(update_fields=["payment_method", "status"])
 
         try:
             customer_id = _get_or_create_stripe_customer(request.user)
-
-            # Create PI with Customer Balance → Bank Transfer (EU)
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                 customer=customer_id,
                 description=f"Order {order.number or order.id} — MindMines",
                 metadata={"order_id": str(order.id)},
-
                 payment_method_types=["customer_balance"],
                 payment_method_data={"type": "customer_balance"},
                 payment_method_options={
                     "customer_balance": {
                         "funding_type": "bank_transfer",
-                        "bank_transfer": {
-                            "type": "eu_bank_transfer",
-                            "eu_bank_transfer": {"country": "DE"},
-                        },
+                        "bank_transfer": {"type": "eu_bank_transfer", "eu_bank_transfer": {"country": "DE"}},
                     }
                 },
-                confirm=True,  # IMPORTANT: confirm on the server ONCE
+                confirm=True,
             )
         except CardError as e:
-            order.status = "failed"
-            order.save(update_fields=["status"])
-            return Response({"detail": str(e)}, status=400)
+            # CardError -> 400 with details
+            return Response({"ok": False, "detail": e.user_message or str(e)}, status=400)
         except StripeError as e:
-            order.status = "failed"
-            order.save(update_fields=["status"])
-            return Response({"detail": str(e)}, status=502)
+            return Response({"ok": False, "detail": str(e)}, status=502)
         except Exception as e:
-            order.status = "failed"
-            order.save(update_fields=["status"])
-            return Response({"detail": str(e)}, status=500)
+            return Response({"ok": False, "detail": str(e)}, status=500)
 
         order.payment_ref = intent.id
         order.save(update_fields=["payment_ref"])
 
-        # Pull bank-transfer instructions off next_action
         na = getattr(intent, "next_action", {}) or {}
-        instr = na.get("display_bank_transfer_instructions", {})
-
+        instr = na.get("display_bank_transfer_instructions", {}) or {}
         reference = instr.get("reference") or f"ORDER-{order.id}"
-        amount_rem = instr.get("amount_remaining")  # cents
+        amount_rem = instr.get("amount_remaining") or _amount_cents(order.total_price)
         currency = (instr.get("currency") or "eur").upper()
 
         iban = bic = beneficiary = None
-        for fa in instr.get("financial_addresses", []):
+        for fa in instr.get("financial_addresses", []) or []:
             if fa.get("type") == "iban" and fa.get("iban"):
                 iban = (fa["iban"].get("iban") or "").replace(" ", "")
                 bic = fa["iban"].get("bic")
                 beneficiary = fa["iban"].get("account_holder_name") or "MindMines"
                 break
 
-        # Optional: email instructions if you have a helper (safe to ignore if missing)
-        try:
-            from server.utils.email import send_bank_transfer_instructions_email
-            send_bank_transfer_instructions_email(
-                order,
-                iban=iban,
-                bic=bic,
-                beneficiary=beneficiary or "MindMines",
-                reference=reference,
-                amount=amount_rem or _amount_cents(order.total_price),
-                currency=currency,
-            )
-        except Exception:
-            pass
-
         return Response(
             {
                 "ok": True,
                 "order_id": order.id,
                 "order_number": getattr(order, "number", None),
-                "amount": amount_rem or _amount_cents(order.total_price),  # cents
+                "amount": amount_rem,
                 "currency": currency,
                 "iban": iban,
                 "bic": bic,
