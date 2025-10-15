@@ -1038,10 +1038,6 @@ class PaypalBase(APIView):
 
 
 class PaypalCreateOrder(PaypalBase):
-    """
-    Creates a local Order (Pending) and a PayPal order.
-    Returns { id: <paypal_id>, order_id: <local_order_id> }.
-    """
     def post(self, request):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
@@ -1062,7 +1058,11 @@ class PaypalCreateOrder(PaypalBase):
         if not token:
             return Response({"detail": "FAILED_TO_GET_TOKEN", "error": err}, status=502)
 
-        # 3) Build PayPal payload WITHOUT breakdown (uses only grand total)
+        # 3) Build PayPal payload WITHOUT breakdown (only total)
+        from decimal import Decimal
+        import json, uuid
+        import requests as http
+
         amount_value = f"{Decimal(order.total_price).quantize(Decimal('0.01')):.2f}"
 
         payload = {
@@ -1079,11 +1079,11 @@ class PaypalCreateOrder(PaypalBase):
                 "brand_name": getattr(settings, "PAYPAL_BRAND_NAME", "MindMines"),
                 "landing_page": "LOGIN",
                 "user_action": "PAY_NOW",
-                "shipping_preference": "NO_SHIPPING",  # change later if you want to send address
+                "shipping_preference": "NO_SHIPPING",
             },
         }
 
-        # 4) Create order (idempotent)
+        # 4) Create PayPal order (idempotent)
         req_id = f"create-{order.id}-{uuid.uuid4()}"
         try:
             resp = http.post(
