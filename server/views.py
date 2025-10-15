@@ -1045,7 +1045,11 @@ class PaypalCreateOrder(PaypalBase):
         # 1) Create local order (server computes totals)
         try:
             s = OrderCreateSerializer(data=request.data, context={"request": request})
-            s.is_valid(raise_exception=True)
+            if not s.is_valid():
+                return Response(
+                    {"detail": "VALIDATION_FAILED", "errors": s.errors},
+                    status=400
+                )
             with transaction.atomic():
                 order = s.save()
                 order.payment_method = "paypal"
