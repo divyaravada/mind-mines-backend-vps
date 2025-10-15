@@ -1001,17 +1001,8 @@ def _compute_from_items(items):
 
 # -------------------- PayPal --------------------
 
-def _d2(value) -> Decimal:
-    return (Decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-
-def _pp_headers(token: str, request_id: str | None = None) -> dict:
-    h = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    if request_id:
-        h["PayPal-Request-Id"] = request_id  # idempotency
-    return h
+def d2(x):
+    return Decimal(x).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 class PaypalBase(APIView):
     permission_classes = [IsAuthenticated]
@@ -1055,89 +1046,75 @@ class PaypalCreateOrder(PaypalBase):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
 
-        # build local order first
-        s = OrderCreateSerializer(data=request.data, context={"request": request})
-        s.is_valid(raise_exception=True)
-        with transaction.atomic():
-            order = s.save()
-            order.payment_method = "paypal"
-            order.save(update_fields=["payment_method"])
+        # 1) Create local order (catch errors from .save())
+        try:
+            s = OrderCreateSerializer(data=request.data, context={"request": request})
+            s.is_valid(raise_exception=True)
+            with transaction.atomic():
+                order = s.save()
+                order.payment_method = "paypal"
+                order.save(update_fields=["payment_method"])
+        except Exception as e:
+            return Response(
+                {"detail": "LOCAL_ORDER_CREATE_FAILED", "error": str(e)},
+                status=500
+            )
 
+        # 2) Get PayPal token
         token, err = self._token()
         if not token:
-            return Response({"detail": "Failed to obtain PayPal token", "error": err}, status=502)
-        
-         # Amount breakdown (all server-side)
-        amount_value = _d2(order.total_price)
-        breakdown = {
-            "item_total": {"currency_code": "EUR", "value": f"{_d2(order.items_total):.2f}"},
-            "shipping":   {"currency_code": "EUR", "value": f"{_d2(order.shipping_total):.2f}"},
-            "tax_total":  {"currency_code": "EUR", "value": f"{_d2(order.tax_total):.2f}"},
-            "discount":   {"currency_code": "EUR", "value": f"{_d2(order.discount_total):.2f}"},
-        }
+            return Response({"detail": "FAILED_TO_GET_TOKEN", "error": err}, status=502)
 
-        # Buyer name/address from request serializer (validated)
-        first_name = s.validated_data.get("first_name") or ""
-        last_name  = s.validated_data.get("last_name") or ""
-        address_line1 = s.validated_data.get("address_line1") or ""
-        address_line2 = s.validated_data.get("address_line2") or ""
-        postal_code   = s.validated_data.get("postal_code") or ""
-        city          = s.validated_data.get("city") or ""
-        country_code  = "DE" if (s.validated_data.get("country") or "").lower().startswith("germ") else "DE"
-
-
+        # 3) Build payload (amount from server-side totals only)
         payload = {
             "intent": "CAPTURE",
             "purchase_units": [{
-                "custom_id": str(order.id),       # shows in backoffice
-                "reference_id": str(order.id),    # link local<->paypal
+                "reference_id": str(order.id),
+                "custom_id": str(order.id),
                 "amount": {
                     "currency_code": "EUR",
-                    "value": f"{amount_value:.2f}",
-                    "breakdown": breakdown,
-                },
-                "shipping": {
-                    "name": {"full_name": f"{first_name} {last_name}".strip()},
-                    "address": {
-                        "address_line_1": address_line1[:300],
-                        "address_line_2": address_line2[:300],
-                        "admin_area_2": city[:120],
-                        "postal_code": postal_code[:60],
-                        "country_code": country_code,
-                    },
+                    "value": f"{d2(order.total_price):.2f}",
+                    # optionally add breakdown here if you track it:
+                    # "breakdown": {...}
                 },
             }],
             "application_context": {
                 "brand_name": getattr(settings, "PAYPAL_BRAND_NAME", "MindMines"),
                 "landing_page": "LOGIN",
                 "user_action": "PAY_NOW",
-                "shipping_preference": "SET_PROVIDED_ADDRESS",
+                "shipping_preference": "NO_SHIPPING",  # change to SET_PROVIDED_ADDRESS if you pass shipping
             },
         }
 
-        orders_url = f"{self._base()}/v2/checkout/orders"
-        req_id = str(uuid.uuid4())
+        # 4) Create PayPal order (idempotent)
+        req_id = f"create-{order.id}-{uuid.uuid4()}"
         try:
             resp = http.post(
-                orders_url,
-                headers=_pp_headers(token, req_id),
+                f"{self._base()}/v2/checkout/orders",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "PayPal-Request-Id": req_id,  # idempotency
+                },
                 data=json.dumps(payload),
                 timeout=30
             )
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"raw": resp.text}
         except Exception as e:
-            return Response({"detail": "PayPal order create failed", "error": str(e)}, status=502)
-
-        data =  {}
-        try:
-            data = resp.json()
-        except Exception:
-            pass
+            return Response({"detail": "PAYPAL_CREATE_HTTP_FAILED", "error": str(e)}, status=502)
 
         if resp.status_code not in (200, 201):
-            return Response({"detail": "PayPal order create error", "paypal": data}, status=502)
+            return Response({"detail": "PAYPAL_CREATE_ERROR", "paypal": data}, status=502)
 
-        order.payment_ref = data.get("id", "")
-        order.save(update_fields=["payment_ref"])
+        # 5) Persist paypal id to local order
+        try:
+            order.payment_ref = data.get("id", "")
+            order.save(update_fields=["payment_ref"])
+        except Exception as e:
+            return Response({"detail": "LOCAL_UPDATE_FAILED", "error": str(e)}, status=500)
 
         return Response({"id": data.get("id"), "order_id": order.id}, status=201)
 
