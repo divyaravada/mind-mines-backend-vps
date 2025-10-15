@@ -1251,52 +1251,63 @@ class StripeCreateIntent(APIView):
 
     def post(self, request):
         data = request.data.copy()
-        pm = data.get("payment_method") or "card"
+        pm = (data.get("payment_method") or "card").strip()
         pm_type = PAYMENT_METHOD_MAP.get(pm)
         if not pm_type:
-            return Response({"detail": "Unsupported payment_method"}, status=400)
+            return Response({"detail": f"Unsupported payment_method '{pm}'"}, status=400)
 
-        # build order
-        s = OrderCreateSerializer(data=data, context={"request": request})
-        s.is_valid(raise_exception=True)
+        # Build order in 'pending'
+        try:
+            s = OrderCreateSerializer(data=data, context={"request": request})
+            s.is_valid(raise_exception=True)
+        except Exception as e:
+            # Validation error (e.args may be DRF ErrorDetail)
+            return Response({"detail": "Order validation failed", "errors": s.errors if hasattr(s, "errors") else str(e)}, status=400)
+
         with transaction.atomic():
             order = s.save()
             order.payment_method = pm
             order.status = "pending"
             order.save(update_fields=["payment_method", "status"])
 
-        # create PI (no mandate_data here; client will handle mandate/redirect)
+        # Create PI
         try:
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                 payment_method_types=[pm_type],
                 metadata={"order_id": str(order.id)},
-                # A customer helps store future methods & Radar signals
                 customer=getattr(getattr(request.user, "profile", None), "stripe_customer_id", None) or None,
-                # Optional: for card to save it for future usage
+                # Let cards be saved for future (optional)
                 setup_future_usage="off_session" if pm_type == "card" else None,
+                description=f"Order {order.number or order.id} — MindMines",
             )
         except stripe.error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
-            return Response({"detail": str(e)}, status=502)
+            return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
         except Exception as e:
             order.status = "failed"
             order.save(update_fields=["status"])
-            return Response({"detail": str(e)}, status=500)
+            return Response({"detail": f"Server error: {str(e)}"}, status=500)
 
         order.payment_ref = intent.id
         order.save(update_fields=["payment_ref"])
 
-        # For SEPA we’ll send the “pending” email now; for giropay we wait for redirect completion
+        # For SEPA DD, optional “pending” email; not needed for card
         if pm_type == "sepa_debit":
-            from server.utils.email import send_sepa_pending_email
-            locale = getattr(getattr(request.user, "profile", None), "language", "") or \
-                     request.META.get("HTTP_ACCEPT_LANGUAGE", "en").split(",")[0]
-            send_sepa_pending_email(order, user_locale=locale)
+            try:
+                from server.utils.email import send_sepa_pending_email
+                locale = getattr(getattr(request.user, "profile", None), "language", "") or \
+                         request.META.get("HTTP_ACCEPT_LANGUAGE", "en").split(",")[0]
+                send_sepa_pending_email(order, user_locale=locale)
+            except Exception:
+                pass
 
-        return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
+        return Response(
+            {"clientSecret": intent.client_secret, "order_id": order.id},
+            status=201,
+        )
 
 # ============================================================================
 # 1a) EU Bank Transfer via Customer Balance (SEPA credit transfer)
