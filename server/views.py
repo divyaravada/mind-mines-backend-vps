@@ -1300,12 +1300,12 @@ class StripeCreateBankTransferIntent(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        # Build local order in "pending"
         data = request.data.copy()
         data["payment_method"] = "bank_transfer_sepa"
+
+        # Build local order (pending)
         s = OrderCreateSerializer(data=data, context={"request": request})
         s.is_valid(raise_exception=True)
-
         with transaction.atomic():
             order = s.save()
             order.payment_method = "bank_transfer_sepa"
@@ -1313,9 +1313,9 @@ class StripeCreateBankTransferIntent(APIView):
             order.save(update_fields=["payment_method", "status"])
 
         try:
-            # Ensure customer exists (improves reconciliation)
             customer_id = _get_or_create_stripe_customer(request.user)
 
+            # Create PI with Customer Balance → Bank Transfer (EU)
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
@@ -1323,22 +1323,18 @@ class StripeCreateBankTransferIntent(APIView):
                 description=f"Order {order.number or order.id} — MindMines",
                 metadata={"order_id": str(order.id)},
 
-                # This is the key part: bank transfer (EU) into customer balance
                 payment_method_types=["customer_balance"],
-                payment_method_data={
-                    "type": "customer_balance",
-                },
+                payment_method_data={"type": "customer_balance"},
                 payment_method_options={
                     "customer_balance": {
                         "funding_type": "bank_transfer",
                         "bank_transfer": {
                             "type": "eu_bank_transfer",
-                            # Country for the receiving account (DE is fine for Germany sales)
                             "eu_bank_transfer": {"country": "DE"},
-                        }
+                        },
                     }
                 },
-                confirm=True,  # we want PI immediately in "requires_action" with instructions
+                confirm=True,  # IMPORTANT: confirm on the server ONCE
             )
         except CardError as e:
             order.status = "failed"
@@ -1356,35 +1352,33 @@ class StripeCreateBankTransferIntent(APIView):
         order.payment_ref = intent.id
         order.save(update_fields=["payment_ref"])
 
-        # Extract bank-transfer instructions from next_action
-        na = getattr(intent, "next_action", None) or {}
+        # Pull bank-transfer instructions off next_action
+        na = getattr(intent, "next_action", {}) or {}
         instr = na.get("display_bank_transfer_instructions", {})
 
-        # Typical fields you want to show the buyer
         reference = instr.get("reference") or f"ORDER-{order.id}"
-        amount_rem = instr.get("amount_remaining")
-        currency = instr.get("currency", "eur")
+        amount_rem = instr.get("amount_remaining")  # cents
+        currency = (instr.get("currency") or "eur").upper()
 
         iban = bic = beneficiary = None
-        # Stripe may return multiple financial_addresses; pick IBAN one
         for fa in instr.get("financial_addresses", []):
-            if (fa.get("type") == "iban") and fa.get("iban"):
+            if fa.get("type") == "iban" and fa.get("iban"):
                 iban = (fa["iban"].get("iban") or "").replace(" ", "")
                 bic = fa["iban"].get("bic")
                 beneficiary = fa["iban"].get("account_holder_name") or "MindMines"
                 break
 
-        # Optional: email the instructions immediately
+        # Optional: email instructions if you have a helper (safe to ignore if missing)
         try:
             from server.utils.email import send_bank_transfer_instructions_email
             send_bank_transfer_instructions_email(
                 order,
                 iban=iban,
                 bic=bic,
-                beneficiary=beneficiary,
+                beneficiary=beneficiary or "MindMines",
                 reference=reference,
                 amount=amount_rem or _amount_cents(order.total_price),
-                currency=currency.upper(),
+                currency=currency,
             )
         except Exception:
             pass
@@ -1394,8 +1388,8 @@ class StripeCreateBankTransferIntent(APIView):
                 "ok": True,
                 "order_id": order.id,
                 "order_number": getattr(order, "number", None),
-                "amount": amount_rem or _amount_cents(order.total_price),
-                "currency": currency.upper(),
+                "amount": amount_rem or _amount_cents(order.total_price),  # cents
+                "currency": currency,
                 "iban": iban,
                 "bic": bic,
                 "beneficiary": beneficiary or "MindMines",
