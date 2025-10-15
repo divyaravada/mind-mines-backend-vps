@@ -1291,7 +1291,121 @@ class StripeCreateIntent(APIView):
 
         return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
 
+# ============================================================================
+# 1a) EU Bank Transfer via Customer Balance (SEPA credit transfer)
+#     Creates a PaymentIntent confirmed server-side and returns bank details.
+#     The customer sends a manual bank transfer to Stripe’s virtual IBAN.
+# ============================================================================
+class StripeCreateBankTransferIntent(APIView):
+    permission_classes = [IsAuthenticated]
 
+    def post(self, request):
+        # Build local order in "pending"
+        data = request.data.copy()
+        data["payment_method"] = "bank_transfer_sepa"
+        s = OrderCreateSerializer(data=data, context={"request": request})
+        s.is_valid(raise_exception=True)
+
+        with transaction.atomic():
+            order = s.save()
+            order.payment_method = "bank_transfer_sepa"
+            order.status = "pending"
+            order.save(update_fields=["payment_method", "status"])
+
+        try:
+            # Ensure customer exists (improves reconciliation)
+            customer_id = _get_or_create_stripe_customer(request.user)
+
+            intent = stripe.PaymentIntent.create(
+                amount=_amount_cents(order.total_price),
+                currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
+                customer=customer_id,
+                description=f"Order {order.number or order.id} — MindMines",
+                metadata={"order_id": str(order.id)},
+
+                # This is the key part: bank transfer (EU) into customer balance
+                payment_method_types=["customer_balance"],
+                payment_method_data={
+                    "type": "customer_balance",
+                },
+                payment_method_options={
+                    "customer_balance": {
+                        "funding_type": "bank_transfer",
+                        "bank_transfer": {
+                            "type": "eu_bank_transfer",
+                            # Country for the receiving account (DE is fine for Germany sales)
+                            "eu_bank_transfer": {"country": "DE"},
+                        }
+                    }
+                },
+                confirm=True,  # we want PI immediately in "requires_action" with instructions
+            )
+        except CardError as e:
+            order.status = "failed"
+            order.save(update_fields=["status"])
+            return Response({"detail": str(e)}, status=400)
+        except StripeError as e:
+            order.status = "failed"
+            order.save(update_fields=["status"])
+            return Response({"detail": str(e)}, status=502)
+        except Exception as e:
+            order.status = "failed"
+            order.save(update_fields=["status"])
+            return Response({"detail": str(e)}, status=500)
+
+        order.payment_ref = intent.id
+        order.save(update_fields=["payment_ref"])
+
+        # Extract bank-transfer instructions from next_action
+        na = getattr(intent, "next_action", None) or {}
+        instr = na.get("display_bank_transfer_instructions", {})
+
+        # Typical fields you want to show the buyer
+        reference = instr.get("reference") or f"ORDER-{order.id}"
+        amount_rem = instr.get("amount_remaining")
+        currency = instr.get("currency", "eur")
+
+        iban = bic = beneficiary = None
+        # Stripe may return multiple financial_addresses; pick IBAN one
+        for fa in instr.get("financial_addresses", []):
+            if (fa.get("type") == "iban") and fa.get("iban"):
+                iban = (fa["iban"].get("iban") or "").replace(" ", "")
+                bic = fa["iban"].get("bic")
+                beneficiary = fa["iban"].get("account_holder_name") or "MindMines"
+                break
+
+        # Optional: email the instructions immediately
+        try:
+            from server.utils.email import send_bank_transfer_instructions_email
+            send_bank_transfer_instructions_email(
+                order,
+                iban=iban,
+                bic=bic,
+                beneficiary=beneficiary,
+                reference=reference,
+                amount=amount_rem or _amount_cents(order.total_price),
+                currency=currency.upper(),
+            )
+        except Exception:
+            pass
+
+        return Response(
+            {
+                "ok": True,
+                "order_id": order.id,
+                "order_number": getattr(order, "number", None),
+                "amount": amount_rem or _amount_cents(order.total_price),
+                "currency": currency.upper(),
+                "iban": iban,
+                "bic": bic,
+                "beneficiary": beneficiary or "MindMines",
+                "reference": reference,
+                "instructions": instr,
+                "payment_intent": intent.id,
+                "clientSecret": intent.client_secret,
+            },
+            status=201,
+        )
 
 # ============================================================================
 # 2) SEPA SetupIntent (reusable mandate) for installments
