@@ -1046,7 +1046,7 @@ class PaypalCreateOrder(PaypalBase):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
 
-        # 1) Create local order (catch errors from .save())
+        # 1) Create local order (server computes totals)
         try:
             s = OrderCreateSerializer(data=request.data, context={"request": request})
             s.is_valid(raise_exception=True)
@@ -1055,17 +1055,16 @@ class PaypalCreateOrder(PaypalBase):
                 order.payment_method = "paypal"
                 order.save(update_fields=["payment_method"])
         except Exception as e:
-            return Response(
-                {"detail": "LOCAL_ORDER_CREATE_FAILED", "error": str(e)},
-                status=500
-            )
+            return Response({"detail": "LOCAL_ORDER_CREATE_FAILED", "error": str(e)}, status=500)
 
-        # 2) Get PayPal token
+        # 2) Get token
         token, err = self._token()
         if not token:
             return Response({"detail": "FAILED_TO_GET_TOKEN", "error": err}, status=502)
 
-        # 3) Build payload (amount from server-side totals only)
+        # 3) Build PayPal payload WITHOUT breakdown (uses only grand total)
+        amount_value = f"{Decimal(order.total_price).quantize(Decimal('0.01')):.2f}"
+
         payload = {
             "intent": "CAPTURE",
             "purchase_units": [{
@@ -1073,20 +1072,18 @@ class PaypalCreateOrder(PaypalBase):
                 "custom_id": str(order.id),
                 "amount": {
                     "currency_code": "EUR",
-                    "value": f"{d2(order.total_price):.2f}",
-                    # optionally add breakdown here if you track it:
-                    # "breakdown": {...}
+                    "value": amount_value,
                 },
             }],
             "application_context": {
                 "brand_name": getattr(settings, "PAYPAL_BRAND_NAME", "MindMines"),
                 "landing_page": "LOGIN",
                 "user_action": "PAY_NOW",
-                "shipping_preference": "NO_SHIPPING",  # change to SET_PROVIDED_ADDRESS if you pass shipping
+                "shipping_preference": "NO_SHIPPING",  # change later if you want to send address
             },
         }
 
-        # 4) Create PayPal order (idempotent)
+        # 4) Create order (idempotent)
         req_id = f"create-{order.id}-{uuid.uuid4()}"
         try:
             resp = http.post(
@@ -1094,7 +1091,7 @@ class PaypalCreateOrder(PaypalBase):
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
-                    "PayPal-Request-Id": req_id,  # idempotency
+                    "PayPal-Request-Id": req_id,
                 },
                 data=json.dumps(payload),
                 timeout=30
@@ -1109,7 +1106,7 @@ class PaypalCreateOrder(PaypalBase):
         if resp.status_code not in (200, 201):
             return Response({"detail": "PAYPAL_CREATE_ERROR", "paypal": data}, status=502)
 
-        # 5) Persist paypal id to local order
+        # 5) Save paypal id
         try:
             order.payment_ref = data.get("id", "")
             order.save(update_fields=["payment_ref"])
@@ -1117,7 +1114,6 @@ class PaypalCreateOrder(PaypalBase):
             return Response({"detail": "LOCAL_UPDATE_FAILED", "error": str(e)}, status=500)
 
         return Response({"id": data.get("id"), "order_id": order.id}, status=201)
-
 
 class PaypalCaptureOrder(PaypalBase):
     """
