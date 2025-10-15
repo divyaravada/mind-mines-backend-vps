@@ -1847,41 +1847,57 @@ class KlarnaConfirm(APIView):
 
 # -------------------- Bank transfer --------------------
 
-BANK_DETAILS = {
-    "iban": "DE35 2415 1116 0000 6827 73",
-    "bic": "NOLADE21STK",
-    "account_name": "MindMines GbR",
-}
+
 
 class CreateBankTransferOrder(APIView):
    
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        s = OrderCreateSerializer(data=request.data, context={"request": request})
+        data = request.data.copy()
+        idem = (data.pop("idempotency_key", None) or "").strip()
+        s = OrderCreateSerializer(data=data, context={"request": request})
         s.is_valid(raise_exception=True)
-        order = s.save()
-        order.payment_method = "bank"
-        order.status = "pending"   # awaiting transfer
-        order.save(update_fields=["payment_method", "status"])
+        with transaction.atomic():
+            order = s.save()
+            order.payment_method = "bank"
+            order.status = "pending"  
+            order.save(update_fields=["payment_method", "status"])
 
         # ✅ email the customer bank instructions + order summary
         try:
             locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-            send_bank_transfer_instructions(order, BANK_DETAILS, user_locale=locale)
+            send_bank_transfer_instructions(
+                order,
+                {
+                    "iban": settings.BANK_TRANSFER["IBAN"],
+                    "bic": settings.BANK_TRANSFER["BIC"],
+                    "account_name": settings.BANK_TRANSFER["ACCOUNT_NAME"],
+                },
+                user_locale=locale,
+                due_hours=settings.BANK_TRANSFER["PAYMENT_DUE_HOURS"],
+            )
         except Exception:
             import logging; logging.getLogger(__name__).exception("Bank transfer email failed")
 
-        return Response({
-            "order_id": order.id,
-            "order_number": order.number,
-            "amount": f"{order.total_price:.2f}",
-            "iban": BANK_DETAILS["iban"],
-            "bic": BANK_DETAILS["bic"],
-            "beneficiary": BANK_DETAILS["account_name"],
-            "reference": order.number,
-            "instructions": "Please transfer the total amount using the reference above within 24 Hours."
-        }, status=201)
+        return self._resp(order)
+
+    def _resp(self, order):
+        return Response(
+            {
+                "ok": True,
+                "order_id": order.id,
+                "order_number": order.number,
+                "amount": f"{order.total_price:.2f}",
+                "currency": "EUR",
+                "iban": settings.BANK_TRANSFER["IBAN"].replace(" ", ""),
+                "bic": settings.BANK_TRANSFER["BIC"],
+                "beneficiary": settings.BANK_TRANSFER["ACCOUNT_NAME"],
+                "reference": order.number,  # use exactly this in the transfer
+                "instructions": f"Please transfer the total amount using the reference above within {settings.BANK_TRANSFER['PAYMENT_DUE_HOURS']} hours.",
+            },
+            status=201,
+        )
 
 # ✅ Invoice download (user)
 class InvoiceDownloadView(APIView):
