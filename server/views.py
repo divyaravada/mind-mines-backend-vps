@@ -1183,7 +1183,7 @@ PAYMENT_METHOD_MAP = {
     "card": "card",
     "sepa_debit": "sepa_debit",
     "giropay": "giropay",
-   
+   "bank_transfer_sepa":"bank_transfer_sepa",
 }
 
 try:
