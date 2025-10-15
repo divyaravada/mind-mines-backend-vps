@@ -1038,86 +1038,83 @@ class PaypalBase(APIView):
 
 
 class PaypalCreateOrder(PaypalBase):
-    def post(self, request):
+    """
+    Capture an approved PayPal order (order_id from PayPal JS SDK).
+    Marks local order as paid on success.
+    """
+    def post(self, request, order_id):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
 
-        # 1) Create local order (server computes totals)
-        try:
-            s = OrderCreateSerializer(data=request.data, context={"request": request})
-            if not s.is_valid():
-                return Response(
-                    {"detail": "VALIDATION_FAILED", "errors": s.errors},
-                    status=400
-                )
-            with transaction.atomic():
-                order = s.save()
-                order.payment_method = "paypal"
-                order.save(update_fields=["payment_method"])
-        except Exception as e:
-            return Response({"detail": "LOCAL_ORDER_CREATE_FAILED", "error": str(e)}, status=500)
+        # Optional: client can send local_order_id for stricter linkage
+        local_order_id = request.data.get("local_order_id")
 
-        # 2) Get token
+        # Find the local order that expects this PayPal order id
+        try:
+            q = {"payment_ref": order_id, "user": request.user}
+            if local_order_id:
+                q["id"] = local_order_id
+            ord_obj = Order.objects.select_for_update().get(**q)
+        except Order.DoesNotExist:
+            return Response({"detail": "Local order not found for this PayPal order."}, status=404)
+
+        if ord_obj.status == "paid":
+            return Response({"status": "COMPLETED"}, status=200)  # idempotent
+
         token, err = self._token()
         if not token:
             return Response({"detail": "FAILED_TO_GET_TOKEN", "error": err}, status=502)
 
-        # 3) Build PayPal payload WITHOUT breakdown (only total)
-        from decimal import Decimal
-        import json, uuid
-        import requests as http
-
-        amount_value = f"{Decimal(order.total_price).quantize(Decimal('0.01')):.2f}"
-
-        payload = {
-            "intent": "CAPTURE",
-            "purchase_units": [{
-                "reference_id": str(order.id),
-                "custom_id": str(order.id),
-                "amount": {
-                    "currency_code": "EUR",
-                    "value": amount_value,
-                },
-            }],
-            "application_context": {
-                "brand_name": getattr(settings, "PAYPAL_BRAND_NAME", "MindMines"),
-                "landing_page": "LOGIN",
-                "user_action": "PAY_NOW",
-                "shipping_preference": "NO_SHIPPING",
-            },
-        }
-
-        # 4) Create PayPal order (idempotent)
-        req_id = f"create-{order.id}-{uuid.uuid4()}"
+        # Capture the existing order
+        cap_url = f"{self._base()}/v2/checkout/orders/{order_id}/capture"
         try:
             resp = http.post(
-                f"{self._base()}/v2/checkout/orders",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                    "PayPal-Request-Id": req_id,
-                },
-                data=json.dumps(payload),
-                timeout=30
+                cap_url,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                timeout=30,
             )
             try:
                 data = resp.json()
             except Exception:
                 data = {"raw": resp.text}
         except Exception as e:
-            return Response({"detail": "PAYPAL_CREATE_HTTP_FAILED", "error": str(e)}, status=502)
+            return Response({"detail": "PAYPAL_CAPTURE_HTTP_FAILED", "error": str(e)}, status=502)
 
         if resp.status_code not in (200, 201):
-            return Response({"detail": "PAYPAL_CREATE_ERROR", "paypal": data}, status=502)
+            return Response({"detail": "PAYPAL_CAPTURE_ERROR", "paypal": data}, status=502)
 
-        # 5) Save paypal id
+        if data.get("status") != "COMPLETED":
+            return Response({"detail": "CAPTURE_NOT_COMPLETED", "paypal": data}, status=400)
+
+        # Verify amounts (exact match)
         try:
-            order.payment_ref = data.get("id", "")
-            order.save(update_fields=["payment_ref"])
-        except Exception as e:
-            return Response({"detail": "LOCAL_UPDATE_FAILED", "error": str(e)}, status=500)
+            pu = (data.get("purchase_units") or [{}])[0]
+            cap = (pu.get("payments", {}).get("captures") or [{}])[0]
+            cap_amt = cap.get("amount", {}) or {}
+            cap_ccy = cap_amt.get("currency_code")
+            from decimal import Decimal, ROUND_HALF_UP
+            cap_val = Decimal(cap_amt.get("value", "0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            local_total = Decimal(ord_obj.total_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        except Exception:
+            return Response({"detail": "CAPTURE_PARSE_ERROR", "paypal": data}, status=400)
 
-        return Response({"id": data.get("id"), "order_id": order.id}, status=201)
+        if cap_ccy != "EUR" or cap_val != local_total:
+            return Response(
+                {"detail": "CAPTURE_AMOUNT_MISMATCH", "paypal": cap_amt, "local": f"{local_total:.2f}"},
+                status=400,
+            )
+
+        # Mark paid + side-effects
+        if ord_obj.status != "paid":
+            ord_obj.status = "paid"
+            ord_obj.save(update_fields=["status"])
+            _safe(generate_invoice_pdf, ord_obj)
+            _safe(send_invoice_email, ord_obj)
+            _safe(fire_and_forget, post_payment_pipeline, ord_obj.id)
+            locale = getattr(getattr(ord_obj.user, "profile", None), "language", "en") or "en"
+            _safe(send_order_confirmation, ord_obj, user_locale=locale)
+
+        return Response({"status": "COMPLETED"}, status=200)
 
 class PaypalCaptureOrder(PaypalBase):
     """
