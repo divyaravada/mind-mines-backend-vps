@@ -1180,10 +1180,10 @@ class PaypalCaptureOrder(PaypalBase):
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
 PAYMENT_METHOD_MAP = {
-    "card": "card",
-    "sepa_debit": "sepa_debit",
-    "giropay": "giropay",
-   "bank_transfer_sepa":"bank_transfer_sepa",
+    "card": "Card",
+    "sepa_debit": "SEPA Direct Debit",
+    "giropay": "Giropay",
+   "bank":"Bank Transfer",
 }
 
 try:
@@ -1855,7 +1855,7 @@ class CreateBankTransferOrder(APIView):
 
     def post(self, request):
         data = request.data.copy()
-        idem = (data.pop("idempotency_key", None) or "").strip()
+        data.pop("payment_method", None)
         s = OrderCreateSerializer(data=data, context={"request": request})
         s.is_valid(raise_exception=True)
         with transaction.atomic():
