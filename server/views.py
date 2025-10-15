@@ -1,6 +1,7 @@
 from django.http import HttpResponse
 
 from decimal import Decimal,ROUND_HALF_UP,InvalidOperation
+import uuid
 import json, re
 import requests as http
 import stripe
@@ -1000,6 +1001,18 @@ def _compute_from_items(items):
 
 # -------------------- PayPal --------------------
 
+def _d2(value) -> Decimal:
+    return (Decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+def _pp_headers(token: str, request_id: str | None = None) -> dict:
+    h = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    if request_id:
+        h["PayPal-Request-Id"] = request_id  # idempotency
+    return h
+
 class PaypalBase(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1053,33 +1066,61 @@ class PaypalCreateOrder(PaypalBase):
         token, err = self._token()
         if not token:
             return Response({"detail": "Failed to obtain PayPal token", "error": err}, status=502)
+        
+         # Amount breakdown (all server-side)
+        amount_value = _d2(order.total_price)
+        breakdown = {
+            "item_total": {"currency_code": "EUR", "value": f"{_d2(order.items_total):.2f}"},
+            "shipping":   {"currency_code": "EUR", "value": f"{_d2(order.shipping_total):.2f}"},
+            "tax_total":  {"currency_code": "EUR", "value": f"{_d2(order.tax_total):.2f}"},
+            "discount":   {"currency_code": "EUR", "value": f"{_d2(order.discount_total):.2f}"},
+        }
+
+        # Buyer name/address from request serializer (validated)
+        first_name = s.validated_data.get("first_name") or ""
+        last_name  = s.validated_data.get("last_name") or ""
+        address_line1 = s.validated_data.get("address_line1") or ""
+        address_line2 = s.validated_data.get("address_line2") or ""
+        postal_code   = s.validated_data.get("postal_code") or ""
+        city          = s.validated_data.get("city") or ""
+        country_code  = "DE" if (s.validated_data.get("country") or "").lower().startswith("germ") else "DE"
+
 
         payload = {
             "intent": "CAPTURE",
             "purchase_units": [{
+                "custom_id": str(order.id),       # shows in backoffice
+                "reference_id": str(order.id),    # link local<->paypal
                 "amount": {
                     "currency_code": "EUR",
-                    "value": f"{order.total_price:.2f}"
+                    "value": f"{amount_value:.2f}",
+                    "breakdown": breakdown,
                 },
-                # Optional: you can attach reference ids to track
-                "reference_id": str(order.id),
+                "shipping": {
+                    "name": {"full_name": f"{first_name} {last_name}".strip()},
+                    "address": {
+                        "address_line_1": address_line1[:300],
+                        "address_line_2": address_line2[:300],
+                        "admin_area_2": city[:120],
+                        "postal_code": postal_code[:60],
+                        "country_code": country_code,
+                    },
+                },
             }],
             "application_context": {
-                "brand_name": "MindMines",
+                "brand_name": getattr(settings, "PAYPAL_BRAND_NAME", "MindMines"),
                 "landing_page": "LOGIN",
                 "user_action": "PAY_NOW",
-                "shipping_preference": "NO_SHIPPING",  
+                "shipping_preference": "SET_PROVIDED_ADDRESS",
             },
         }
 
         orders_url = f"{self._base()}/v2/checkout/orders"
+        req_id = str(uuid.uuid4())
         try:
             resp = http.post(
                 orders_url,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
+                headers=_pp_headers(token, req_id),
                 data=json.dumps(payload),
                 timeout=30
             )
@@ -1109,6 +1150,22 @@ class PaypalCaptureOrder(PaypalBase):
     def post(self, request, order_id):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
+        
+        # Optional: client can send local_order_id to assert linkage
+        local_order_id = request.data.get("local_order_id")
+
+        # Fetch the local order that *expects* this PayPal order id
+        try:
+            q = {"payment_ref": order_id, "user": request.user}
+            if local_order_id:
+                q["id"] = local_order_id
+            ord_obj = Order.objects.select_for_update().get(**q)
+        except Order.DoesNotExist:
+            return Response({"detail": "Local order not found for this PayPal order."}, status=404)
+
+        if ord_obj.status == "paid":
+            # already processed (idempotent)
+            return Response({"status": "COMPLETED"})
 
         token, err = self._token()
         if not token:
@@ -1118,10 +1175,7 @@ class PaypalCaptureOrder(PaypalBase):
         try:
             resp = http.post(
                 cap_url,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
+                headers=_pp_headers(token, req_id),
                 timeout=30
             )
         except Exception as e:
@@ -1136,42 +1190,37 @@ class PaypalCaptureOrder(PaypalBase):
         if resp.status_code not in (200, 201):
             return Response({"detail": "PayPal capture error", "paypal": data}, status=502)
 
-        if data.get("status") == "COMPLETED":
-            try:
-                ord_obj = Order.objects.get(payment_ref=order_id, user=request.user)
-            except Order.DoesNotExist:
-                # fallback by latest pending order of the user
-                ord_obj = Order.objects.filter(user=request.user, status="pending").order_by("-created_at").first()
+        status = data.get("status")
+        if status != "COMPLETED":
+            return Response({"detail": "Capture not completed", "paypal": data}, status=400)
 
-            # Sanity check captured amount matches local total
-            try:
-                pu = (data.get("purchase_units") or [{}])[0]
-                cap = (pu.get("payments", {}).get("captures") or [{}])[0]
-                cap_amount = cap.get("amount", {}) or {}
-                cap_ccy = cap_amount.get("currency_code")
-                cap_val = Decimal(cap_amount.get("value", "0"))
-            except Exception:
-                cap_ccy, cap_val = None, Decimal("0")
+        # Sanity check captured amount matches local total
+        try:
+            pu = (data.get("purchase_units") or [{}])[0]
+            cap = (pu.get("payments", {}).get("captures") or [{}])[0]
+            cap_amount = cap.get("amount", {}) or {}
+            cap_ccy = cap_amount.get("currency_code")
+            cap_val = _d2(cap_amount.get("value", "0"))
+        except Exception:
+            cap_ccy, cap_val = None, _d2("0")
 
+        if cap_ccy != "EUR" or cap_val != _d2(ord_obj.total_price):
+            return Response(
+                {"detail": "Captured amount mismatch.", "paypal": cap_amount, "local": f"{_d2(ord_obj.total_price):.2f}"},
+                status=400
+            )
 
-            if ord_obj and cap_ccy == "EUR" and cap_val == ord_obj.total_price:
-                if ord_obj.status != "paid":
-                    ord_obj.status = "paid"
-                    ord_obj.save(update_fields=["status"])
-                    # Side effects guarded
-                    _safe(generate_invoice_pdf, ord_obj)
-                    _safe(send_invoice_email, ord_obj)
-                    _safe(fire_and_forget, post_payment_pipeline, ord_obj.id)
-                    locale = getattr(getattr(ord_obj.user, "profile", None), "language", "en") or "en"
-                    _safe(send_order_confirmation, ord_obj, user_locale=locale)
-            else:
-                # Captured amount mismatch → don't mark paid
-                return Response(
-                    {"detail": "Captured amount mismatch.", "paypal": cap_amount, "local": f"{ord_obj.total_price:.2f}" if ord_obj else None},
-                    status=400
-                )
+        # Mark paid + side effects
+        if ord_obj.status != "paid":
+            ord_obj.status = "paid"
+            ord_obj.save(update_fields=["status"])
+            _safe(generate_invoice_pdf, ord_obj)
+            _safe(send_invoice_email, ord_obj)
+            _safe(fire_and_forget, post_payment_pipeline, ord_obj.id)
+            locale = getattr(getattr(ord_obj.user, "profile", None), "language", "en") or "en"
+            _safe(send_order_confirmation, ord_obj, user_locale=locale)
 
-        return Response(data, status=200)
+        return Response({"status": "COMPLETED"}, status=200)
     
 # ------------ Stripe ---------------------------
 stripe.api_key = settings.STRIPE_SECRET_KEY
