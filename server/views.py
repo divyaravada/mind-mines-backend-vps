@@ -1180,10 +1180,9 @@ class PaypalCaptureOrder(PaypalBase):
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
 PAYMENT_METHOD_MAP = {
-    "card": "Card",
-    "sepa_debit": "SEPA Direct Debit",
-    "giropay": "Giropay",
-   "bank":"Bank Transfer",
+    "card": "card",
+    "sepa_debit": "sepa_debit",
+    "giropay": "giropay",
 }
 
 try:
@@ -1310,91 +1309,6 @@ class StripeCreateIntent(APIView):
             status=201,
         )
 
-# ============================================================================
-# 1a) EU Bank Transfer via Customer Balance (SEPA credit transfer)
-#     Creates a PaymentIntent confirmed server-side and returns bank details.
-#     The customer sends a manual bank transfer to Stripe’s virtual IBAN.
-# ============================================================================
-class StripeCreateBankTransferIntent(APIView):
-    authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        data = request.data.copy()
-        # Don't let serializer validate "payment_method"
-        data.pop("payment_method", None)
-
-        s = OrderCreateSerializer(data=data, context={"request": request})
-        if not s.is_valid():
-            # 👇 see exactly what field failed (items, address, coupon, etc.)
-            return Response({"ok": False, "errors": s.errors}, status=400)
-
-        with transaction.atomic():
-            order = s.save()
-            order.payment_method = "bank"  # keep consistent with your choices
-            order.status = "pending"
-            order.save(update_fields=["payment_method", "status"])
-
-        try:
-            customer_id = _get_or_create_stripe_customer(request.user)
-            intent = stripe.PaymentIntent.create(
-                amount=_amount_cents(order.total_price),
-                currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                customer=customer_id,
-                description=f"Order {order.number or order.id} — MindMines",
-                metadata={"order_id": str(order.id)},
-                payment_method_types=["customer_balance"],
-                payment_method_data={"type": "customer_balance"},
-                payment_method_options={
-                    "customer_balance": {
-                        "funding_type": "bank_transfer",
-                        "bank_transfer": {"type": "eu_bank_transfer", "eu_bank_transfer": {"country": "DE"}},
-                    }
-                },
-                confirm=True,
-            )
-        except CardError as e:
-            # CardError -> 400 with details
-            return Response({"ok": False, "detail": e.user_message or str(e)}, status=400)
-        except StripeError as e:
-            return Response({"ok": False, "detail": str(e)}, status=502)
-        except Exception as e:
-            return Response({"ok": False, "detail": str(e)}, status=500)
-
-        order.payment_ref = intent.id
-        order.save(update_fields=["payment_ref"])
-
-        na = getattr(intent, "next_action", {}) or {}
-        instr = na.get("display_bank_transfer_instructions", {}) or {}
-        reference = instr.get("reference") or f"ORDER-{order.id}"
-        amount_rem = instr.get("amount_remaining") or _amount_cents(order.total_price)
-        currency = (instr.get("currency") or "eur").upper()
-
-        iban = bic = beneficiary = None
-        for fa in instr.get("financial_addresses", []) or []:
-            if fa.get("type") == "iban" and fa.get("iban"):
-                iban = (fa["iban"].get("iban") or "").replace(" ", "")
-                bic = fa["iban"].get("bic")
-                beneficiary = fa["iban"].get("account_holder_name") or "MindMines"
-                break
-
-        return Response(
-            {
-                "ok": True,
-                "order_id": order.id,
-                "order_number": getattr(order, "number", None),
-                "amount": amount_rem,
-                "currency": currency,
-                "iban": iban,
-                "bic": bic,
-                "beneficiary": beneficiary or "MindMines",
-                "reference": reference,
-                "instructions": instr,
-                "payment_intent": intent.id,
-                "clientSecret": intent.client_secret,
-            },
-            status=201,
-        )
 
 # ============================================================================
 # 1b) EU Credit Card Transfer via Customer Balance (SEPA credit transfer)

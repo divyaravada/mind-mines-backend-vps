@@ -17,7 +17,7 @@ from .views import (
      InvoiceDownloadView, KlarnaCreateSession, KlarnaConfirm,OrderAdminUpdateAPIView,AccountDeleteRequestView,
      CreateBankTransferOrder, StoneEnquiryCreateView,OrderDetailAPIView,SetTrackingAPIView,OrderInvoiceAPIView,
    CouponPreviewAPIView,ActivePromotionAPIView,StripeCreateSepaIntent,StripeCreateSepaSetupIntent,StripeSepaCreateInstallments,
-stripe_webhook,StripeCreateIntent,StripeCreateGiropayIntent,StripeCreateBankTransferIntent,StripeCreateCardSetupIntent,
+    stripe_webhook,StripeCreateIntent,StripeCreateGiropayIntent,StripeCreateCardSetupIntent,
      OrderCancelRequestAPIView,OrderRequestReturnAPIView
 )
 
@@ -79,13 +79,12 @@ urlpatterns = [
 
     #Stripe
     path("payments/stripe/create-intent/", StripeCreateIntent.as_view()),
-    path("payments/stripe/bank/create-intent/", StripeCreateBankTransferIntent.as_view()),
-    path("payments/stripe/card/create-setup-intent/", StripeCreateCardSetupIntent.as_view()),
-    path("payments/stripe/sepa/create-intent/", StripeCreateSepaIntent.as_view()),
     path("payments/stripe/sepa/create-setup-intent/", StripeCreateSepaSetupIntent.as_view()),
+    path("payments/stripe/giropay/create-intent/", StripeCreateGiropayIntent.as_view()),    
+    path("payments/stripe/sepa/create-intent/", StripeCreateSepaIntent.as_view()),
     path("payments/stripe/create-installments/", StripeSepaCreateInstallments.as_view()),
-    path("payments/stripe/giropay/create-intent/", StripeCreateGiropayIntent.as_view()),
     path("payments/stripe/webhook/", stripe_webhook),
+    path("payments/stripe/card/create-setup-intent/", StripeCreateCardSetupIntent.as_view()),
 
     # Klarna
     path("payments/klarna/session/", KlarnaCreateSession.as_view()),
