@@ -1,7 +1,7 @@
 from django.http import HttpResponse
 
 from decimal import Decimal,ROUND_HALF_UP,InvalidOperation
-import uuid
+from dateutil.relativedelta import relativedelta
 import json, re
 import requests as http
 import stripe
@@ -1423,17 +1423,6 @@ class StripeCreateSepaIntent(APIView):
 # 4) Fixed-length installments via Subscription Schedule (SEPA or card)
 # ============================================================================
 class StripeSepaCreateInstallments(APIView):
-    """
-    Start a fixed-length monthly plan using a saved payment method (SEPA or card).
-    Body:
-    {
-      "items": [...],             # your existing order items
-      "months": 3|6|9,
-      "payment_method_id": "pm_xxx",   # obtained via SetupIntent + client confirm
-      "method": "sepa_debit" | "card", # default: "sepa_debit"
-      ...address fields, coupon_code, etc (OrderCreateSerializer)
-    }
-    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -1463,26 +1452,23 @@ class StripeSepaCreateInstallments(APIView):
             return Response({"detail": "payment_method_id is required"}, status=400)
 
         try:
-            # 1) Look up the PM to see which customer it already belongs to
+            # --- Ensure the schedule uses the SAME customer as the PM ---
             pm = stripe.PaymentMethod.retrieve(pm_id)
             pm_customer = pm.get("customer")
-
             if pm_customer:
                 customer_id = pm_customer
-                # Optional: persist this on the profile if empty
                 prof = getattr(request.user, "profile", None)
                 if prof and not getattr(prof, "stripe_customer_id", ""):
                     prof.stripe_customer_id = customer_id
                     _safe(prof.save, update_fields=["stripe_customer_id"])
             else:
-                # No customer on the PM yet → create/lookup and attach
                 customer_id = _get_or_create_stripe_customer(request.user)
                 stripe.PaymentMethod.attach(pm_id, customer=customer_id)
 
-            # Make it default for invoices
+            # Make default for invoices (charges)
             stripe.Customer.modify(customer_id, invoice_settings={"default_payment_method": pm_id})
 
-            # 2) Build prices/phases
+            # --- Helpers ---
             def mk_price(amount: int, label: str):
                 return stripe.Price.create(
                     unit_amount=amount,
@@ -1491,33 +1477,40 @@ class StripeSepaCreateInstallments(APIView):
                     product_data={"name": label},
                 )
 
+            now = datetime.utcnow()
+            # Stripe expects a Unix timestamp (seconds) for end_date
+            def ts(dt: datetime) -> int:
+                return int(dt.timestamp())
+
             phases = []
             title_base = f"Installments for Order {order.number or order.id}"
 
             if remainder:
-                # months-1 at base, last at base+remainder
+                # Phase 1: months-1 at 'base'
                 if months > 1:
                     price_base = mk_price(base, f"{title_base} (monthly)")
+                    end1 = now + relativedelta(months=months - 1)
                     phases.append({
                         "items": [{"price": price_base.id, "quantity": 1}],
-                        "iterations": months - 1,
-                        "collection_method": "charge_automatically",
-                        "proration_behavior": "none",
+                        "end_date": ts(end1),                # <-- use end_date instead of iterations
+                        # "proration_behavior": "none",      # optional; omit if your API version rejects it
                     })
+
+                # Phase 2: last month with base+remainder
                 price_last = mk_price(base + remainder, f"{title_base} (final month adj)")
+                end2 = now + relativedelta(months=months)
                 phases.append({
                     "items": [{"price": price_last.id, "quantity": 1}],
-                    "iterations": 1,
-                    "collection_method": "charge_automatically",
-                    "proration_behavior": "none",
+                    "end_date": ts(end2),
                 })
+
             else:
+                # Single phase for all months at 'base'
                 price_all = mk_price(base, f"{title_base} (monthly)")
+                end_all = now + relativedelta(months=months)
                 phases.append({
                     "items": [{"price": price_all.id, "quantity": 1}],
-                    "iterations": months,
-                    "collection_method": "charge_automatically",
-                    "proration_behavior": "none",
+                    "end_date": ts(end_all),
                 })
 
             schedule = stripe.SubscriptionSchedule.create(
@@ -1525,12 +1518,15 @@ class StripeSepaCreateInstallments(APIView):
                 start_date="now",
                 end_behavior="cancel",
                 phases=phases,
-                default_settings={"default_payment_method": pm_id},
+                default_settings={
+                    "default_payment_method": pm_id,
+                    "collection_method": "charge_automatically",  # set here, not in phase
+                },
                 metadata={"order_id": str(order.id)},
             )
 
             order.payment_ref = schedule.id
-            order.status = "processing"   # first charge will clear later via invoice.payment_succeeded
+            order.status = "processing"
             order.save(update_fields=["payment_ref", "status"])
 
             return Response({"order_id": order.id, "schedule_id": schedule.id}, status=201)
@@ -1538,6 +1534,7 @@ class StripeSepaCreateInstallments(APIView):
         except CardError as e:
             return Response({"detail": e.user_message or str(e)}, status=400)
         except StripeError as e:
+            # Good to log e.json_body for debugging if you keep server logs
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
