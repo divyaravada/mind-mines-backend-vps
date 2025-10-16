@@ -19,6 +19,8 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.db import transaction
 from django.utils import timezone
+from dateutil.relativedelta import relativedelta
+from datetime import datetime, timezone as dt_tz
 from django.db.models import Avg, Count, Q
 
 
@@ -53,7 +55,7 @@ from .models import (
 from .utils.invoices import generate_invoice_pdf
 from .utils.background import fire_and_forget
 from .tasks import post_payment_pipeline
-from .utils.emails import send_return_request_emails,send_cancel_request_emails,send_order_confirmation, send_bank_transfer_instructions, send_invoice_email,send_sepa_pending_email
+from .utils.emails import send_installments_started_email, send_return_request_emails,send_cancel_request_emails,send_order_confirmation, send_bank_transfer_instructions, send_invoice_email,send_sepa_pending_email
 
 import logging
 logger = logging.getLogger(__name__)
@@ -1190,6 +1192,27 @@ PAYMENT_METHOD_MAP = {
     "giropay": "giropay",
 }
 
+def _split_installments_eur(total_cents: int, months: int) -> list[Decimal]:
+    """
+    Return a list of Decimal EUR amounts (2dp) for each month.
+    Last month absorbs remainder; matches your schedule math.
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+    base = total_cents // months
+    rem = total_cents - base * months
+    cents = [base] * months
+    if rem:
+        cents[-1] += rem
+    return [ (Decimal(c) / Decimal(100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) for c in cents ]
+
+def _month_dates(anchor_dt, months: int):
+    """Return list of datetimes (tz-aware) month-by-month from anchor_dt."""
+    return [anchor_dt + relativedelta(months=i) for i in range(months)]
+
+def _fmt_date(dt):
+    # YYYY-MM-DD HH:MM local display
+    return timezone.localtime(dt).strftime("%Y-%m-%d %H:%M")
+
 try:
     StripeError = stripe.error.StripeError
     CardError = stripe.error.CardError
@@ -1527,6 +1550,29 @@ class StripeSepaCreateInstallments(APIView):
             order.payment_ref = schedule.id
             order.status = "processing"
             order.save(update_fields=["payment_ref", "status"])
+
+            # ---- NEW: compute amounts + upcoming dates and email the plan ----
+            try:
+                # amounts (match your phases math)
+                amounts_eur = _split_installments_eur(total_cents, months)  # list[Decimal]
+
+                # Try to align dates to Stripe subscription billing anchor
+                anchor_dt = timezone.now()
+                try:
+                    sch = stripe.SubscriptionSchedule.retrieve(schedule.id, expand=["subscription"])
+                    sub = sch.get("subscription")
+                    anchor_ts = sub.get("billing_cycle_anchor") if sub else None
+                    if anchor_ts:
+                        anchor_dt = datetime.fromtimestamp(anchor_ts, tz=dt_tz.utc)
+                except Exception:
+                    pass
+
+                dates = _month_dates(anchor_dt, months)  # list[datetime]
+
+                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+                send_installments_started_email(order, months, amounts_eur, dates, user_locale=user_locale)
+            except Exception:
+                import logging; logging.getLogger(__name__).exception("installments started email failed")
 
             return Response({"order_id": order.id, "schedule_id": schedule.id}, status=201)
 

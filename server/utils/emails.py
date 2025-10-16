@@ -12,7 +12,6 @@ from django.contrib.staticfiles import finders
 from email.mime.image import MIMEImage
 import mimetypes
 from decimal import Decimal
-from server.models import ReturnRequest  # Adjust the import path as needed
 from django.template import TemplateDoesNotExist
 
 log = logging.getLogger(__name__)
@@ -586,6 +585,97 @@ def send_bank_transfer_instructions(order, bank, user_locale="en", due_hours=Non
     finally:
         activate(prior_lang)
 
+
+def send_installments_started_email(order, months: int, amounts_eur: list[Decimal], charge_dates: list, user_locale="en"):
+    """
+    Send a bilingual email confirming a SEPA Direct Debit installment plan start.
+    Includes monthly amounts and expected charge dates.
+    """
+    to_email = getattr(order.user, "email", None)
+    if not to_email:
+        log.warning("Installments email skipped: user has no email (order %s)", order.id)
+        return
+
+    # Rows for template
+    rows = [
+        {"index": i+1, "amount": _fmt(amounts_eur[i]), "when": _fmt_date(charge_dates[i])}
+        for i in range(min(len(amounts_eur), len(charge_dates)))
+    ]
+
+    ctx = {
+        "order": order,
+        "months": months,
+        "schedule_rows": rows,  # [{index, amount, when}]
+        "total_display": _fmt(order.total_price),
+        "created_at_display": _fmt_date(order.created_at),
+        "orders_url": FRONTEND_ORDERS_URL,
+    }
+
+    # Subject EN + DE
+    subject = (
+        f"Installment plan started for order {order.number} — {months} months / "
+        f"Ratenplan gestartet für Bestellung {order.number} — {months} Monate"
+    )
+
+    # Plain text (fallbacks; replace with templates if you have them)
+    text_en = (
+        f"Your installment plan has started.\n\n"
+        f"Order: {order.number}\n"
+        f"Total: {ctx['total_display']}\n"
+        f"Months: {months}\n\n" +
+        "\n".join([f"{r['index']}. {r['amount']} — {r['when']}" for r in rows]) +
+        f"\n\nView your order: {ctx['orders_url']}\n"
+    )
+    text_de = (
+        f"Ihr Ratenplan wurde gestartet.\n\n"
+        f"Bestellung: {order.number}\n"
+        f"Summe: {ctx['total_display']}\n"
+        f"Monate: {months}\n\n" +
+        "\n".join([f"{r['index']}. {r['amount']} — {r['when']}" for r in rows]) +
+        f"\n\nBestellung ansehen: {ctx['orders_url']}\n"
+    )
+    text = "ENGLISH\n" + text_en + "\nDEUTSCH\n" + text_de
+
+    html_en_rows = "".join([f"<li>{r['index']}. <b>{r['amount']}</b> — {r['when']}</li>" for r in rows])
+    html_de_rows = html_en_rows  # same rows are fine for both languages
+
+    html = (
+        "<div style='font-family:sans-serif'>"
+        f"<h3>ENGLISH</h3>"
+        f"<p>Your installment plan has started.</p>"
+        f"<p><b>Order:</b> {order.number}<br><b>Total:</b> {ctx['total_display']}<br>"
+        f"<b>Months:</b> {months}<br><b>Placed at:</b> {ctx['created_at_display']}</p>"
+        f"<ul>{html_en_rows}</ul>"
+        f"<p><a href='{ctx['orders_url']}'>View your order</a></p>"
+        "<hr/>"
+        f"<h3>DEUTSCH</h3>"
+        f"<p>Ihr Ratenplan wurde gestartet.</p>"
+        f"<p><b>Bestellung:</b> {order.number}<br><b>Summe:</b> {ctx['total_display']}<br>"
+        f"<b>Monate:</b> {months}<br><b>Bestellt am:</b> {ctx['created_at_display']}</p>"
+        f"<ul>{html_de_rows}</ul>"
+        f"<p><a href='{ctx['orders_url']}'>Bestellung ansehen</a></p>"
+        "</div>"
+    )
+
+    msg = EmailMultiAlternatives(
+        subject=subject,
+        body=text,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[to_email],
+        reply_to=getattr(settings, "ORDER_EMAIL_REPLY_TO", []),
+    )
+    # optional inline logo
+    try:
+        cid = _attach_inline_logo(msg)
+        if cid:
+            pass
+    except Exception:
+        pass
+
+    msg.attach_alternative(html, "text/html")
+    log.info("EMAIL: sending installments-started to %s (order %s)", to_email, order.id)
+    msg.send(fail_silently=False)
+    log.info("EMAIL: sent installments-started to %s OK", to_email)
 
 # ------------------ INVOICE (PAID) ------------------
 def send_invoice_email(order, user_locale="en"):
