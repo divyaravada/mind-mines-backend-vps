@@ -30,7 +30,7 @@ MAX_ATTACH_BYTES = 14 * 1024 * 1024
 
 def _fmt(amount): return f"{float(amount):.2f} {CURRENCY}"
 
-FRONTEND_ORDERS_URL = getattr(settings, "FRONTEND_ORDERS_URL", "http://localhost:3000/account/orders")
+FRONTEND_ORDERS_URL = getattr(settings, "FRONTEND_ORDERS_URL", "https://mindmines.eu/account/orders")
 
 
 def _fmt_date(dt):
@@ -83,7 +83,7 @@ def send_sepa_pending_email(order, user_locale="en"):
             "payment_method_display": _payment_method_label(order),
             "total_display": _fmt(order.total_price or 0),
             "sepa_notice_days": "2–5",
-            "orders_url": getattr(settings, "FRONTEND_ORDERS_URL", "http://localhost:3000/account/orders"),
+            "orders_url": getattr(settings, "FRONTEND_ORDERS_URL", "https://mindmines.eu/account/orders"),
         }
 
         # Try templates first; if missing, use inline fallbacks
