@@ -800,7 +800,8 @@ class OrderAdminUpdateAPIView(APIView):
         if prev_status != "paid" and order.status == "paid":
             inv = generate_invoice_pdf(order)
             try:
-                send_invoice_email(order)
+                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+                send_invoice_email(order, user_locale=user_locale)
             except Exception:
                 pass
             try:
@@ -821,7 +822,8 @@ class SetTrackingAPIView(APIView):
         order.tracking_number = tracking
         order.save(update_fields=["tracking_number"])
         inv = generate_invoice_pdf(order)
-        send_invoice_email(order)
+        user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+        send_invoice_email(order, user_locale=user_locale)
         return Response({"status": "ok", "invoice": inv.number})
     
 
@@ -1635,8 +1637,8 @@ def stripe_webhook(request):
         generate_invoice_pdf(order)
 
         # Email invoice
-        locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-        send_invoice_email(order, user_locale=locale)
+        user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+        send_invoice_email(order, user_locale=user_locale)
 
     etype = event.get("type")
     data = event["data"]["object"]

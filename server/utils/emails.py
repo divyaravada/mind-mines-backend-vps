@@ -31,10 +31,113 @@ MAX_ATTACH_BYTES = 14 * 1024 * 1024
 
 def _fmt(amount): return f"{float(amount):.2f} {CURRENCY}"
 
-FRONTEND_ORDERS_URL = getattr(settings, "FRONTEND_ORDERS_URL", "https://mindmines.eu/account/orders")
+FRONTEND_ORDERS_URL = getattr(settings, "FRONTEND_ORDERS_URL", "http://localhost:3000/account/orders")
 
 
 
+def send_invoice_email(order, user_locale="en"):
+    to_email = getattr(order.user, "email", None)
+    if not to_email:
+        log.warning("Invoice email skipped: user has no email (order %s)", order.id)
+        return
+
+    # Build a common context
+    ctx = {
+        "order": order,
+        "orders_url": FRONTEND_ORDERS_URL,
+        "created_at_display": localtime(order.created_at).strftime("%Y-%m-%d %H:%M"),
+        "payment_method_display": _payment_method_label(order),
+        "total_display": _fmt(order.total_price),
+        "now": timezone.now(),
+    }
+
+    # ---- Bilingual subject ----
+    inv_num = getattr(getattr(order, "invoice", None), "number", None) or getattr(order, "invoice_number", None) or order.number
+    subject = f"Your invoice {inv_num} / Ihre Rechnung {inv_num}"
+
+    # ---- Bilingual bodies (fallback text + html if templates are missing) ----
+    # You can replace these with render_to_string for your own templates.
+    text_en = (
+        f"Thank you for your purchase!\n\n"
+        f"Order: {order.number}\n"
+        f"Total: {ctx['total_display']}\n"
+        f"Placed at: {ctx['created_at_display']}\n\n"
+        f"You can view your order here: {ctx['orders_url']}\n"
+    )
+    text_de = (
+        f"Vielen Dank für Ihren Einkauf!\n\n"
+        f"Bestellung: {order.number}\n"
+        f"Gesamt: {ctx['total_display']}\n"
+        f"Bestellt am: {ctx['created_at_display']}\n\n"
+        f"Sie können Ihre Bestellung hier ansehen: {ctx['orders_url']}\n"
+    )
+    text = "ENGLISH\n" + text_en + "\nDEUTSCH\n" + text_de
+
+    html_en = (
+        f"<p>Thank you for your purchase!</p>"
+        f"<p><b>Order:</b> {order.number}<br>"
+        f"<b>Total:</b> {ctx['total_display']}<br>"
+        f"<b>Placed at:</b> {ctx['created_at_display']}</p>"
+        f"<p><a href='{ctx['orders_url']}'>View your order</a></p>"
+    )
+    html_de = (
+        f"<p>Vielen Dank für Ihren Einkauf!</p>"
+        f"<p><b>Bestellung:</b> {order.number}<br>"
+        f"<b>Gesamt:</b> {ctx['total_display']}<br>"
+        f"<b>Bestellt am:</b> {ctx['created_at_display']}</p>"
+        f"<p><a href='{ctx['orders_url']}'>Bestellung ansehen</a></p>"
+    )
+    html = (
+        f"<div style='font-family:sans-serif'>"
+        f"<h3>ENGLISH</h3>{html_en}"
+        f"<hr style='margin:16px 0'/>"
+        f"<h3>DEUTSCH</h3>{html_de}"
+        f"</div>"
+    )
+
+    msg = EmailMultiAlternatives(
+        subject=subject,
+        body=text,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[to_email],
+        reply_to=getattr(settings, "ORDER_EMAIL_REPLY_TO", []),
+    )
+
+    # Attach PDF — try multiple known places, but don't abort if missing
+    attached = False
+    try:
+        inv = getattr(order, "invoice", None)
+        if inv and getattr(inv, "pdf", None):
+            # If pdf is a FileField
+            try:
+                content = inv.pdf.read()
+                msg.attach(f"{inv.number or order.number}.pdf", content, "application/pdf")
+                attached = True
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    if not attached:
+        # Fallback to your helper that looks for invoice_pdf_path / invoice_pdf
+        try:
+            attach_invoice_if_available(msg, order)
+            attached = True
+        except Exception:
+            pass
+
+    # Inline logo + final HTML body
+    try:
+        cid = _attach_inline_logo(msg)
+        if cid:
+            # If your HTML uses a cid, include it; our minimal HTML doesn't need it though
+            pass
+    except Exception:
+        pass
+
+    msg.attach_alternative(html, "text/html")
+    # Debug while testing: see failures rather than swallowing
+    msg.send(fail_silently=False)
 
 
 def _payment_method_label(order) -> str:
@@ -82,7 +185,7 @@ def send_sepa_pending_email(order, user_locale="en"):
             "payment_method_display": _payment_method_label(order),
             "total_display": _fmt(order.total_price or 0),
             "sepa_notice_days": "2–5",
-            "orders_url": getattr(settings, "FRONTEND_ORDERS_URL", "https://mindmines.eu/account/orders"),
+            "orders_url": getattr(settings, "FRONTEND_ORDERS_URL", "http://localhost:3000/account/orders"),
         }
 
         # Try templates first; if missing, use inline fallbacks
