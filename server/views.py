@@ -5,7 +5,7 @@ from dateutil.relativedelta import relativedelta
 import json, re
 import requests as http
 import stripe
-from datetime import datetime,timezone
+
 
 from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
@@ -57,6 +57,8 @@ from .utils.emails import send_return_request_emails,send_cancel_request_emails,
 
 import logging
 logger = logging.getLogger(__name__)
+
+
 
 User = get_user_model()
 def _safe(func, *args, **kwargs):
@@ -1478,8 +1480,9 @@ class StripeSepaCreateInstallments(APIView):
                     product_data={"name": label},
                 )
 
-            now = datetime.now(timezone.utc)  # tz-aware
-            def ts(dt: datetime) -> int:
+            now = timezone.now()
+
+            def ts(dt):
                 return int(dt.timestamp())
 
             phases = []
