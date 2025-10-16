@@ -33,7 +33,9 @@ def _fmt(amount): return f"{float(amount):.2f} {CURRENCY}"
 FRONTEND_ORDERS_URL = getattr(settings, "FRONTEND_ORDERS_URL", "http://localhost:3000/account/orders")
 
 
-
+def _fmt_date(dt):
+    # YYYY-MM-DD HH:MM local display
+    return timezone.localtime(dt).strftime("%Y-%m-%d %H:%M")
 
 
 def _payment_method_label(order) -> str:
@@ -117,7 +119,7 @@ def send_sepa_pending_email(order, user_locale="en"):
         msg = EmailMultiAlternatives(
             subject=subject or f"SEPA payment initiated for {order.number}",
             body=text,
-            from_email=settings.DEFAULT_FROM_EMAIL,
+            from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
             to=[to_email],
             reply_to=getattr(settings, "ORDER_EMAIL_REPLY_TO", []),
         )
@@ -520,7 +522,7 @@ def send_order_confirmation(order, user_locale="en"):
         msg = EmailMultiAlternatives(
             subject=subject,
             body=text,
-            from_email=settings.DEFAULT_FROM_EMAIL,
+            from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
             to=[to_email],
             reply_to=getattr(settings, "ORDER_EMAIL_REPLY_TO", []),
         )
@@ -660,7 +662,7 @@ def send_installments_started_email(order, months: int, amounts_eur: list[Decima
     msg = EmailMultiAlternatives(
         subject=subject,
         body=text,
-        from_email=settings.DEFAULT_FROM_EMAIL,
+        from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
         to=[to_email],
         reply_to=getattr(settings, "ORDER_EMAIL_REPLY_TO", []),
     )
@@ -729,7 +731,7 @@ def send_invoice_email(order, user_locale="en"):
     msg = EmailMultiAlternatives(
         subject=subject,
         body=text,
-        from_email=settings.DEFAULT_FROM_EMAIL,
+        from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
         to=[to_email],
         reply_to=getattr(settings, "ORDER_EMAIL_REPLY_TO", []),
     )

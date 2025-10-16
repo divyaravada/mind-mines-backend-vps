@@ -33,7 +33,6 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
-from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -49,7 +48,7 @@ from .serializers import (
     StoneEnquirySerializer, AccountSerializer, OrderCreateSerializer, OrderReadSerializer, 
 )
 from .models import (
-    User, Product, ContactMessage, NewsletterSubscriber,CouponRedemption,Promotion,
+    User, Product, ContactMessage, NewsletterSubscriber,Promotion,
     Address, Order, Review, Wishlist, NaturalStone, NaturalStoneImage,ReturnRequest,ReturnAttachment
 )
 from .utils.invoices import generate_invoice_pdf
@@ -1209,9 +1208,7 @@ def _month_dates(anchor_dt, months: int):
     """Return list of datetimes (tz-aware) month-by-month from anchor_dt."""
     return [anchor_dt + relativedelta(months=i) for i in range(months)]
 
-def _fmt_date(dt):
-    # YYYY-MM-DD HH:MM local display
-    return timezone.localtime(dt).strftime("%Y-%m-%d %H:%M")
+
 
 try:
     StripeError = stripe.error.StripeError
@@ -1559,12 +1556,23 @@ class StripeSepaCreateInstallments(APIView):
                 # Try to align dates to Stripe subscription billing anchor
                 anchor_dt = timezone.now()
                 try:
-                    sch = stripe.SubscriptionSchedule.retrieve(schedule.id, expand=["subscription"])
+                    sch = stripe.SubscriptionSchedule.retrieve(schedule.id)
+                    # Prefer subscription anchor if it exists, otherwise fall back to the schedule/phase start
                     sub = sch.get("subscription")
-                    anchor_ts = sub.get("billing_cycle_anchor") if sub else None
+                    anchor_ts = None
+                    if sub:
+                        # guard: in some races, even subscription may not have anchor yet
+                        anchor_ts = sub.get("billing_cycle_anchor")
+
+                    if not anchor_ts:
+                        # phases[0].start_date or schedule.start_date are both epoch seconds
+                        phases0 = (sch.get("phases") or [{}])[0]
+                        anchor_ts = phases0.get("start_date") or sch.get("start_date")
+
                     if anchor_ts:
                         anchor_dt = datetime.fromtimestamp(anchor_ts, tz=dt_tz.utc)
                 except Exception:
+                    # keep default anchor_dt = timezone.now()
                     pass
 
                 dates = _month_dates(anchor_dt, months)  # list[datetime]
