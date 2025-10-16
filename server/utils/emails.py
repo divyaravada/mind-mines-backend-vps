@@ -35,109 +35,6 @@ FRONTEND_ORDERS_URL = getattr(settings, "FRONTEND_ORDERS_URL", "http://localhost
 
 
 
-def send_invoice_email(order, user_locale="en"):
-    to_email = getattr(order.user, "email", None)
-    if not to_email:
-        log.warning("Invoice email skipped: user has no email (order %s)", order.id)
-        return
-
-    # Build a common context
-    ctx = {
-        "order": order,
-        "orders_url": FRONTEND_ORDERS_URL,
-        "created_at_display": localtime(order.created_at).strftime("%Y-%m-%d %H:%M"),
-        "payment_method_display": _payment_method_label(order),
-        "total_display": _fmt(order.total_price),
-        "now": timezone.now(),
-    }
-
-    # ---- Bilingual subject ----
-    inv_num = getattr(getattr(order, "invoice", None), "number", None) or getattr(order, "invoice_number", None) or order.number
-    subject = f"Your invoice {inv_num} / Ihre Rechnung {inv_num}"
-
-    # ---- Bilingual bodies (fallback text + html if templates are missing) ----
-    # You can replace these with render_to_string for your own templates.
-    text_en = (
-        f"Thank you for your purchase!\n\n"
-        f"Order: {order.number}\n"
-        f"Total: {ctx['total_display']}\n"
-        f"Placed at: {ctx['created_at_display']}\n\n"
-        f"You can view your order here: {ctx['orders_url']}\n"
-    )
-    text_de = (
-        f"Vielen Dank für Ihren Einkauf!\n\n"
-        f"Bestellung: {order.number}\n"
-        f"Gesamt: {ctx['total_display']}\n"
-        f"Bestellt am: {ctx['created_at_display']}\n\n"
-        f"Sie können Ihre Bestellung hier ansehen: {ctx['orders_url']}\n"
-    )
-    text = "ENGLISH\n" + text_en + "\nDEUTSCH\n" + text_de
-
-    html_en = (
-        f"<p>Thank you for your purchase!</p>"
-        f"<p><b>Order:</b> {order.number}<br>"
-        f"<b>Total:</b> {ctx['total_display']}<br>"
-        f"<b>Placed at:</b> {ctx['created_at_display']}</p>"
-        f"<p><a href='{ctx['orders_url']}'>View your order</a></p>"
-    )
-    html_de = (
-        f"<p>Vielen Dank für Ihren Einkauf!</p>"
-        f"<p><b>Bestellung:</b> {order.number}<br>"
-        f"<b>Gesamt:</b> {ctx['total_display']}<br>"
-        f"<b>Bestellt am:</b> {ctx['created_at_display']}</p>"
-        f"<p><a href='{ctx['orders_url']}'>Bestellung ansehen</a></p>"
-    )
-    html = (
-        f"<div style='font-family:sans-serif'>"
-        f"<h3>ENGLISH</h3>{html_en}"
-        f"<hr style='margin:16px 0'/>"
-        f"<h3>DEUTSCH</h3>{html_de}"
-        f"</div>"
-    )
-
-    msg = EmailMultiAlternatives(
-        subject=subject,
-        body=text,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        to=[to_email],
-        reply_to=getattr(settings, "ORDER_EMAIL_REPLY_TO", []),
-    )
-
-    # Attach PDF — try multiple known places, but don't abort if missing
-    attached = False
-    try:
-        inv = getattr(order, "invoice", None)
-        if inv and getattr(inv, "pdf", None):
-            # If pdf is a FileField
-            try:
-                content = inv.pdf.read()
-                msg.attach(f"{inv.number or order.number}.pdf", content, "application/pdf")
-                attached = True
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    if not attached:
-        # Fallback to your helper that looks for invoice_pdf_path / invoice_pdf
-        try:
-            attach_invoice_if_available(msg, order)
-            attached = True
-        except Exception:
-            pass
-
-    # Inline logo + final HTML body
-    try:
-        cid = _attach_inline_logo(msg)
-        if cid:
-            # If your HTML uses a cid, include it; our minimal HTML doesn't need it though
-            pass
-    except Exception:
-        pass
-
-    msg.attach_alternative(html, "text/html")
-    # Debug while testing: see failures rather than swallowing
-    msg.send(fail_silently=False)
 
 
 def _payment_method_label(order) -> str:
@@ -636,7 +533,7 @@ def send_order_confirmation(order, user_locale="en"):
 
 
 # ------------------ BANK TRANSFER ------------------
-def send_bank_transfer_instructions(order, bank, user_locale="en"):
+def send_bank_transfer_instructions(order, bank, user_locale="en", due_hours=None):
     prior_lang = get_language()
     try:
         activate(user_locale or "en")
@@ -666,9 +563,10 @@ def send_bank_transfer_instructions(order, bank, user_locale="en"):
             "beneficiary": bank["account_name"],
             "iban": bank["iban"],
             "bic": bank["bic"],
+            "due_hours": due_hours, 
         }
 
-        subject = f"Bank transfer instructions for order {order.number}"
+        subject = f"Bank transfer instructions for order {order.number} / Überweisungsdetails zu {order.number}"
         to = [order.user.email]
 
         # Text body
@@ -682,17 +580,20 @@ def send_bank_transfer_instructions(order, bank, user_locale="en"):
 
         html = render_to_string("emails/bank_transfer.html", ctx)
         msg.attach_alternative(html, "text/html")
+        log.info("EMAIL: sending bank transfer to %s (order %s)", to, order.id)
         msg.send(fail_silently=False)
+        log.info("EMAIL: sent bank transfer to %s OK", to)
     finally:
         activate(prior_lang)
 
 
 # ------------------ INVOICE (PAID) ------------------
-def send_invoice_email(order):
+def send_invoice_email(order, user_locale="en"):
     to_email = getattr(order.user, "email", None)
     if not to_email:
         log.warning("Invoice email skipped: user has no email (order %s)", order.id)
         return
+    
     if not hasattr(order, "invoice") or not order.invoice or not order.invoice.pdf:
         log.warning("Invoice email skipped: no invoice file yet (order %s)", order.id)
         return
@@ -705,24 +606,76 @@ def send_invoice_email(order):
         "total_display": _fmt(order.total_price),
         "now": timezone.now(),
     }
-    subject = f"Your invoice {order.invoice.number}"
-    to = [to_email]
+    inv_num = getattr(getattr(order, "invoice", None), "number", None) or getattr(order, "invoice_number", None) or order.number
+    subject = f"Your invoice {inv_num} / Ihre Rechnung {inv_num}"
 
-    # Plain text
-    text = render_to_string("emails/invoice.txt", ctx)
-    msg = EmailMultiAlternatives(subject, text, settings.DEFAULT_FROM_EMAIL, to)
+    # bilingual bodies (fallbacks)
+    text_en = (
+        f"Thank you for your purchase!\n\n"
+        f"Order: {order.number}\nTotal: {ctx['total_display']}\nPlaced at: {ctx['created_at_display']}\n\n"
+        f"View order: {ctx['orders_url']}\n"
+    )
+    text_de = (
+        f"Vielen Dank für Ihren Einkauf!\n\n"
+        f"Bestellung: {order.number}\nGesamt: {ctx['total_display']}\nBestellt am: {ctx['created_at_display']}\n\n"
+        f"Bestellung ansehen: {ctx['orders_url']}\n"
+    )
+    text = "ENGLISH\n" + text_en + "\nDEUTSCH\n" + text_de
 
-    # Attach PDF
-    msg.attach(f"{order.invoice.number}.pdf", order.invoice.pdf.read(), "application/pdf")
+    html_en = (
+        f"<p>Thank you for your purchase!</p>"
+        f"<p><b>Order:</b> {order.number}<br><b>Total:</b> {ctx['total_display']}<br>"
+        f"<b>Placed at:</b> {ctx['created_at_display']}</p>"
+        f"<p><a href='{ctx['orders_url']}'>View your order</a></p>"
+    )
+    html_de = (
+        f"<p>Vielen Dank für Ihren Einkauf!</p>"
+        f"<p><b>Bestellung:</b> {order.number}<br><b>Gesamt:</b> {ctx['total_display']}<br>"
+        f"<b>Bestellt am:</b> {ctx['created_at_display']}</p>"
+        f"<p><a href='{ctx['orders_url']}'>Bestellung ansehen</a></p>"
+    )
+    html = f"<div style='font-family:sans-serif'><h3>ENGLISH</h3>{html_en}<hr/><h3>DEUTSCH</h3>{html_de}</div>"
 
-    # Inline logo, then HTML
-    cid = _attach_inline_logo(msg)
-    if cid:
-        ctx["logo_cid"] = cid
+    msg = EmailMultiAlternatives(
+        subject=subject,
+        body=text,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[to_email],
+        reply_to=getattr(settings, "ORDER_EMAIL_REPLY_TO", []),
+    )
 
-    html = render_to_string("emails/invoice.html", ctx)
+    # Try to attach invoice if present in any known place
+    attached = False
+    try:
+        inv = getattr(order, "invoice", None)
+        if inv and getattr(inv, "pdf", None):
+            try:
+                content = inv.pdf.read()
+                msg.attach(f"{getattr(inv, 'number', inv_num)}.pdf", content, "application/pdf")
+                attached = True
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    if not attached:
+        try:
+            attach_invoice_if_available(msg, order)  # your helper tries invoice_pdf/path
+            attached = True
+        except Exception:
+            pass
+
+    # Inline logo + HTML part
+    try:
+        cid = _attach_inline_logo(msg)  # optional; your HTML doesn’t require it
+    except Exception:
+        pass
+
+    # IMPORTANT while debugging:
+    log.info("EMAIL: sending invoice '%s' to %s (attached=%s)", subject, to_email, attached)
     msg.attach_alternative(html, "text/html")
     msg.send(fail_silently=False)
+    log.info("EMAIL: sent invoice '%s' to %s OK", subject, to_email)
 
 # ------------------ RETURN / CANCELLATION REQUEST ------------------
 ADMIN_ORDERS_EMAIL = getattr(settings, "ORDERS_ADMIN_EMAIL", "info@mindmines.eu")

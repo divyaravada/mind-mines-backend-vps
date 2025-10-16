@@ -1592,6 +1592,9 @@ class StripeCreateGiropayIntent(APIView):
 # ============================================================================
 @csrf_exempt
 def stripe_webhook(request):
+    import logging
+    log = logging.getLogger(__name__)
+
     wh_secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
     sig_header = request.META.get("HTTP_STRIPE_SIGNATURE")
     if not sig_header:
@@ -1609,6 +1612,8 @@ def stripe_webhook(request):
 
     etype = event.get("type")
     data = event["data"]["object"]
+
+    log.info("WEBHOOK %s object=%s", etype, data.get("id"))
 
     def _mark_processing(order: Order):
         if order.status != "processing":
@@ -1638,11 +1643,13 @@ def stripe_webhook(request):
 
         # Email invoice
         user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-        send_invoice_email(order, user_locale=user_locale)
+        log.info("WEBHOOK emailing invoice for order %s", order.id)
+        try:
+            send_invoice_email(order, user_locale=user_locale)
+        except Exception:
+            log.exception("send_invoice_email failed for order %s", order.id)
 
-    etype = event.get("type")
-    data = event["data"]["object"]
-
+ 
     if etype == "payment_intent.processing":
         # reflect processing for SEPA and optionally (re)send the pending email once
         order_id = (data.get("metadata") or {}).get("order_id")
@@ -1650,12 +1657,13 @@ def stripe_webhook(request):
             try:
                 order = Order.objects.get(pk=order_id)
                 _mark_processing(order)
-                if order.status != "processing":
-                    order.status = "processing"
-                    order.save(update_fields=["status"])
+                
                 # Optional: send (or re-send) the pending notice
-                locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                send_sepa_pending_email(order, user_locale=locale)
+                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+                try:
+                    send_sepa_pending_email(order, user_locale=user_locale)
+                except Exception:
+                    log.exception("send_sepa_pending_email failed for order %s", order.id)
             except Order.DoesNotExist:
                 pass
 
@@ -1688,88 +1696,7 @@ def stripe_webhook(request):
 
 
 
-# -------------------- Klarna (class-based only) --------------------
 
-VAT_RATE = Decimal("0.19")
-
-
-class KlarnaCreateSession(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        s = OrderCreateSerializer(data=request.data, context={"request": request})
-        s.is_valid(raise_exception=True)
-        order = s.save()
-        order.payment_method = "klarna"
-        order.save(update_fields=["payment_method"])
-
-        items = s.validated_data["items"]
-        lines, tax_total = _order_lines(items)
-        _, _, total = _compute_from_items(items)
-
-        payload = {
-            "purchase_country": settings.KLARNA_COUNTRY,
-            "purchase_currency": settings.KLARNA_CURRENCY,
-            "locale": settings.KLARNA_LOCALE,
-            "order_amount": int(total * 100),
-            "order_tax_amount": tax_total,
-            "order_lines": lines,
-        }
-        url = f"{settings.KLARNA_BASE_URL.rstrip('/')}/payments/v1/sessions"
-        r = http.post(url, auth=(settings.KLARNA_USERNAME, settings.KLARNA_PASSWORD),
-                      headers={"Content-Type": "application/json"},
-                      data=json.dumps(payload))
-        data = r.json()
-        client_token = data.get("client_token")
-        return Response({"client_token": client_token, "order_id": order.id})
-
-class KlarnaConfirm(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        order_id = request.data.get("order_id")
-        auth_token = request.data.get("authorization_token")
-        if not order_id or not auth_token:
-            return Response({"detail": "order_id and authorization_token required"}, status=400)
-
-        order = get_object_or_404(Order, pk=order_id, user=request.user)
-
-        items = [{"product_id": oi.product.id, "qty": oi.quantity} for oi in order.items.all()]
-        lines, tax_total = _order_lines(items)
-        amount = int(order.total_price * 100)
-
-        create_url = f"{settings.KLARNA_BASE_URL.rstrip('/')}/payments/v1/authorizations/{auth_token}/order"
-        create_payload = {
-            "purchase_country": settings.KLARNA_COUNTRY,
-            "purchase_currency": settings.KLARNA_CURRENCY,
-            "locale": settings.KLARNA_LOCALE,
-            "order_amount": amount,
-            "order_tax_amount": tax_total,
-            "order_lines": lines,
-            "merchant_reference1": order.number,
-        }
-        cr = http.post(create_url, auth=(settings.KLARNA_USERNAME, settings.KLARNA_PASSWORD),
-                       headers={"Content-Type": "application/json"},
-                       data=json.dumps(create_payload))
-        cdata = cr.json()
-        klarna_order_id = cdata.get("order_id")
-        if not klarna_order_id:
-            return Response({"detail": "Klarna order creation failed", "klarna": cdata}, status=400)
-
-        # (optional capture step skipped or add Order Management capture here)
-
-        order.status = "paid"
-        order.payment_ref = klarna_order_id
-        order.save(update_fields=["status", "payment_ref"])
-        inv = generate_invoice_pdf(order)
-        send_invoice_email(order)
-        try:
-            locale = getattr(order.user, "profile", None) and getattr(order.user.profile, "language", "en")
-            send_order_confirmation(order, user_locale=locale or "en")
-        except Exception:
-            pass
-        fire_and_forget(post_payment_pipeline, order.id)
-        return Response({"status": "ok", "klarna_order_id": klarna_order_id, "invoice": inv.number})
 
 # -------------------- Bank transfer --------------------
 
