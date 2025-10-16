@@ -1463,11 +1463,26 @@ class StripeSepaCreateInstallments(APIView):
             return Response({"detail": "payment_method_id is required"}, status=400)
 
         try:
-            customer_id = _get_or_create_stripe_customer(request.user, pm_id)
-            # make default for invoices
+            # 1) Look up the PM to see which customer it already belongs to
+            pm = stripe.PaymentMethod.retrieve(pm_id)
+            pm_customer = pm.get("customer")
+
+            if pm_customer:
+                customer_id = pm_customer
+                # Optional: persist this on the profile if empty
+                prof = getattr(request.user, "profile", None)
+                if prof and not getattr(prof, "stripe_customer_id", ""):
+                    prof.stripe_customer_id = customer_id
+                    _safe(prof.save, update_fields=["stripe_customer_id"])
+            else:
+                # No customer on the PM yet → create/lookup and attach
+                customer_id = _get_or_create_stripe_customer(request.user)
+                stripe.PaymentMethod.attach(pm_id, customer=customer_id)
+
+            # Make it default for invoices
             stripe.Customer.modify(customer_id, invoice_settings={"default_payment_method": pm_id})
 
-            # Build phases (even split; last month absorbs remainder if any)
+            # 2) Build prices/phases
             def mk_price(amount: int, label: str):
                 return stripe.Price.create(
                     unit_amount=amount,
