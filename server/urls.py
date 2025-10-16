@@ -14,7 +14,7 @@ from .views import (
     NewsletterSubscriberCreateView, ContactMessageListView,ReviewDetailAPIView,
     NewsletterSubscriberListView,AccountAPIView, AddressDetailAPIView,AddressSetDefaultAPIView,
      PaypalCreateOrder, PaypalCaptureOrder,OrderCreateView,
-     InvoiceDownloadView, KlarnaCreateSession, KlarnaConfirm,OrderAdminUpdateAPIView,AccountDeleteRequestView,
+     InvoiceDownloadView, OrderAdminUpdateAPIView,AccountDeleteRequestView,
      CreateBankTransferOrder, StoneEnquiryCreateView,OrderDetailAPIView,SetTrackingAPIView,OrderInvoiceAPIView,
    CouponPreviewAPIView,ActivePromotionAPIView,StripeCreateSepaIntent,StripeCreateSepaSetupIntent,StripeSepaCreateInstallments,
     stripe_webhook,StripeCreateIntent,StripeCreateGiropayIntent,StripeCreateCardSetupIntent,
@@ -86,9 +86,7 @@ urlpatterns = [
     path("payments/stripe/webhook/", stripe_webhook),
     path("payments/stripe/card/create-setup-intent/", StripeCreateCardSetupIntent.as_view()),
 
-    # Klarna
-    path("payments/klarna/session/", KlarnaCreateSession.as_view()),
-    path("payments/klarna/confirm/", KlarnaConfirm.as_view()),
+
 
     # Bank Transfer
     path("payments/bank/create/", CreateBankTransferOrder.as_view()),
