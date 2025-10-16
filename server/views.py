@@ -1605,8 +1605,8 @@ def stripe_webhook(request):
     except Exception as e:
         return JsonResponse({"detail": f"Bad payload: {str(e)}"}, status=400)
 
-    etype = event.get("type", "")
-    data = event.get("data", {}).get("object", {})  # dict
+    etype = event.get("type")
+    data = event["data"]["object"]
 
     def _mark_processing(order: Order):
         if order.status != "processing":
@@ -1636,7 +1636,7 @@ def stripe_webhook(request):
 
         # Email invoice
         locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-        send_invoice_email(order)
+        send_invoice_email(order, user_locale=locale)
 
     etype = event.get("type")
     data = event["data"]["object"]
@@ -1647,6 +1647,7 @@ def stripe_webhook(request):
         if order_id:
             try:
                 order = Order.objects.get(pk=order_id)
+                _mark_processing(order)
                 if order.status != "processing":
                     order.status = "processing"
                     order.save(update_fields=["status"])
