@@ -1598,49 +1598,57 @@ class StripeSepaCreateInstallments(APIView):
 # 5) GIROPAY: create Intent
 # ============================================================================
 class StripeCreateGiropayIntent(APIView):
-    """Create a PaymentIntent for giropay (redirect method)."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        # Build a local order in "pending" using your existing serializer.
+        # Build local order in "pending"
         s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
 
         with transaction.atomic():
             order = s.save()
-            order.payment_method = "card"  # a generic label; or add "giropay" to choices if you like
+            order.payment_method = "giropay"   # <- fix: label correctly
             order.status = "pending"
             order.save(update_fields=["payment_method", "status"])
+
+        # (optional) enforce DE + EUR – giropay requires eur + German banks
+        ship_country = (request.data.get("country") or "").upper() or \
+                       (getattr(getattr(order, "shipping_address", None), "country", "") or "").upper()
+        if ship_country and ship_country != "DE":
+            order.status = "failed"
+            order.save(update_fields=["status"])
+            return Response({"detail": "giropay is only available for German shoppers."}, status=400)
 
         amount_cents = _amount_cents(order.total_price)
 
         try:
-            # giropay must be EUR and DE shoppers
             intent = stripe.PaymentIntent.create(
                 amount=amount_cents,
-                currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
+                currency="eur",
                 payment_method_types=["giropay"],
-                description=f"Order {order.number or order.id} — MindMines",
                 metadata={"order_id": str(order.id)},
-                confirm=False,  # Confirm on client via confirmGiropayPayment
+                description=f"Order {order.number or order.id} — MindMines",
+                # (optional) include email for Stripe receipts:
+                receipt_email=getattr(order.user, "email", None) or None,
             )
         except CardError as e:
-            order.status = "failed"
-            order.save(update_fields=["status"])
+            order.status = "failed"; order.save(update_fields=["status"])
             return Response({"detail": str(e)}, status=400)
         except StripeError as e:
-            order.status = "failed"
-            order.save(update_fields=["status"])
+            order.status = "failed"; order.save(update_fields=["status"])
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
-            order.status = "failed"
-            order.save(update_fields=["status"])
+            order.status = "failed"; order.save(update_fields=["status"])
             return Response({"detail": str(e)}, status=500)
 
         order.payment_ref = intent.id
         order.save(update_fields=["payment_ref"])
-        return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
 
+        return Response(
+            {"clientSecret": intent.client_secret, "order_id": order.id},
+            status=201,
+        )
+    
 # ============================================================================
 # 6) Webhook: mark orders paid/failed
 # ============================================================================
@@ -1748,13 +1756,7 @@ def stripe_webhook(request):
     return HttpResponse(status=200)
 
 
-
-
-
-
 # -------------------- Bank transfer --------------------
-
-
 
 class CreateBankTransferOrder(APIView):
    
