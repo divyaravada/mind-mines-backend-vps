@@ -1628,8 +1628,14 @@ class StripeCreateGiropayIntent(APIView):
             order.save(update_fields=["payment_method", "status"])
 
         # (optional) enforce DE + EUR – giropay requires eur + German banks
-        ship_country = (request.data.get("country") or "").upper() or \
-                       (getattr(getattr(order, "shipping_address", None), "country", "") or "").upper()
+        ship_country = (
+            (request.data.get("country") or
+            request.data.get("billing_country") or
+            request.data.get("shipping_country") or
+            getattr(getattr(order, "shipping_address", None), "country", ""))
+            or ""
+        ).upper()
+        
         if ship_country and ship_country != "DE":
             order.status = "failed"
             order.save(update_fields=["status"])
