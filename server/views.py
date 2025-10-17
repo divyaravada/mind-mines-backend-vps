@@ -1420,10 +1420,8 @@ class StripeCreateSepaIntent(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        data = request.data.copy()
-        data["payment_method"] = "sepa_debit"
-
-        s = OrderCreateSerializer(data=data, context={"request": request})
+        
+        s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
 
         with transaction.atomic():
@@ -1432,18 +1430,16 @@ class StripeCreateSepaIntent(APIView):
             order.status = "pending"
             order.save(update_fields=["payment_method", "status"])
 
-        amount_cents = _amount_cents(order.total_price)
-        user_agent = request.META.get("HTTP_USER_AGENT", "") or ""
-        ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR") or "0.0.0.0"
-
-
+        
         try:
+            customer_id = _get_or_create_stripe_customer(request.user)
             intent = stripe.PaymentIntent.create(
-                amount=amount_cents,
+                amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                 payment_method_types=["sepa_debit"],
                 description=f"Order {order.number or order.id} — MindMines",
                 metadata={"order_id": str(order.id)},
+                customer=customer_id,
                 # DO NOT include mandate_data when confirm=False; the client confirmation adds the online mandate.
                 confirm=False,
             )
@@ -1463,9 +1459,11 @@ class StripeCreateSepaIntent(APIView):
         order.payment_ref = intent.id
         order.save(update_fields=["payment_ref"])
 
-        # Send the “SEPA pending 2–5 days” email immediately
-        locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-        send_sepa_pending_email(order, user_locale=locale)
+        try:
+            locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+            send_sepa_pending_email(order, user_locale=locale)
+        except Exception:
+            pass
 
         return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
 
@@ -1649,7 +1647,7 @@ def stripe_webhook(request):
     etype = event.get("type")
     data = event["data"]["object"]
 
-    log.info("WEBHOOK %s object=%s", etype, (data.get("id") if isinstance(data, dict) else None))
+    log.info("WEBHOOK %s object=%s", etype, data.get("id"))
 
     def _mark_processing(order: Order):
         if order.status != "processing":
