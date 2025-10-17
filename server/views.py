@@ -1626,30 +1626,36 @@ class StripeCreateGiropayIntent(APIView):
             order.payment_method = "giropay"   # <- fix: label correctly
             order.status = "pending"
             order.save(update_fields=["payment_method", "status"])
+        
+        amount_cents = _amount_cents(order.total_price)
 
         # (optional) enforce DE + EUR – giropay requires eur + German banks
+        data = request.data
         ship_country = (
-            (request.data.get("country") or
-            request.data.get("billing_country") or
-            request.data.get("shipping_country") or
-            getattr(getattr(order, "shipping_address", None), "country", ""))
+           (data.get("country")
+            or data.get("billing_country")
+            or data.get("shipping_country")
+            or getattr(getattr(order, "shipping_address", None), "country", "")
+            or request.META.get("HTTP_CF_IPCOUNTRY")      # if behind Cloudflare
+            or request.META.get("HTTP_X_COUNTRY")         # custom header (optional)
             or ""
+           )[:2]
         ).upper()
-        
-        if ship_country and ship_country != "DE":
-            order.status = "failed"
-            order.save(update_fields=["status"])
-            return Response({"detail": "giropay is only available for German shoppers."}, status=400)
 
-        amount_cents = _amount_cents(order.total_price)
+        if ship_country and ship_country != "DE":
+           order.status = "failed"
+           order.save(update_fields=["status"])
+           return Response({"detail": "giropay is only available for German shoppers."}, status=400)
+
 
         try:
             intent = stripe.PaymentIntent.create(
                 amount=amount_cents,
-                currency="eur",
+                currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                 payment_method_types=["giropay"],
                 metadata={"order_id": str(order.id)},
                 description=f"Order {order.number or order.id} — MindMines",
+                confirm=False, 
                 # (optional) include email for Stripe receipts:
                 receipt_email=getattr(order.user, "email", None) or None,
             )
