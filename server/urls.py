@@ -17,9 +17,27 @@ from .views import (
      InvoiceDownloadView, OrderAdminUpdateAPIView,AccountDeleteRequestView,
      CreateBankTransferOrder, StoneEnquiryCreateView,OrderDetailAPIView,SetTrackingAPIView,OrderInvoiceAPIView,
    CouponPreviewAPIView,ActivePromotionAPIView,StripeCreateSepaIntent,StripeCreateSepaSetupIntent,StripeSepaCreateInstallments,
-    stripe_webhook,StripeCreateIntent,StripeCreateGiropayIntent,StripeCreateCardSetupIntent,
+    stripe_webhook,StripeCreateIntent,StripeCreateCardSetupIntent,
      OrderCancelRequestAPIView,OrderRequestReturnAPIView,ProductSuggestList
 )
+from django.contrib.sitemaps.views import sitemap
+from .sitemaps import ProductSitemap, CategorySitemap, StaticSitemap
+from django.http import HttpResponse
+from .feeds import merchant_products_feed
+
+sitemaps = {
+    "products": ProductSitemap,
+    "categories": CategorySitemap,
+    "static": StaticSitemap,
+}
+
+def robots_txt(request):
+    lines = [
+        "User-agent: *",
+        "Disallow:",
+        "Sitemap: https://YOURDOMAIN.com/sitemap.xml",
+    ]
+    return HttpResponse("\n".join(lines), content_type="text/plain")
 
 router = DefaultRouter()
 
@@ -81,7 +99,6 @@ urlpatterns = [
     #Stripe
     path("payments/stripe/create-intent/", StripeCreateIntent.as_view()),
     path("payments/stripe/sepa/create-setup-intent/", StripeCreateSepaSetupIntent.as_view()),
-    path("payments/stripe/giropay/create-intent/", StripeCreateGiropayIntent.as_view()),    
     path("payments/stripe/sepa/create-intent/", StripeCreateSepaIntent.as_view()),
     path("payments/stripe/create-installments/", StripeSepaCreateInstallments.as_view()),
     path("payments/stripe/webhook/", stripe_webhook),
@@ -103,5 +120,11 @@ urlpatterns = [
 ]
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+urlpatterns += [
+    path("sitemap.xml", sitemap, {"sitemaps": sitemaps}, name="django.contrib.sitemaps.views.sitemap"),
+    path("robots.txt", robots_txt),
+    path("feeds/google-merchant.json", merchant_products_feed)
+]
 
 urlpatterns += router.urls
