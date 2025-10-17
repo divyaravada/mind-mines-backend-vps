@@ -249,7 +249,7 @@ class Product(models.Model):
     image = models.ImageField(upload_to="decor-products/", null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)  # if missing, add & migrate
     class Meta:
-        ordering = ["-created_at", "id"]  # or just ["-id"]
+        ordering = ["-created_at"]  # or just ["-id"]
 
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)

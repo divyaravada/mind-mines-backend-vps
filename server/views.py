@@ -5,7 +5,7 @@ from dateutil.relativedelta import relativedelta
 import json, re
 import requests as http
 import stripe
-
+from stripe.error import StripeError, CardError, SignatureVerificationError
 
 from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
@@ -1203,8 +1203,7 @@ stripe.api_key = settings.STRIPE_SECRET_KEY
 
 PAYMENT_METHOD_MAP = {
     "card": "card",
-    "sepa_debit": "sepa_debit",
-    "giropay": "giropay",
+    "sepa_debit": "sepa_debit"
 }
 
 def _split_installments_eur(total_cents: int, months: int) -> list[Decimal]:
@@ -1243,37 +1242,28 @@ def _amount_cents(d: Decimal) -> int:
 
 
 
-def _get_or_create_stripe_customer(user, payment_method_id=None) -> str:
+def _get_or_create_stripe_customer(user) -> str:
     """
     Return a Stripe customer id, create one if absent.
     If your Profile has `stripe_customer_id`, it will be saved there.
     """
     # Try profile-stored id
+    
+    cid = getattr(getattr(user, "profile", None), "stripe_customer_id", None)
+    if cid:
+        return cid
+    customer = stripe.Customer.create(email=getattr(user, "email", None) or None,
+                                      name=getattr(user, "get_full_name", lambda: None)() or None)
+    
+
+    
     prof = getattr(user, "profile", None)
-    cust_id = getattr(prof, "stripe_customer_id", "") or ""
-    if cust_id:
-        if payment_method_id:
-            _safe(stripe.PaymentMethod.attach, payment_method_id, customer=cust_id)
-        return cust_id
-
-    name = ""
-    if hasattr(user, "get_full_name"):
-        name = user.get_full_name() or ""
-    if not name:
-        name = (getattr(user, "username", "") or "").strip()
-
-    customer = stripe.Customer.create(
-        email=(getattr(user, "email", "") or ""),
-        name=name or None,
-    )
-
-    if prof and hasattr(prof, "stripe_customer_id"):
+    if prof is not None:
         prof.stripe_customer_id = customer.id
-        _safe(prof.save, update_fields=["stripe_customer_id"])
-
-    if payment_method_id:
-        _safe(stripe.PaymentMethod.attach, payment_method_id, customer=customer.id)
-
+        try:
+            prof.save(update_fields=["stripe_customer_id"])
+        except Exception:
+            prof.save()
     return customer.id
 
 
@@ -1624,7 +1614,7 @@ def stripe_webhook(request):
     if not sig_header:
         return JsonResponse({"detail": "Missing Stripe-Signature header"}, status=400)
 
-    payload = request.body.decode("utf-8")
+    payload = request.body
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, wh_secret)
     except SignatureVerificationError:

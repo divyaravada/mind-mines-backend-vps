@@ -343,10 +343,11 @@ class ProductSerializer(serializers.ModelSerializer):
 
 class ProductMiniSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
-    price = serializers.DecimalField(max_digits=10, decimal_places=2)
+    thumbnail_url = serializers.SerializerMethodField()
+    price = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     class Meta:
         model = Product
-        fields = ["id", "title_en", "title_de", "image", "price","thumbnail_url"]
+        fields = ["id", "title_en", "title_de", "image","thumbnail_url", "price"]
 
     def _abs(self, request, url: str) -> str:
         if not url:
@@ -359,6 +360,19 @@ class ProductMiniSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         try:
             if obj.image and hasattr(obj.image, "url"):
+                return self._abs(request, obj.image.url)
+        except Exception:
+            pass
+        return ""
+    def get_thumbnail_url(self, obj):
+        """Return a safe absolute URL for a thumbnail if you have it;
+        otherwise fall back to the main image; otherwise empty string."""
+        request = self.context.get("request")
+        # Adjust if you have obj.thumbnail; otherwise re-use main image
+        try:
+            if getattr(obj, "thumbnail", None) and getattr(obj.thumbnail, "url", None):
+                return self._abs(request, obj.thumbnail.url)
+            if getattr(obj, "image", None) and getattr(obj.image, "url", None):
                 return self._abs(request, obj.image.url)
         except Exception:
             pass
