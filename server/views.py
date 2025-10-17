@@ -1333,7 +1333,7 @@ class StripeCreateIntent(APIView):
                 # Optional but recommended: make creation idempotent per order
                 idempotency_key=f"pi-create-{order.id}",
             )
-        except stripe.error.StripeError as e:
+        except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
@@ -1376,9 +1376,9 @@ class StripeCreateCardSetupIntent(APIView):
                 usage="off_session",
             )
             return Response({"clientSecret": si.client_secret})
-        except stripe.error.CardError as e:
+        except stripe_error.CardError as e:
             return Response({"detail": str(e)}, status=400)
-        except stripe.error.StripeError as e:
+        except stripe_error.StripeError as e:
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
@@ -1401,9 +1401,9 @@ class StripeCreateSepaSetupIntent(APIView):
                 usage="off_session",
             )
             return Response({"clientSecret": si.client_secret})
-        except stripe.error.CardError as e:
+        except stripe_error.CardError as e:
             return Response({"detail": str(e)}, status=400)
-        except stripe.error.StripeError as e:
+        except stripe_error.StripeError as e:
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
@@ -1447,11 +1447,11 @@ class StripeCreateSepaIntent(APIView):
                 # DO NOT include mandate_data when confirm=False; the client confirmation adds the online mandate.
                 confirm=False,
             )
-        except stripe.error.CardError as e:
+        except stripe_error.CardError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response({"detail": str(e)}, status=400)
-        except stripe.error.StripeError as e:
+        except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response({"detail": str(e)}, status=502)
@@ -1610,9 +1610,9 @@ class StripeSepaCreateInstallments(APIView):
 
             return Response({"order_id": order.id, "schedule_id": schedule.id}, status=201)
 
-        except stripe.error.CardError as e:
+        except stripe_error.CardError as e:
             return Response({"detail": e.user_message or str(e)}, status=400)
-        except stripe.error.StripeError as e:
+        except stripe_error.StripeError as e:
             # Good to log e.json_body for debugging if you keep server logs
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
@@ -1625,21 +1625,23 @@ class StripeSepaCreateInstallments(APIView):
 # 6) Webhook: mark orders paid/failed
 # ============================================================================
 @csrf_exempt
-
-def stripe_webhook(request): 
+def stripe_webhook(request):
     import logging
-    log = logging.getLogger(__name__)   
+    log = logging.getLogger(__name__)
+
     wh_secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
     sig_header = request.META.get("HTTP_STRIPE_SIGNATURE")
     if not sig_header:
         return JsonResponse({"detail": "Missing Stripe-Signature header"}, status=400)
 
-    payload = request.body.decode("utf-8")
+    # IMPORTANT: pass RAW BYTES, not a decoded string
+    payload = request.body
+
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, wh_secret)
-    except stripe.error.SignatureVerificationError:
+    except stripe_error.SignatureVerificationError:
         return JsonResponse({"detail": "Invalid webhook signature"}, status=400)
-    except stripe.error.StripeError as e:
+    except stripe_error.StripeError as e:
         return JsonResponse({"detail": f"Stripe error: {str(e)}"}, status=400)
     except Exception as e:
         return JsonResponse({"detail": f"Bad payload: {str(e)}"}, status=400)
@@ -1647,7 +1649,7 @@ def stripe_webhook(request):
     etype = event.get("type")
     data = event["data"]["object"]
 
-    log.info("WEBHOOK %s object=%s", etype, data.get("id"))
+    log.info("WEBHOOK %s object=%s", etype, (data.get("id") if isinstance(data, dict) else None))
 
     def _mark_processing(order: Order):
         if order.status != "processing":
