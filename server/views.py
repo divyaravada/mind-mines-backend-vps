@@ -4,8 +4,7 @@ from decimal import Decimal,ROUND_HALF_UP,InvalidOperation
 from dateutil.relativedelta import relativedelta
 import json, re
 import requests as http
-import stripe
-
+import stripe 
 
 from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
@@ -1225,15 +1224,7 @@ def _month_dates(anchor_dt, months: int):
 
 
 
-try:
-    StripeError = stripe.error.StripeError
-    CardError = stripe.error.CardError
-    SignatureVerificationError = stripe.error.SignatureVerificationError
-except AttributeError:
-    # older/newer stripe-python fallbacks
-    from stripe._error import (  # type: ignore
-        StripeError, CardError, SignatureVerificationError
-    )
+
 
 # --- Helpers -----------------------------------------------------------------
 def _amount_cents(d: Decimal) -> int:
@@ -1605,21 +1596,19 @@ class StripeSepaCreateInstallments(APIView):
 # 6) Webhook: mark orders paid/failed
 # ============================================================================
 @csrf_exempt
-def stripe_webhook(request):
-    import logging
-    log = logging.getLogger(__name__)
-
+def stripe_webhook(request): 
+    log = logging.getLogger(__name__)   
     wh_secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
     sig_header = request.META.get("HTTP_STRIPE_SIGNATURE")
     if not sig_header:
         return JsonResponse({"detail": "Missing Stripe-Signature header"}, status=400)
 
-    payload = request.body
+    payload = request.body.decode("utf-8")
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, wh_secret)
-    except SignatureVerificationError:
+    except stripe.error.SignatureVerificationError:
         return JsonResponse({"detail": "Invalid webhook signature"}, status=400)
-    except StripeError as e:
+    except stripe.error.StripeError as e:
         return JsonResponse({"detail": f"Stripe error: {str(e)}"}, status=400)
     except Exception as e:
         return JsonResponse({"detail": f"Bad payload: {str(e)}"}, status=400)

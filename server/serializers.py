@@ -359,7 +359,7 @@ class ProductMiniSerializer(serializers.ModelSerializer):
     def get_image(self, obj):
         request = self.context.get("request")
         try:
-            if obj.image and hasattr(obj.image, "url"):
+            if getattr(obj, "image", None) and getattr(obj.image, "url", None):
                 return self._abs(request, obj.image.url)
         except Exception:
             pass
@@ -370,8 +370,9 @@ class ProductMiniSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         # Adjust if you have obj.thumbnail; otherwise re-use main image
         try:
-            if getattr(obj, "thumbnail", None) and getattr(obj.thumbnail, "url", None):
-                return self._abs(request, obj.thumbnail.url)
+            thumb = getattr(obj, "thumbnail", None)
+            if thumb and getattr(thumb, "url", None):
+                return self._abs(request, thumb.url)
             if getattr(obj, "image", None) and getattr(obj.image, "url", None):
                 return self._abs(request, obj.image.url)
         except Exception:
