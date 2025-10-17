@@ -18,7 +18,7 @@ from .views import (
      CreateBankTransferOrder, StoneEnquiryCreateView,OrderDetailAPIView,SetTrackingAPIView,OrderInvoiceAPIView,
    CouponPreviewAPIView,ActivePromotionAPIView,StripeCreateSepaIntent,StripeCreateSepaSetupIntent,StripeSepaCreateInstallments,
     stripe_webhook,StripeCreateIntent,StripeCreateGiropayIntent,StripeCreateCardSetupIntent,
-     OrderCancelRequestAPIView,OrderRequestReturnAPIView
+     OrderCancelRequestAPIView,OrderRequestReturnAPIView,ProductSuggestList
 )
 
 router = DefaultRouter()
@@ -45,6 +45,7 @@ urlpatterns = [
     path("decorative-products/<int:pk>/", ProductDetailView.as_view(), name="product-detail"),
     path("decorative-products/<int:pk>/reviews/", ProductReviewListCreate.as_view(), name="product-reviews"),
     path("reviews/<int:pk>/", ReviewDetailAPIView.as_view()),
+    path("decorative-products/suggest/", ProductSuggestList.as_view()),
 
     path("contact/", ContactMessageCreateView.as_view(), name="contact"),
     path("contact-list/", ContactMessageListView.as_view(), name="contact-list"),

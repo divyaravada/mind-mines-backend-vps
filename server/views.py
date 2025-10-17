@@ -42,7 +42,7 @@ from rest_framework import permissions
 from .pagination import StandardResultsSetPagination
 from .serializers import (
     ProfileSerializer, RegisterSerializer, MyTokenObtainPairSerializer,
-    ProductSerializer, ContactMessageSerializer,ReviewWriteSerializer,
+    ProductSerializer,ProductMiniSerializer, ContactMessageSerializer,ReviewWriteSerializer,
     NewsletterSubscriberSerializer, AddressSerializer, PromotionSerializer,
     ReviewSerializer, WishlistSerializer, NaturalStoneSerializer,CouponPreviewIn,
     StoneEnquirySerializer, AccountSerializer, OrderCreateSerializer, OrderReadSerializer, 
@@ -538,6 +538,22 @@ class ProductDetailView(generics.RetrieveAPIView):
             average_rating=Avg("reviews__rating"),
         )
 
+
+
+# views.py
+class ProductSuggestList(generics.ListAPIView):
+    permission_classes = [AllowAny]
+    serializer_class = ProductMiniSerializer
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['title_en', 'title_de']
+    pagination_class = None  # return small list
+
+    def get_queryset(self):
+        q = Product.objects.all()
+        term = self.request.query_params.get("search") or ""
+        if not term:
+            return Product.objects.none()
+        return q[:10]
 
 class ProductReviewListCreate(generics.ListCreateAPIView):
     """

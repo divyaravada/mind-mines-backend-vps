@@ -346,7 +346,7 @@ class ProductMiniSerializer(serializers.ModelSerializer):
     price = serializers.DecimalField(max_digits=10, decimal_places=2)
     class Meta:
         model = Product
-        fields = ["id", "title_en", "title_de", "image", "price"]
+        fields = ["id", "title_en", "title_de", "image", "price","thumbnail_url"]
 
     def _abs(self, request, url: str) -> str:
         if not url:
