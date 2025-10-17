@@ -5,7 +5,7 @@ from dateutil.relativedelta import relativedelta
 import json, re
 import requests as http
 import stripe
-from stripe.error import StripeError, CardError, SignatureVerificationError
+
 
 from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
