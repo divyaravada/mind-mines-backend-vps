@@ -4,7 +4,6 @@ from decimal import Decimal,ROUND_HALF_UP,InvalidOperation
 from dateutil.relativedelta import relativedelta
 import json, re
 import requests as http
-import stripe 
 
 from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
@@ -1198,7 +1197,16 @@ class PaypalCaptureOrder(PaypalBase):
         return Response({"status": "COMPLETED"}, status=200)
     
 # ------------ Stripe ---------------------------
+import stripe
+try:
+    stripe_error = stripe.error           # old/public alias if present
+except AttributeError:
+    from stripe import _error as stripe_error
+
+
 stripe.api_key = settings.STRIPE_SECRET_KEY
+
+
 
 PAYMENT_METHOD_MAP = {
     "card": "card",
@@ -1240,21 +1248,21 @@ def _get_or_create_stripe_customer(user) -> str:
     """
     # Try profile-stored id
     
-    cid = getattr(getattr(user, "profile", None), "stripe_customer_id", None)
-    if cid:
-        return cid
-    customer = stripe.Customer.create(email=getattr(user, "email", None) or None,
-                                      name=getattr(user, "get_full_name", lambda: None)() or None)
-    
+    cust_id = getattr(getattr(user, "profile", None), "stripe_customer_id", None)
+    if cust_id:
+        return cust_id
 
-    
+    # create a new one and persist it
+    customer = stripe.Customer.create(
+        email=user.email or None,
+        name=f"{user.first_name} {user.last_name}".strip() or None,
+        metadata={"user_id": str(user.id)},
+    )
+    # save to your user profile model
     prof = getattr(user, "profile", None)
-    if prof is not None:
+    if prof:
         prof.stripe_customer_id = customer.id
-        try:
-            prof.save(update_fields=["stripe_customer_id"])
-        except Exception:
-            prof.save()
+        prof.save(update_fields=["stripe_customer_id"])
     return customer.id
 
 
@@ -1273,7 +1281,7 @@ class StripeCreateIntent(APIView):
 
     def post(self, request):
         data = request.data.copy()
-        pm = (data.get("payment_method") or "card").strip()
+        pm = (data.get("payment_method") or "card").strip().lower()
         pm_type = PAYMENT_METHOD_MAP.get(pm)
         if not pm_type:
             return Response({"detail": f"Unsupported payment_method '{pm}'"}, status=400)
@@ -1284,7 +1292,11 @@ class StripeCreateIntent(APIView):
             s.is_valid(raise_exception=True)
         except Exception as e:
             # Validation error (e.args may be DRF ErrorDetail)
-            return Response({"detail": "Order validation failed", "errors": s.errors if hasattr(s, "errors") else str(e)}, status=400)
+            return Response(
+                {
+                    "detail": "Order validation failed", 
+                    "errors": getattr(s, "errors", str(e)),
+                }, status=400)
 
         with transaction.atomic():
             order = s.save()
@@ -1292,6 +1304,20 @@ class StripeCreateIntent(APIView):
             order.status = "pending"
             order.save(update_fields=["payment_method", "status"])
 
+         # Always ensure a Stripe Customer exists (fixes NameError and helps SEPA/sofort)
+        try:
+            customer_id = _get_or_create_stripe_customer(request.user)
+        except stripe_error.StripeError as e:
+            order.status = "failed"
+            order.save(update_fields=["status"])
+            return Response({"detail": f"Stripe customer error: {str(e)}"}, status=502)
+
+        # Optional: tweak options for specific PMs
+        payment_method_options = {}
+        if pm_type == "sofort":
+            # Use buyer’s Accept-Language if available; Stripe accepts "en", "de", etc.
+            lang = (request.META.get("HTTP_ACCEPT_LANGUAGE", "en").split(",")[0] or "en")[:2]
+            payment_method_options["sofort"] = {"preferred_language": lang}
         # Create PI
         try:
             intent = stripe.PaymentIntent.create(
@@ -1299,10 +1325,13 @@ class StripeCreateIntent(APIView):
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                 payment_method_types=[pm_type],
                 metadata={"order_id": str(order.id)},
-                customer=getattr(getattr(request.user, "profile", None), "stripe_customer_id", None) or None,
+                customer=customer_id,
                 # Let cards be saved for future (optional)
                 setup_future_usage="off_session" if pm_type == "card" else None,
                 description=f"Order {order.number or order.id} — MindMines",
+                payment_method_options=payment_method_options or None,
+                # Optional but recommended: make creation idempotent per order
+                idempotency_key=f"pi-create-{order.id}",
             )
         except stripe.error.StripeError as e:
             order.status = "failed"
@@ -1347,9 +1376,9 @@ class StripeCreateCardSetupIntent(APIView):
                 usage="off_session",
             )
             return Response({"clientSecret": si.client_secret})
-        except CardError as e:
+        except stripe.error.CardError as e:
             return Response({"detail": str(e)}, status=400)
-        except StripeError as e:
+        except stripe.error.StripeError as e:
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
@@ -1372,9 +1401,9 @@ class StripeCreateSepaSetupIntent(APIView):
                 usage="off_session",
             )
             return Response({"clientSecret": si.client_secret})
-        except CardError as e:
+        except stripe.error.CardError as e:
             return Response({"detail": str(e)}, status=400)
-        except StripeError as e:
+        except stripe.error.StripeError as e:
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
@@ -1418,11 +1447,11 @@ class StripeCreateSepaIntent(APIView):
                 # DO NOT include mandate_data when confirm=False; the client confirmation adds the online mandate.
                 confirm=False,
             )
-        except CardError as e:
+        except stripe.error.CardError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response({"detail": str(e)}, status=400)
-        except StripeError as e:
+        except stripe.error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response({"detail": str(e)}, status=502)
@@ -1581,9 +1610,9 @@ class StripeSepaCreateInstallments(APIView):
 
             return Response({"order_id": order.id, "schedule_id": schedule.id}, status=201)
 
-        except CardError as e:
+        except stripe.error.CardError as e:
             return Response({"detail": e.user_message or str(e)}, status=400)
-        except StripeError as e:
+        except stripe.error.StripeError as e:
             # Good to log e.json_body for debugging if you keep server logs
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
@@ -1596,7 +1625,9 @@ class StripeSepaCreateInstallments(APIView):
 # 6) Webhook: mark orders paid/failed
 # ============================================================================
 @csrf_exempt
+
 def stripe_webhook(request): 
+    import logging
     log = logging.getLogger(__name__)   
     wh_secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
     sig_header = request.META.get("HTTP_STRIPE_SIGNATURE")
