@@ -246,39 +246,7 @@ class GoogleLoginAPIView(APIView):
         except Exception as e:
             return Response({"detail": f"Auth error: {e}"}, status=400)
 
-class FacebookLoginAPIView(APIView):
-    permission_classes = [AllowAny]
-    def post(self, request):
-        access_token = request.data.get("token")
-        if not access_token:
-            return Response({"detail": "Access token is required"}, status=400)
-        debug_url = (
-            "https://graph.facebook.com/debug_token"
-            f"?input_token={access_token}"
-            f"&access_token={settings.FACEBOOK_APP_ID}|{settings.FACEBOOK_APP_SECRET}"
-        )
-        debug_response = http.get(debug_url).json()
-        if not debug_response.get("data", {}).get("is_valid"):
-            return Response({"detail": "Invalid Facebook token"}, status=400)
-        profile_url = f"https://graph.facebook.com/me?fields=id,name,email&access_token={access_token}"
-        fb_data = http.get(profile_url).json()
-        email = fb_data.get("email")
-        if not email:
-            return Response({"detail": "Facebook account must have an email"}, status=400)
-        username = email.split("@")[0]
-        full_name = fb_data.get("name", "")
-        user, created = User.objects.get_or_create(email=email, defaults={
-            "username": username, "is_active": True,
-        })
-        if created and hasattr(user, "profile"):
-            user.profile.full_name = full_name
-            user.profile.save()
-        refresh = RefreshToken.for_user(user)
-        return Response({
-            "refresh": str(refresh),
-            "access": str(refresh.access_token),
-            "user": {"id": user.id, "email": user.email, "username": user.username},
-        })
+
 
 # -------------------- Password reset --------------------
 

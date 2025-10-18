@@ -1,4 +1,4 @@
-
+# server/urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from django.conf import settings
@@ -6,7 +6,7 @@ from django.conf.urls.static import static
 from .views import (
     WishlistView, WishlistDetailView, TestPostView, UploadStoneImagesView,
     NaturalStoneDetailView, NaturalStoneListView, StoneEnquiryCreateView,
-    FacebookLoginAPIView, ReviewListAPIView, OrderListAPIView, UserProfileAPIView,
+     ReviewListAPIView, OrderListAPIView, UserProfileAPIView,
     AddressListCreateAPIView, RegisterView, GoogleLoginAPIView, verify_email,
     resend_verification_email, testEndPoint, getRoutes, CustomPasswordResetView,
     CustomPasswordResetConfirmView, ProductListCreate, 
@@ -35,7 +35,7 @@ def robots_txt(request):
     lines = [
         "User-agent: *",
         "Disallow:",
-        "Sitemap: https://YOURDOMAIN.com/sitemap.xml",
+        "Sitemap: https://mindmines.eu/sitemap.xml",
     ]
     return HttpResponse("\n".join(lines), content_type="text/plain")
 
@@ -45,7 +45,6 @@ urlpatterns = [
     path("users/register/", RegisterView.as_view(), name="name_register"),
     path("accounts/", include("allauth.urls")),
     path("users/auth/google/", GoogleLoginAPIView.as_view(), name="google_login"),
-    path("users/login/facebook/", FacebookLoginAPIView.as_view(), name="facebook-login"),
     path("users/verify-email/<uidb64>/<token>/", verify_email, name="verify_email"),
     path("users/resend-verification/", resend_verification_email),
     path("users/test/", testEndPoint, name="test"),

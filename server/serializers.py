@@ -194,7 +194,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         # 🔑 Generate verification token & link (built-in generator)
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = default_token_generator.make_token(user)
-        base = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
+        base = getattr(settings, "FRONTEND_URL", "https://mindmines.eu").rstrip("/")
         verification_link = f"{base}/verify-email/{uid}/{token}/"
 
         # Compose email
@@ -620,7 +620,7 @@ class OrderListItemSerializer(serializers.ModelSerializer):
     product = ProductMiniSerializer()
     class Meta:
         model = Order
-        fields = ['id', 'created_at', 'status', 'quantity', 'total_price', 'product']
+        fields = ['id', 'quantity', 'total_price', 'product']
 
 class OrderDetailSerializer(serializers.ModelSerializer):
     product = ProductMiniSerializer()
