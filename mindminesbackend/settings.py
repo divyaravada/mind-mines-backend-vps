@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.contrib.sites',
+    "django.contrib.sitemaps",
     'corsheaders',
     'rest_framework',
     'rest_framework.authtoken',
@@ -297,7 +298,9 @@ PASSWORD_RESET_TIMEOUT = 60 * 60 * 3
 
 # --- Payments env (use .env in real) ---
 PAYPAL_CLIENT_ID = env("PAY_PAL_CLIENT_ID", default="")
-PAYPAL_CLIENT_SECRET = env("PAY_PAL_SECRET_KEY", default="")
+PAYPAL_CLIENT_SECRET = env("PAY_PAL_CLIENT_SECRET", default="")
+PAYPAL_BRAND_NAME = env("PAYPAL_BRAND_NAME", default="MindMines")
+PAYPAL_WEBHOOK_ID = env("PAYPAL_WEBHOOK_ID", default="")
 PAYPAL_ENV = env("PAYPAL_ENV", default="live")
 
 PAYPAL_BASE = (
@@ -308,6 +311,13 @@ STRIPE_SECRET_KEY = env("STRIPE_SECRET_KEY",    default="")
 STRIPE_PUBLISHABLE_KEY = env("STRIPE_PUBLISHABLE_KEY",    default="")
 STRIPE_WEBHOOK_SECRET = env("STRIPE_WEBHOOK_SECRET",   default="")
 STRIPE_CURRENCY = "eur"
+
+BANK_TRANSFER = {
+    "IBAN": env("BANK_IBAN", default="DE35 2415 1116 0000 6827 73"),
+    "BIC": env("BANK_BIC", default="NOLADE21STK"),
+    "ACCOUNT_NAME": env("BANK_ACCOUNT_NAME", default="MindMines GbR"),
+    "PAYMENT_DUE_HOURS": int(env("BANK_PAYMENT_DUE_HOURS", default=24)),  # auto-cancel window
+}
 
 KLARNA_USERNAME =  ""
 KLARNA_PASSWORD =""
