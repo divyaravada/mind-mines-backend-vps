@@ -1167,9 +1167,9 @@ class PaypalCaptureOrder(PaypalBase):
 # ------------ Stripe ---------------------------
 import stripe
 try:
-    stripe_error = stripe.error           # old/public alias if present
+    stripe_error = stripe.error        
 except AttributeError:
-    from stripe import _error as stripe_error
+    from stripe import _error as stripe_error 
 
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
