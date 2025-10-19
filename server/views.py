@@ -7,7 +7,7 @@ import requests as http
 from django.utils.timezone import now
 from django.db.models.functions import Lower
 from rest_framework import permissions, status, throttling
-
+from rest_framework.authentication import SessionAuthentication, BasicAuthentication
 
 
 from django.conf import settings
@@ -1181,72 +1181,93 @@ try:
 except AttributeError:
     from stripe import _error as stripe_error 
 
-
 stripe.api_key = settings.STRIPE_SECRET_KEY
-
-
 
 PAYMENT_METHOD_MAP = {
     "card": "card",
     "sepa_debit": "sepa_debit"
 }
 
+# ------------------- Utils ----------------------
 def _split_installments_eur(total_cents: int, months: int) -> list[Decimal]:
     """
     Return a list of Decimal EUR amounts (2dp) for each month.
     Last month absorbs remainder; matches your schedule math.
     """
-    from decimal import Decimal, ROUND_HALF_UP
     base = total_cents // months
     rem = total_cents - base * months
     cents = [base] * months
     if rem:
         cents[-1] += rem
-    return [ (Decimal(c) / Decimal(100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) for c in cents ]
+    return [
+        (Decimal(c) / Decimal(100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        for c in cents
+    ]
+
 
 def _month_dates(anchor_dt, months: int):
     """Return list of datetimes (tz-aware) month-by-month from anchor_dt."""
     return [anchor_dt + relativedelta(months=i) for i in range(months)]
 
 
-
-
-
-# --- Helpers -----------------------------------------------------------------
 def _amount_cents(d: Decimal) -> int:
     """Convert Decimal amount in EUR to integer cents."""
     return int((d * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
-
-def _get_or_create_stripe_customer(user) -> str:
+def _get_or_create_stripe_customer(user=None, email: str | None = None) -> str:
     """
     Return a Stripe customer id, create one if absent.
-    If your Profile has `stripe_customer_id`, it will be saved there.
+    - If `user` has profile.stripe_customer_id, reuse it.
+    - If guest (no user), create a customer using provided `email`.
     """
-    # Try profile-stored id
-    
-    cust_id = getattr(getattr(user, "profile", None), "stripe_customer_id", None)
-    if cust_id:
-        return cust_id
+    # Authenticated user path
+    if user is not None and getattr(user, "is_authenticated", False):
+        cust_id = getattr(getattr(user, "profile", None), "stripe_customer_id", None)
+        if cust_id:
+            return cust_id
 
-    # create a new one and persist it
+        customer = stripe.Customer.create(
+            email=(user.email or email) or None,
+            name=(f"{user.first_name} {user.last_name}".strip() or None),
+            metadata={"user_id": str(user.id)},
+        )
+        prof = getattr(user, "profile", None)
+        if prof:
+            prof.stripe_customer_id = customer.id
+            prof.save(update_fields=["stripe_customer_id"])
+        return customer.id
+
+    # Guest path (no user)
     customer = stripe.Customer.create(
-        email=user.email or None,
-        name=f"{user.first_name} {user.last_name}".strip() or None,
-        metadata={"user_id": str(user.id)},
+        email=email or None,
+        metadata={"guest": "true"},
     )
-    # save to your user profile model
-    prof = getattr(user, "profile", None)
-    if prof:
-        prof.stripe_customer_id = customer.id
-        prof.save(update_fields=["stripe_customer_id"])
     return customer.id
+
+
+def _extract_email_from_payload(data: dict) -> str | None:
+    """
+    Try a few common places you may be sending an email in your order payload.
+    Adjust to match your serializer/payload.
+    """
+    return (
+        data.get("email")
+        or (data.get("billing") or {}).get("email")
+        or (data.get("shipping_address") or {}).get("email")
+        or None
+    )
+
 
 
 # ============================================================================
 # 1) Unified one-off PaymentIntent (card, sepa_debit, giropay, sofort)
 # ============================================================================
+class CsrfExemptSessionAuthentication(SessionAuthentication):
+    def enforce_csrf(self, request):
+        # Skip CSRF checks for this endpoint (guest checkout from SPA)
+        return
+    
 class StripeCreateIntent(APIView):
     """
     Creates a PaymentIntent for one-off payments.
@@ -1255,7 +1276,8 @@ class StripeCreateIntent(APIView):
     Client must confirm with Stripe.js (Payment Element, confirmCardPayment,
     confirmSepaDebitPayment, etc).
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
+    authentication_classes = [CsrfExemptSessionAuthentication, BasicAuthentication]
 
     def post(self, request):
         data = request.data.copy()
@@ -1269,12 +1291,10 @@ class StripeCreateIntent(APIView):
             s = OrderCreateSerializer(data=data, context={"request": request})
             s.is_valid(raise_exception=True)
         except Exception as e:
-            # Validation error (e.args may be DRF ErrorDetail)
             return Response(
-                {
-                    "detail": "Order validation failed", 
-                    "errors": getattr(s, "errors", str(e)),
-                }, status=400)
+                {"detail": "Order validation failed", "errors": getattr(s, "errors", str(e))},
+                status=400,
+            )
 
         with transaction.atomic():
             order = s.save()
@@ -1282,9 +1302,11 @@ class StripeCreateIntent(APIView):
             order.status = "pending"
             order.save(update_fields=["payment_method", "status"])
 
-         # Always ensure a Stripe Customer exists (fixes NameError and helps SEPA/sofort)
+        # Ensure Stripe Customer (guest-safe)
         try:
-            customer_id = _get_or_create_stripe_customer(request.user)
+            email = _extract_email_from_payload(data)
+            user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
+            customer_id = _get_or_create_stripe_customer(user=user, email=email)
         except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
@@ -1293,10 +1315,9 @@ class StripeCreateIntent(APIView):
         # Optional: tweak options for specific PMs
         payment_method_options = {}
         if pm_type == "sofort":
-            # Use buyer’s Accept-Language if available; Stripe accepts "en", "de", etc.
             lang = (request.META.get("HTTP_ACCEPT_LANGUAGE", "en").split(",")[0] or "en")[:2]
             payment_method_options["sofort"] = {"preferred_language": lang}
-        # Create PI
+
         try:
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(order.total_price),
@@ -1304,11 +1325,9 @@ class StripeCreateIntent(APIView):
                 payment_method_types=[pm_type],
                 metadata={"order_id": str(order.id)},
                 customer=customer_id,
-                # Let cards be saved for future (optional)
                 setup_future_usage="off_session" if pm_type == "card" else None,
                 description=f"Order {order.number or order.id} — MindMines",
                 payment_method_options=payment_method_options or None,
-                # Optional but recommended: make creation idempotent per order
                 idempotency_key=f"pi-create-{order.id}",
             )
         except stripe_error.StripeError as e:
@@ -1323,24 +1342,23 @@ class StripeCreateIntent(APIView):
         order.payment_ref = intent.id
         order.save(update_fields=["payment_ref"])
 
-        # For SEPA DD, optional “pending” email; not needed for card
+        # (Optional) SEPA pending email
         if pm_type == "sepa_debit":
             try:
                 from server.utils.email import send_sepa_pending_email
-                locale = getattr(getattr(request.user, "profile", None), "language", "") or \
-                         request.META.get("HTTP_ACCEPT_LANGUAGE", "en").split(",")[0]
+                locale = (
+                    getattr(getattr(request, "user", None), "profile", None) and
+                    getattr(request.user.profile, "language", None)
+                ) or (request.META.get("HTTP_ACCEPT_LANGUAGE", "en").split(",")[0] or "en")
                 send_sepa_pending_email(order, user_locale=locale)
             except Exception:
                 pass
 
-        return Response(
-            {"clientSecret": intent.client_secret, "order_id": order.id},
-            status=201,
-        )
+        return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
 
 
 # ============================================================================
-# 1b) EU Credit Card Transfer via Customer Balance (SEPA credit transfer)
+# 1b) Save card for later (authenticated)
 # ============================================================================
 class StripeCreateCardSetupIntent(APIView):
     permission_classes = [IsAuthenticated]
@@ -1360,14 +1378,12 @@ class StripeCreateCardSetupIntent(APIView):
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
+
+
 # ============================================================================
-# 2) SEPA SetupIntent (reusable mandate) for installments
+# 2) Save SEPA mandate for installments (authenticated)
 # ============================================================================
 class StripeCreateSepaSetupIntent(APIView):
-    """
-    Creates a SetupIntent to collect a reusable SEPA mandate (off_session).
-    Client confirms with stripe.confirmSepaDebitSetup(clientSecret, {...}).
-    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -1388,17 +1404,13 @@ class StripeCreateSepaSetupIntent(APIView):
 
 
 # ============================================================================
-# 3) Legacy SEPA one-off (kept for compatibility)
-#    Prefer using StripeCreateIntent with payment_method="sepa_debit".
+# 3) Legacy SEPA one-off (keep; now guest-friendly too)
 # ============================================================================
 class StripeCreateSepaIntent(APIView):
-    """
-    One-off SEPA debit (client will confirm with confirmSepaDebitPayment()).
-    """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
+    authentication_classes = [CsrfExemptSessionAuthentication, BasicAuthentication]
 
     def post(self, request):
-        
         s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
 
@@ -1408,9 +1420,10 @@ class StripeCreateSepaIntent(APIView):
             order.status = "pending"
             order.save(update_fields=["payment_method", "status"])
 
-        
         try:
-            customer_id = _get_or_create_stripe_customer(request.user)
+            email = _extract_email_from_payload(request.data)
+            user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
+            customer_id = _get_or_create_stripe_customer(user=user, email=email)
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
@@ -1418,8 +1431,8 @@ class StripeCreateSepaIntent(APIView):
                 description=f"Order {order.number or order.id} — MindMines",
                 metadata={"order_id": str(order.id)},
                 customer=customer_id,
-                # DO NOT include mandate_data when confirm=False; the client confirmation adds the online mandate.
                 confirm=False,
+                idempotency_key=f"pi-create-{order.id}",
             )
         except stripe_error.CardError as e:
             order.status = "failed"
@@ -1438,7 +1451,11 @@ class StripeCreateSepaIntent(APIView):
         order.save(update_fields=["payment_ref"])
 
         try:
-            locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+            from server.utils.email import send_sepa_pending_email
+            locale = (
+                getattr(getattr(order, "user", None), "profile", None) and
+                getattr(order.user.profile, "language", None)
+            ) or "en"
             send_sepa_pending_email(order, user_locale=locale)
         except Exception:
             pass
@@ -1447,7 +1464,7 @@ class StripeCreateSepaIntent(APIView):
 
 
 # ============================================================================
-# 4) Fixed-length installments via Subscription Schedule (SEPA or card)
+# 4) Installments (authenticated)
 # ============================================================================
 class StripeSepaCreateInstallments(APIView):
     permission_classes = [IsAuthenticated]
@@ -1479,7 +1496,7 @@ class StripeSepaCreateInstallments(APIView):
             return Response({"detail": "payment_method_id is required"}, status=400)
 
         try:
-            # --- Ensure the schedule uses the SAME customer as the PM ---
+            # Ensure the schedule uses the SAME customer as the PM
             pm = stripe.PaymentMethod.retrieve(pm_id)
             pm_customer = pm.get("customer")
             if pm_customer:
@@ -1487,15 +1504,13 @@ class StripeSepaCreateInstallments(APIView):
                 prof = getattr(request.user, "profile", None)
                 if prof and not getattr(prof, "stripe_customer_id", ""):
                     prof.stripe_customer_id = customer_id
-                    _safe(prof.save, update_fields=["stripe_customer_id"])
+                    prof.save(update_fields=["stripe_customer_id"])
             else:
                 customer_id = _get_or_create_stripe_customer(request.user)
                 stripe.PaymentMethod.attach(pm_id, customer=customer_id)
 
-            # Make default for invoices (charges)
             stripe.Customer.modify(customer_id, invoice_settings={"default_payment_method": pm_id})
 
-            # --- Helpers ---
             def mk_price(amount: int, label: str):
                 return stripe.Price.create(
                     unit_amount=amount,
@@ -1505,9 +1520,7 @@ class StripeSepaCreateInstallments(APIView):
                 )
 
             now = timezone.now()
-
-            def ts(dt):
-                return int(dt.timestamp())
+            def ts(dt): return int(dt.timestamp())
 
             phases = []
             title_base = f"Installments for Order {order.number or order.id}"
@@ -1516,23 +1529,14 @@ class StripeSepaCreateInstallments(APIView):
                 if months > 1:
                     price_base = mk_price(base, f"{title_base} (monthly)")
                     end1 = now + relativedelta(months=months - 1)
-                    phases.append({
-                        "items": [{"price": price_base.id, "quantity": 1}],
-                        "end_date": ts(end1),
-                    })
+                    phases.append({"items": [{"price": price_base.id, "quantity": 1}], "end_date": ts(end1)})
                 price_last = mk_price(base + remainder, f"{title_base} (final month adj)")
                 end2 = now + relativedelta(months=months)
-                phases.append({
-                    "items": [{"price": price_last.id, "quantity": 1}],
-                    "end_date": ts(end2),
-                })
+                phases.append({"items": [{"price": price_last.id, "quantity": 1}], "end_date": ts(end2)})
             else:
                 price_all = mk_price(base, f"{title_base} (monthly)")
                 end_all = now + relativedelta(months=months)
-                phases.append({
-                    "items": [{"price": price_all.id, "quantity": 1}],
-                    "end_date": ts(end_all),
-                })
+                phases.append({"items": [{"price": price_all.id, "quantity": 1}], "end_date": ts(end_all)})
 
             schedule = stripe.SubscriptionSchedule.create(
                 customer=customer_id,
@@ -1540,45 +1544,32 @@ class StripeSepaCreateInstallments(APIView):
                 end_behavior="cancel",
                 phases=phases,
                 default_settings={
-                "default_payment_method": pm_id,
-                "collection_method": "charge_automatically",
-            },
-            metadata={"order_id": str(order.id)},
-        )
+                    "default_payment_method": pm_id,
+                    "collection_method": "charge_automatically",
+                },
+                metadata={"order_id": str(order.id)},
+            )
 
             order.payment_ref = schedule.id
             order.status = "processing"
             order.save(update_fields=["payment_ref", "status"])
 
-            # ---- NEW: compute amounts + upcoming dates and email the plan ----
+            # Email plan details (optional)
             try:
-                # amounts (match your phases math)
-                amounts_eur = _split_installments_eur(total_cents, months)  # list[Decimal]
-
-                # Try to align dates to Stripe subscription billing anchor
+                amounts_eur = _split_installments_eur(total_cents, months)
                 anchor_dt = timezone.now()
                 try:
                     sch = stripe.SubscriptionSchedule.retrieve(schedule.id)
-                    # Prefer subscription anchor if it exists, otherwise fall back to the schedule/phase start
                     sub = sch.get("subscription")
-                    anchor_ts = None
-                    if sub:
-                        # guard: in some races, even subscription may not have anchor yet
-                        anchor_ts = sub.get("billing_cycle_anchor")
-
+                    anchor_ts = sub.get("billing_cycle_anchor") if sub else None
                     if not anchor_ts:
-                        # phases[0].start_date or schedule.start_date are both epoch seconds
                         phases0 = (sch.get("phases") or [{}])[0]
                         anchor_ts = phases0.get("start_date") or sch.get("start_date")
-
                     if anchor_ts:
-                        anchor_dt = datetime.fromtimestamp(anchor_ts, tz=dt_tz.utc)
+                        anchor_dt = datetime.fromtimestamp(anchor_ts, tz=timezone.utc)
                 except Exception:
-                    # keep default anchor_dt = timezone.now()
                     pass
-
-                dates = _month_dates(anchor_dt, months)  # list[datetime]
-
+                dates = _month_dates(anchor_dt, months)
                 user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
                 send_installments_started_email(order, months, amounts_eur, dates, user_locale=user_locale)
             except Exception:
@@ -1589,12 +1580,9 @@ class StripeSepaCreateInstallments(APIView):
         except stripe_error.CardError as e:
             return Response({"detail": e.user_message or str(e)}, status=400)
         except stripe_error.StripeError as e:
-            # Good to log e.json_body for debugging if you keep server logs
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
-
-
 
 
 # ============================================================================
@@ -1610,8 +1598,7 @@ def stripe_webhook(request):
     if not sig_header:
         return JsonResponse({"detail": "Missing Stripe-Signature header"}, status=400)
 
-    # IMPORTANT: pass RAW BYTES, not a decoded string
-    payload = request.body
+    payload = request.body  # raw bytes
 
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, wh_secret)
@@ -1638,9 +1625,7 @@ def stripe_webhook(request):
             order.status = "paid"
             changed = True
 
-        # Try to store a charge/payment id
-        if not order.payment_id:
-            # for PaymentIntent
+        if not getattr(order, "payment_id", ""):
             ch_id = (data.get("charges", {}).get("data") or [{}])[0].get("id") or data.get("id","")
             if ch_id:
                 order.payment_id = ch_id
@@ -1649,11 +1634,9 @@ def stripe_webhook(request):
         if changed:
             order.save(update_fields=["status", "payment_id"])
 
-        # Generate & attach invoice file (idempotent)
         order.assign_unique_invoice_number()
         generate_invoice_pdf(order)
 
-        # Email invoice
         user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
         log.info("WEBHOOK emailing invoice for order %s", order.id)
         try:
@@ -1661,16 +1644,12 @@ def stripe_webhook(request):
         except Exception:
             log.exception("send_invoice_email failed for order %s", order.id)
 
- 
     if etype == "payment_intent.processing":
-        # reflect processing for SEPA and optionally (re)send the pending email once
-        order_id = (data.get("metadata") or {}).get("order_id")
-        if order_id:
+        oid = (data.get("metadata") or {}).get("order_id")
+        if oid:
             try:
-                order = Order.objects.get(pk=order_id)
+                order = Order.objects.get(pk=oid)
                 _mark_processing(order)
-                
-                # Optional: send (or re-send) the pending notice
                 user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
                 try:
                     send_sepa_pending_email(order, user_locale=user_locale)
@@ -1680,16 +1659,15 @@ def stripe_webhook(request):
                 pass
 
     elif etype == "payment_intent.succeeded":
-        order_id = (data.get("metadata") or {}).get("order_id")
-        if order_id:
+        oid = (data.get("metadata") or {}).get("order_id")
+        if oid:
             try:
-                order = Order.objects.get(pk=order_id)
+                order = Order.objects.get(pk=oid)
                 _mark_paid(order)
             except Order.DoesNotExist:
                 pass
 
     elif etype == "invoice.payment_succeeded":
-        # for installment/subscription charges
         oid = (data.get("metadata") or {}).get("order_id")
         if oid:
             try:
