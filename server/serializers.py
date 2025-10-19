@@ -582,44 +582,53 @@ class OrderCreateSerializer(serializers.Serializer):
         return coup, disc, None
 
     def create(self, validated):
-        user = self.context["request"].user
+        req = self.context["request"]
+        user = req.user if req.user.is_authenticated else None
         # create/update address
         addr = self._resolve_address(user, validated)
 
+        with transaction.atomic():
+            # build items
+            for it in items_in:
+                product = Product.objects.select_for_update().get(pk=it["product_id"])
+                qty = int(it["qty"])
+                # check stock
+                if product.quantity < qty:
+                    raise serializers.ValidationError(
+                        {"items": f"Not enough stock for {product.title_en} (have {product.quantity}, need {qty})."}
+                    )
+                # price incl. VAT (you already have a helper on Product)
+                unit = product.vat_included_price()
+                oi = OrderItem.objects.create(product=product, quantity=qty, unit_price=unit)
+                order_items.append(oi)
+                subtotal += unit * qty
 
-        # build order items
-        items_in = validated["items"]
-        order_items, subtotal = [], Decimal("0.00")
-        for it in items_in:
-            product = Product.objects.get(pk=it["product_id"])
-            qty = int(it["qty"]) 
-            oi = OrderItem.objects.create(product=product, quantity=qty, unit_price=Product.vat_included_price(product))
-            order_items.append(oi)
-            subtotal += Product.vat_included_price(product) * qty
+            coupon_code = validated.get("coupon_code", "").strip()
+            coupon_obj, discount, _ = self._apply_coupon(user, items_in, subtotal, coupon_code)
 
-        coupon_code = validated.get("coupon_code", "").strip()
-        coupon_obj, discount, _ = self._apply_coupon(user, items_in, subtotal, coupon_code)
-        
-        shipping_fee = Decimal("0.00")  
-        total = (subtotal + shipping_fee).quantize(Decimal("0.01"))
+            shipping_fee = Decimal("0.00")
+            total = (subtotal - discount + shipping_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if total < Decimal("0.00"):
+                total = Decimal("0.00")
 
-        total = (subtotal - discount + shipping_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if total < 0:
-            total = Decimal("0.00")
+            order = Order.objects.create(
+                user=user,
+                guest_email=None if user else guest_email,
+                guest_name=None if user else guest_name,
+                status="pending",
+                payment_method=validated["payment_method"],
+                subtotal=subtotal.quantize(Decimal("0.01")),
+                shipping_fee=shipping_fee,
+                total_price=total,
+                shipping_address=addr,
+                coupon=coupon_obj,
+                discount_amount=discount,
+            )
+            order.items.add(*order_items)
 
-        
-        order = Order.objects.create(
-            user=user,
-            status="pending",
-            payment_method=validated["payment_method"],
-            subtotal=subtotal.quantize(Decimal("0.01")),
-            shipping_fee=shipping_fee,
-            total_price=total,
-            shipping_address=addr,
-            coupon=coupon_obj,
-            discount_amount=discount
-        )
-        order.items.add(*order_items)
+            # ✅ actually decrement stock now (reserve)
+            order.lock_stock()
+
         return order
 
 class OrderListItemSerializer(serializers.ModelSerializer):
