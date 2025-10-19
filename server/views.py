@@ -1167,7 +1167,11 @@ class PaypalCaptureOrder(PaypalBase):
 # ------------ Stripe ---------------------------
 import stripe
 try:
+<<<<<<< HEAD
     stripe_error = stripe.error        
+=======
+    stripe_error = stripe_error           # old/public alias if present
+>>>>>>> ea287f4 (WIP: local edits in server/views.py)
 except AttributeError:
     from stripe import _error as stripe_error 
 
