@@ -1,9 +1,9 @@
 # server/models.py
 from django.contrib.auth.models import AbstractUser,BaseUserManager
 from django.contrib.postgres.fields import ArrayField
-from django.db import models
+from django.db import models, transaction
 from decimal import Decimal, ROUND_HALF_UP
-from django.db.models import Q, UniqueConstraint
+from django.db.models import Q, UniqueConstraint,F
 from django.db.models.functions import Lower
 from django.core.exceptions import ValidationError
 from datetime import timedelta
@@ -351,9 +351,6 @@ class Order(models.Model):
         ("card", "Card"),
         ("sepa_debit", "SEPA Direct Debit"),
         ("paypal", "PayPal"),
-        ("giropay", "giropay"),
-        ("sofort", "Sofort"),
-        ("klarna", "Klarna"),
         ("bank_transfer", "Bank Transfer"),
     ]
     user = models.ForeignKey("server.User", on_delete=models.CASCADE, related_name='orders')
@@ -405,6 +402,17 @@ class Order(models.Model):
 
     def __str__(self):
         return f"Order #{self.pk}"
+    
+    def _iter_items(self):
+        # Defensive; supports both M2M and legacy single product/quantity
+        if self.items_id:  # M2M always exists; safer path:
+            for it in self.items.all().select_related("product"):
+                yield it
+        elif getattr(self, "product", None) and getattr(self, "quantity", None):
+            # legacy one-product order
+            from server.models import OrderItem
+            oi = OrderItem(product=self.product, quantity=self.quantity, unit_price=self.product.price)
+            yield oi
 
     # Human invoice number base (unique per order pk/month)
     @property
@@ -459,6 +467,37 @@ class Order(models.Model):
         if self.status != "delivered" or not self.delivered_at:
             return False
         return timezone.now() <= (self.delivered_at + timedelta(days=1))
+    
+    @transaction.atomic
+    def lock_stock(self):
+        """Decrease Product.quantity for all order items if not already done."""
+        if self.stock_locked:
+            return
+        from server.models import Product
+        # SELECT ... FOR UPDATE to prevent race conditions
+        for it in self._iter_items():
+            # lock the product row
+            p = Product.objects.select_for_update().get(pk=it.product_id)
+            if p.quantity < it.quantity:
+                raise ValueError(f"Insufficient stock for {p} (have {p.quantity}, need {it.quantity})")
+            p.quantity = F("quantity") - it.quantity
+            p.save(update_fields=["quantity"])
+        # mark flag
+        self.stock_locked = True
+        self.save(update_fields=["stock_locked"])
+
+    @transaction.atomic
+    def release_stock(self):
+        """Add back Product.quantity for all items if not already released."""
+        if not self.stock_locked or self.stock_released:
+            return
+        from server.models import Product
+        for it in self._iter_items():
+            p = Product.objects.select_for_update().get(pk=it.product_id)
+            p.quantity = F("quantity") + it.quantity
+            p.save(update_fields=["quantity"])
+        self.stock_released = True
+        self.save(update_fields=["stock_released"])
     
 #--------------Coupon code------------
 
