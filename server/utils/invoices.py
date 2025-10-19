@@ -1,4 +1,4 @@
-
+# server/utils/invoices.py
 from io import BytesIO
 from decimal import Decimal
 from django.core.files.base import ContentFile

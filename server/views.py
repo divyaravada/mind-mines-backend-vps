@@ -4,6 +4,11 @@ from decimal import Decimal,ROUND_HALF_UP,InvalidOperation
 from dateutil.relativedelta import relativedelta
 import json, re
 import requests as http
+from django.utils.timezone import now
+from django.db.models.functions import Lower
+from rest_framework import permissions, status, throttling
+
+
 
 from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
@@ -34,14 +39,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework import permissions
+
 
 
 from .pagination import StandardResultsSetPagination
 from .serializers import (
     ProfileSerializer, RegisterSerializer, MyTokenObtainPairSerializer,
     ProductSerializer,ProductMiniSerializer, ContactMessageSerializer,ReviewWriteSerializer,
-    NewsletterSubscriberSerializer, AddressSerializer, PromotionSerializer,
+    NewsletterSubscriberSerializer, AddressSerializer, PromotionSerializer,GuestOrderLookupInputSerializer,
+    OrderPublicSerializer,
     ReviewSerializer, WishlistSerializer, NaturalStoneSerializer,CouponPreviewIn,
     StoneEnquirySerializer, AccountSerializer, OrderCreateSerializer, OrderReadSerializer, 
 )
@@ -1865,3 +1871,108 @@ class OrderCancelRequestAPIView(APIView):
             },
             status=201,
         )
+# --- GUEST CHECKOUT LOGIN ---
+from uuid import uuid4
+
+def _get_or_create_guest_user(email: str, full_name: str = ""):
+    """
+    Create or reuse a 'guest' user. Keep is_active=False so it doesn't act as a normal account.
+    Assign an unusable password.
+    """
+    email = (email or "").strip().lower()
+    User = get_user_model()
+
+    user = User.objects.filter(email=email).first()
+    if user:
+        # If it already exists but is a "guest" (inactive), reuse it
+        if not user.is_active:
+            # update name if newly provided
+            if full_name and hasattr(user, "profile"):
+                user.profile.full_name = full_name
+                user.profile.save(update_fields=["full_name"])
+            return user
+        # Active user with same email is handled earlier in serializer validation
+        return user
+
+    # Create a fresh guest account
+    username = f"guest-{uuid4().hex[:12]}"
+    user = User.objects.create(
+        email=email,
+        username=username,
+        is_active=False,  # mark as guest/unverified
+    )
+    user.set_unusable_password()
+    user.save()
+
+    # optional: tag profile
+    if hasattr(user, "profile"):
+        if full_name:
+            user.profile.full_name = full_name
+        # You could add a boolean field like `is_guest` in Profile if desired
+        user.profile.save()
+
+    return user
+
+
+class GuestCheckoutLoginView(APIView):
+    """
+    Issue a short-lived JWT for a 'guest' user so existing authenticated-only
+    order/payment endpoints can be reused without schema changes.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from .serializers import GuestCheckoutIn
+        ser = GuestCheckoutIn(data=request.data)
+        ser.is_valid(raise_exception=True)
+
+        email = ser.validated_data["email"]
+        full_name = ser.validated_data.get("full_name", "")
+
+        # If a real account exists with this email, the serializer already blocked it.
+        user = _get_or_create_guest_user(email, full_name)
+
+        # Mint tokens reusing your existing JWT serializer
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            "refresh": str(refresh),
+            "access": str(refresh.access_token),
+            "user": {"id": user.id, "email": user.email, "username": user.username, "guest": True},
+        }, status=200)
+
+class GuestLookupThrottle(throttling.SimpleRateThrottle):
+    scope = "guest_lookup"
+
+    def get_cache_key(self, request, view):
+        # throttle by IP for POSTs
+        ident = self.get_ident(request)
+        return self.cache_format % {"scope": self.scope, "ident": ident}
+
+class GuestOrderLookupView(APIView):
+    """
+    POST { email, number } -> public order details if email matches the order's customer email.
+    """
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [GuestLookupThrottle]
+
+    def post(self, request):
+        inp = GuestOrderLookupInputSerializer(data=request.data)
+        inp.is_valid(raise_exception=True)
+        email = inp.validated_data["email"].strip()
+        number = inp.validated_data["number"].strip()
+
+        # IMPORTANT:
+        # - number should be unique (your order.number)
+        # - email is compared case-insensitively
+        qs = Order.objects.select_related("shipping_address").prefetch_related("items__product")
+        order = qs.filter(number=number).first()
+        if not order:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        order_email = (getattr(order, "customer_email", "") or "").strip()
+        if order_email.lower() != email.lower():
+            # do not reveal whether the email or number is wrong
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        ser = OrderPublicSerializer(order, context={"request": request})
+        return Response(ser.data, status=status.HTTP_200_OK)

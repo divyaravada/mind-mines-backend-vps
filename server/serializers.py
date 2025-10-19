@@ -11,6 +11,7 @@ from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.core.mail import EmailMultiAlternatives
 from django.contrib.auth.tokens import default_token_generator
 from decimal import Decimal, ROUND_HALF_UP
+from django.contrib.auth import get_user_model
 
 def _norm(s):
     return " ".join((s or "").strip().split()).lower()
@@ -740,3 +741,82 @@ class ReviewWriteSerializer(serializers.ModelSerializer):
         if v < 1 or v > 5:
             raise serializers.ValidationError("Rating must be between 1 and 5.")
         return v
+
+   
+class GuestCheckoutIn(serializers.Serializer):
+    email = serializers.EmailField()
+    full_name = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_email(self, v):
+        v = v.strip().lower()
+        User = get_user_model()
+        # If there is a *real* active user with this email, force login
+        if User.objects.filter(email=v, is_active=True).exists():
+            raise serializers.ValidationError(
+                "An account already exists with this email. Please sign in."
+            )
+        return v
+
+class GuestOrderLookupInputSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    number = serializers.CharField(max_length=64)
+
+class OrderItemPublicSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    quantity = serializers.IntegerField()
+    unit_price = serializers.DecimalField(max_digits=10, decimal_places=2)
+    product = serializers.SerializerMethodField()
+
+    def get_product(self, obj):
+        p = getattr(obj, "product", None)
+        if not p:
+            return None
+        # expose only safe fields
+        return {
+            "id": p.id,
+            "title_en": getattr(p, "title_en", "") or getattr(p, "title", ""),
+            "title_de": getattr(p, "title_de", ""),
+            "image": getattr(p, "image", None) or getattr(p, "image_url", None),
+        }
+
+class OrderPublicSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    number = serializers.CharField()
+    status = serializers.CharField()
+    created_at = serializers.DateTimeField()
+    delivered_at = serializers.DateTimeField(allow_null=True, required=False)
+    subtotal = serializers.DecimalField(max_digits=10, decimal_places=2)
+    shipping_fee = serializers.DecimalField(max_digits=10, decimal_places=2)
+    total_price = serializers.DecimalField(max_digits=10, decimal_places=2)
+    invoice_pdf = serializers.SerializerMethodField()
+    tracking_number = serializers.CharField(allow_blank=True, required=False)
+    items = OrderItemPublicSerializer(many=True)
+    shipping_address = serializers.SerializerMethodField()
+
+    def get_invoice_pdf(self, obj):
+        # Return a public/absolute URL if your storage requires it
+        f = getattr(obj, "invoice_pdf", None)
+        if not f:
+            return None
+        try:
+            url = f.url  # Django FileField
+        except Exception:
+            return None
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request else url
+
+    def get_shipping_address(self, obj):
+        a = getattr(obj, "shipping_address", None)
+        if not a:
+            return None
+        # expose only non-sensitive parts
+        return {
+            "first_name": getattr(a, "first_name", ""),
+            "last_name": getattr(a, "last_name", ""),
+            "address_line1": getattr(a, "address_line1", ""),
+            "address_line2": getattr(a, "address_line2", ""),
+            "postal_code": getattr(a, "postal_code", ""),
+            "city": getattr(a, "city", ""),
+            "country": getattr(a, "country", "") or getattr(a, "state", ""),
+            "phone": getattr(a, "phone", ""),
+        }

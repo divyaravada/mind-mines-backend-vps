@@ -17,7 +17,7 @@ from .views import (
      InvoiceDownloadView, OrderAdminUpdateAPIView,AccountDeleteRequestView,
      CreateBankTransferOrder, StoneEnquiryCreateView,OrderDetailAPIView,SetTrackingAPIView,OrderInvoiceAPIView,
    CouponPreviewAPIView,ActivePromotionAPIView,StripeCreateSepaIntent,StripeCreateSepaSetupIntent,StripeSepaCreateInstallments,
-    stripe_webhook,StripeCreateIntent,StripeCreateCardSetupIntent,
+    stripe_webhook,StripeCreateIntent,StripeCreateCardSetupIntent,GuestCheckoutLoginView,GuestOrderLookupView,
      OrderCancelRequestAPIView,OrderRequestReturnAPIView,ProductSuggestList
 )
 from django.contrib.sitemaps.views import sitemap
@@ -89,7 +89,8 @@ urlpatterns = [
     path("orders/<int:pk>/request-cancel/", OrderCancelRequestAPIView.as_view()),
     path("orders/<int:pk>/request-return/", OrderRequestReturnAPIView.as_view()),
 
-
+    path("guest/checkout-login/", GuestCheckoutLoginView.as_view(), name="guest_checkout_login"),
+    path("guest-lookup/", GuestOrderLookupView.as_view(), name="orders-guest-lookup"),
 
      # PayPal
     path("payments/paypal/create-order/", PaypalCreateOrder.as_view()),

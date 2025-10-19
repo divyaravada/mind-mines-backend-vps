@@ -1,4 +1,4 @@
-
+# server/models.py
 from django.contrib.auth.models import AbstractUser,BaseUserManager
 from django.contrib.postgres.fields import ArrayField
 from django.db import models

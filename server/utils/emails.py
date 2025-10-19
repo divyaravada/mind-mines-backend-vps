@@ -1,4 +1,4 @@
-
+# server/utils/emails.py
 import os
 import logging
 from django.conf import settings
