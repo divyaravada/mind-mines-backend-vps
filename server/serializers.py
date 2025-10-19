@@ -382,6 +382,11 @@ class ContactMessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ContactMessage
         fields = ["id", "name", "email", "message", "sent_at"]
+        
+    def validate(self, attrs):
+        if len(attrs.get("message","").strip()) < 10:
+            raise serializers.ValidationError("Message is too short.")
+        return attrs
 
 class NewsletterSubscriberSerializer(serializers.ModelSerializer):
     email = serializers.EmailField()
