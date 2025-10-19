@@ -802,6 +802,8 @@ class OrderAdminUpdateAPIView(APIView):
                 send_order_confirmation(order, user_locale=locale)
             except Exception:
                 pass
+        if prev_status != "cancelled" and order.status == "cancelled":
+            order.release_stock()
 
         return Response(OrderReadSerializer(order, context={"request": request}).data, status=200)
     
