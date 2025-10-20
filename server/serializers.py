@@ -630,9 +630,12 @@ class OrderCreateSerializer(serializers.Serializer):
         guest_email = (self.initial_data.get("email") or "").strip() or None
         guest_name = (self.initial_data.get("name") or "").strip() or None
 
-        # create/update address
-        addr = self._resolve_address(user, validated_data)
+        # pick an order email
+        order_email = user.email if user else guest_email
+        if not order_email:
+            raise serializers.ValidationError({"email": "Email is required."})
 
+        addr = self._resolve_address(user, validated_data)
         items_in = validated_data["items"]
         subtotal = Decimal("0.00")
 
@@ -640,7 +643,7 @@ class OrderCreateSerializer(serializers.Serializer):
             # 1) create the order FIRST (so FK can point to it)
             order = Order.objects.create(
                 user=user,
-                email=(user.email if user else guest_email),  # <-- add this line
+                email=order_email,  
                 guest_email=None if user else guest_email,
                 guest_name=None if user else guest_name,
                 status="pending",
@@ -659,7 +662,7 @@ class OrderCreateSerializer(serializers.Serializer):
                     raise serializers.ValidationError(
                         {"items": f"Not enough stock for {product.title_en} (have {product.quantity}, need {qty})."}
                     )
-                unit = product.vat_included_price()  # gross (19% VAT), discount baked if you want
+                unit = product.final_price
                 OrderItem.objects.create(order=order, product=product, quantity=qty, unit_price=unit)
                 subtotal += unit * qty
 
