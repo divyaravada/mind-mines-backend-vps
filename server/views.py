@@ -1283,7 +1283,7 @@ class StripeCreateIntent(APIView):
         try:
             s = OrderCreateSerializer(data=data, context={"request": request})
             s.is_valid(raise_exception=True)
-        except Exception as e:
+        except serializers.ValidationError as e:
             return Response(
                 {"detail": "Order validation failed", "errors": getattr(s, "errors", str(e))},
                 status=400,
@@ -1294,6 +1294,9 @@ class StripeCreateIntent(APIView):
             order.payment_method = pm
             order.status = "pending"
             order.save(update_fields=["payment_method", "status"])
+        except Exception as e:
+            # helpful during debugging
+            return Response({"detail": "Order creation failed", "error": str(e)}, status=400)
 
         # Ensure Stripe Customer (guest-safe)
         try:
