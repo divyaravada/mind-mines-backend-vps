@@ -1281,7 +1281,7 @@ class StripeCreateIntent(APIView):
 
         # Build order in 'pending'
         
-            s = OrderCreateSerializer(data=data, context={"request": request})
+        s = OrderCreateSerializer(data=data, context={"request": request})
         if not s.is_valid():
             return Response({"detail": "Order validation failed", "errors": s.errors}, status=400)
 
