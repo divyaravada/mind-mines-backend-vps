@@ -11,7 +11,9 @@ from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.core.mail import EmailMultiAlternatives
 from django.contrib.auth.tokens import default_token_generator
 from decimal import Decimal, ROUND_HALF_UP
+from django.db.models import F
 from django.contrib.auth import get_user_model
+from django.db import transaction
 
 def _norm(s):
     return " ".join((s or "").strip().split()).lower()
@@ -288,7 +290,12 @@ class ProductSerializer(serializers.ModelSerializer):
     media = ProductMediaSerializer(many=True, read_only=True)
     image = serializers.SerializerMethodField()
     vat_price = serializers.SerializerMethodField()
+    is_discounted = serializers.BooleanField(read_only=True)
+    final_price = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    low_stock = serializers.BooleanField(read_only=True)
+    out_of_stock = serializers.BooleanField(read_only=True)
     stock_status = serializers.SerializerMethodField()
+    stock = serializers.SerializerMethodField()
     reviews_count = serializers.SerializerMethodField()
     average_rating = serializers.SerializerMethodField()
 
@@ -309,7 +316,8 @@ class ProductSerializer(serializers.ModelSerializer):
             "returnspara3_en", "returnspara3_de",
             "type_of_stone", "material", "color", "stone_color_image",
             "quantity", "dimensions", "weight", "category", "price",
-            "key", "image",
+            "key", "image","sale_price", "discount_percent",
+            "final_price", "is_discounted", "stock", "low_stock", "out_of_stock",
             "media", "vat_price", "stock_status", "reviews_count", "average_rating",
         ]
 
@@ -328,6 +336,9 @@ class ProductSerializer(serializers.ModelSerializer):
         except Exception:
             pass
         return ""
+    
+    def get_stock(self, obj):
+        return int(obj.quantity or 0)
 
     def get_vat_price(self, obj):
         return obj.vat_included_price()
@@ -475,6 +486,7 @@ class OrderItemIn(serializers.Serializer):
     qty = serializers.IntegerField(min_value=1)
 
 class OrderCreateSerializer(serializers.Serializer):
+    email = serializers.EmailField()
     items = OrderItemIn(many=True)
     payment_method = serializers.ChoiceField(
          choices=[c[0] for c in Order.PAYMENT_METHODS],
@@ -488,6 +500,8 @@ class OrderCreateSerializer(serializers.Serializer):
     address_line2 = serializers.CharField(allow_blank=True, required=False)
     postal_code = serializers.CharField(allow_blank=True, required=False)
     city = serializers.CharField(allow_blank=True, required=False)
+    method = serializers.ChoiceField(choices=["card", "sepa_debit"], required=True)
+    months = serializers.IntegerField(required=False, min_value=2, max_value=24)
     country = serializers.CharField(allow_blank=True, required=False)
     phone = serializers.CharField(allow_blank=True, required=False)
 
@@ -495,30 +509,32 @@ class OrderCreateSerializer(serializers.Serializer):
     house_number = serializers.CharField(allow_blank=True, required=False)
     street_name  = serializers.CharField(allow_blank=True, required=False)
 
-    def validate_payment_method(self, v: str) -> str:
+    def validate(self, attrs):
         # Accept common aliases and map them to your canonical choices
         aliases = {
-            "sepa": "sepa_debit",
             "stripe_sepa": "sepa_debit",
             "stripe_card": "card",
-            "credit_card": "card",
             "debit_card": "card",
-            "bancontact": "bancontact",   # only if present in your model choices
-            "giropay": "giropay",
-            "sofort": "sofort",
-            "klarna": "klarna",
-            "bank": "bank_transfer",
+            "bank_transfer": "bank_transfer",
             "bank_transfer": "bank_transfer",
             "paypal": "paypal",
         }
-        key = (v or "").strip().lower()
-        mapped = aliases.get(key, key)
-
-        # Re-validate against the model's actual choices
+        pm_in = (attrs.get("payment_method") or attrs.get("method") or "card").strip().lower()
+        pm = aliases.get(pm_in, pm_in)
         valid = {c[0] for c in Order.PAYMENT_METHODS}
-        if mapped not in valid:
-            raise serializers.ValidationError(f"'{v}' is not a valid choice.")
-        return mapped
+        if pm not in valid:
+            raise serializers.ValidationError({"payment_method": f"'{pm_in}' is not supported."})
+        attrs["payment_method"] = pm  # canonicalize
+
+        # SEPA installments: DE only
+        months = attrs.get("months")
+        country = (attrs.get("country") or "").upper()[:2]
+        if months and pm == "sepa_debit" and country != "DE":
+            raise serializers.ValidationError({"country": "SEPA installments are available in DE only."})
+
+        # one-off SEPA also needs IBAN + mandate in frontend; here we only limit installments
+        return attrs
+    
 
     def _resolve_address(self, user, validated):
         aid = validated.get("address_id")
@@ -582,23 +598,36 @@ class OrderCreateSerializer(serializers.Serializer):
         return coup, disc, None
 
     def create(self, validated):
+    def create(self, validated):
         req = self.context["request"]
         user = req.user if req.user.is_authenticated else None
+
+        guest_email = (self.initial_data.get("email") or "").strip() or None
+        guest_name  = (self.initial_data.get("name")  or "").strip() or None
         # create/update address
         addr = self._resolve_address(user, validated)
+
+        items_in = validated["items"]
+        order_items, subtotal = [], Decimal("0.00")
+
+        order = Order.objects.create(
+            user=user,
+            email=validated["email"],
+            status="pending",
+        )
+        subtotal = Decimal("0.00")
 
         with transaction.atomic():
             # build items
             for it in items_in:
                 product = Product.objects.select_for_update().get(pk=it["product_id"])
                 qty = int(it["qty"])
-                # check stock
                 if product.quantity < qty:
                     raise serializers.ValidationError(
                         {"items": f"Not enough stock for {product.title_en} (have {product.quantity}, need {qty})."}
                     )
-                # price incl. VAT (you already have a helper on Product)
-                unit = product.vat_included_price()
+                # ✅ use final (gross) price including product discount
+                unit = Decimal(product.final_price)
                 oi = OrderItem.objects.create(product=product, quantity=qty, unit_price=unit)
                 order_items.append(oi)
                 subtotal += unit * qty
@@ -608,7 +637,7 @@ class OrderCreateSerializer(serializers.Serializer):
 
             shipping_fee = Decimal("0.00")
             total = (subtotal - discount + shipping_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            if total < Decimal("0.00"):
+            if total < 0:
                 total = Decimal("0.00")
 
             order = Order.objects.create(
@@ -626,9 +655,8 @@ class OrderCreateSerializer(serializers.Serializer):
             )
             order.items.add(*order_items)
 
-            # ✅ actually decrement stock now (reserve)
+            # ✅ reserve stock immediately
             order.lock_stock()
-
         return order
 
 class OrderListItemSerializer(serializers.ModelSerializer):
