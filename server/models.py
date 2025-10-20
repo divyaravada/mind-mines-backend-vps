@@ -387,8 +387,6 @@ class Order(models.Model):
     product = models.ForeignKey("server.Product", on_delete=models.SET_NULL, null=True, blank=True)
     quantity = models.PositiveIntegerField(null=True, blank=True)
 
-    # NEW
-    items = models.ManyToManyField('server.OrderItem', blank=True, related_name='orders')
     payment_method = models.CharField(
         max_length=32,
         choices=PAYMENT_METHODS, default="card"
@@ -437,13 +435,18 @@ class Order(models.Model):
     
     def _iter_items(self):
         # Defensive; supports both M2M and legacy single product/quantity
-        if self.items_id:  # M2M always exists; safer path:
-            for it in self.items.all().select_related("product"):
+        if hasattr(self, "items") and self.items.exists():
+            for it in self.items.select_related("product").all():
                 yield it
-        elif getattr(self, "product", None) and getattr(self, "quantity", None):
-            # legacy one-product order
-            from server.models import OrderItem
-            oi = OrderItem(product=self.product, quantity=self.quantity, unit_price=self.product.price)
+            return
+            
+        if getattr(self, "product", None) and getattr(self, "quantity", None):
+            oi = OrderItem(
+                order=self,  # not saved
+                product=self.product,
+                quantity=self.quantity,
+                unit_price=self.product.price,
+            )
             yield oi
 
     # Human invoice number base (unique per order pk/month)
