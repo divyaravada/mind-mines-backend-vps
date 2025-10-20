@@ -252,7 +252,10 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "server.pagination.StandardResultsSetPagination", 
     "PAGE_SIZE": 10,
     "DEFAULT_FILTER_BACKENDS": ["django_filters.rest_framework.DjangoFilterBackend", "rest_framework.filters.SearchFilter"],
-}
+    "version": 1,
+    "DEFAULT_THROTTLE_RATES": {
+        "guest_lookup": "10/min",
+}}
 
 
 LOGGING = {
@@ -319,7 +322,4 @@ BANK_TRANSFER = {
     "PAYMENT_DUE_HOURS": int(env("BANK_PAYMENT_DUE_HOURS", default=24)),  # auto-cancel window
 }
 
-KLARNA_USERNAME =  ""
-KLARNA_PASSWORD =""
-KLARNA_ENV =  "playground"  # playground | live            
 
