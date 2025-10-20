@@ -436,12 +436,20 @@ class Order(models.Model):
         return f"Order #{self.pk}"
     
     def _iter_items(self):
-        # Defensive; supports both M2M and legacy single product/quantity
+        manager = getattr(self, "items", None)
+        if manager is not None:
+            found = False
+            for it in manager.all().select_related("product"):
+                found = True
+                yield it
+            if found:
+                return
         has_lines = False
-        for it in self.items.all().select_related("product"):
-            has_lines = True
+        
+        for it in OrderItem.objects.filter(order=self).select_related("product"):
             yield it
-        if not has_lines and self.product_id and self.quantity:
+            
+        if self.product_id and self.quantity:
             yield OrderItem(
                 product=self.product,
                 quantity=self.quantity,
