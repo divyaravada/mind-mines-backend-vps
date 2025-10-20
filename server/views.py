@@ -1216,12 +1216,6 @@ def _amount_cents(d: Decimal) -> int:
 
 
 def _get_or_create_stripe_customer(user=None, email: str | None = None) -> str:
-    """
-    Return a Stripe customer id, create one if absent.
-    - If `user` has profile.stripe_customer_id, reuse it.
-    - If guest (no user), create a customer using provided `email`.
-    """
-        # Authenticated user path
        if user is not None and getattr(user, "is_authenticated", False):
             prof = getattr(user, "profile", None)
             # reuse if already known
@@ -1229,21 +1223,21 @@ def _get_or_create_stripe_customer(user=None, email: str | None = None) -> str:
                 return prof.stripe_customer_id
 
             customer = stripe.Customer.create(
-                email=(user.email or email) or None,
-                name=(f"{user.first_name} {user.last_name}".strip() or None),
+                email=(getattr(user, "email", None) or email) or None,
+                name=(f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip() or None),
                 metadata={"user_id": str(user.id)},
             )
             if prof and hasattr(prof, "stripe_customer_id"):
                 prof.stripe_customer_id = customer.id
                 prof.save(update_fields=["stripe_customer_id"])
+                return customer.id
+    
+            # Guest path (no user)
+            customer = stripe.Customer.create(
+                email=email or None,
+                metadata={"guest": "true"},
+            )
             return customer.id
-
-    # Guest path (no user)
-    customer = stripe.Customer.create(
-        email=email or None,
-        metadata={"guest": "true"},
-    )
-    return customer.id
 
 
 def _extract_email_from_payload(data: dict) -> str | None:
