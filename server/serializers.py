@@ -640,6 +640,7 @@ class OrderCreateSerializer(serializers.Serializer):
             # 1) create the order FIRST (so FK can point to it)
             order = Order.objects.create(
                 user=user,
+                email=(user.email if user else guest_email),  # <-- add this line
                 guest_email=None if user else guest_email,
                 guest_name=None if user else guest_name,
                 status="pending",
