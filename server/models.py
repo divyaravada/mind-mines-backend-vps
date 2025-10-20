@@ -436,18 +436,11 @@ class Order(models.Model):
     
     def _iter_items(self):
         # Defensive; supports both M2M and legacy single product/quantity
-        if hasattr(self, "items") and self.items.exists():
-            for it in self.items.select_related("product").all():
-                yield it
-            return
+        for it in self.items.all().select_related("product"):
+            yield it
             
         if getattr(self, "product", None) and getattr(self, "quantity", None):
-            oi = OrderItem(
-                order=self,  # not saved
-                product=self.product,
-                quantity=self.quantity,
-                unit_price=self.product.price,
-            )
+            oi = OrderItem(product=self.product, quantity=self.quantity, unit_price=self.product.price)
             yield oi
 
     # Human invoice number base (unique per order pk/month)
