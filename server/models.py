@@ -54,6 +54,12 @@ COLOR_CHOICES = [
         # Add more as needed
     ]
 
+VAT_RATE = Decimal("0.19")
+VAT_MULTIPLIER = Decimal("1.19")
+
+def _q2(d):
+    return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    
 class CustomUserManager(BaseUserManager):
     use_in_migrations = True
 
@@ -104,7 +110,7 @@ class Profile(models.Model):
         return f"{self.user.email} profile"
 
 class Address(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='addresses')
+    user = models.ForeignKey("server.User", on_delete=models.CASCADE, related_name='addresses', null=True, blank=True)
 
     # UI-first fields
     first_name = models.CharField(max_length=100, blank=True)
@@ -243,7 +249,9 @@ class Product(models.Model):
 
     category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default="home_decor")
     price = models.DecimalField(max_digits=8, decimal_places=2)
-
+    sale_price = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    discount_percent = models.PositiveIntegerField(blank=True, null=True)  # e.g. 10 = 10%
+    stock = models.PositiveIntegerField(default=0)
     key = models.CharField(max_length=20, unique=True, null=True, blank=True)
 
     image = models.ImageField(upload_to="decor-products/", null=True, blank=True)
@@ -259,14 +267,47 @@ class Product(models.Model):
             super().save(update_fields=["key"])
 
     def vat_included_price(self):
-        vat_multiplier = Decimal("1.19")
-        return (self.price * vat_multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
+        return _q2(Decimal(self.price) * VAT_MULTIPLIER)
+        
     def stock_message(self):
         if self.quantity == 0:
             return "Out of stock"
         elif self.quantity < 5:
             return "Hurry up! Only a few left"
+        return "In stock"
+    @property
+    def is_discounted(self):
+        gross = self.vat_included_price()
+        if self.sale_price is not None and Decimal(self.sale_price) < gross:
+            return True
+        if self.discount_percent and self.discount_percent > 0:
+            return True
+        return False
+
+    @property
+    def final_price(self):
+        gross = self.vat_included_price()
+        if self.sale_price is not None:
+            return _q2(Decimal(self.sale_price))
+        if self.discount_percent:
+            dp = Decimal(self.discount_percent) / Decimal(100)
+            return _q2(gross * (Decimal(1) - dp))
+        return gross
+
+    @property
+    def low_stock(self):
+        return 0 < int(self.quantity or 0) < 5
+
+    @property
+    def out_of_stock(self):
+        return int(self.quantity or 0) <= 0
+
+    def stock_message(self):
+        q = int(self.quantity or 0)
+        if q <= 0:
+            return "Out of stock — new batch arriving soon"
+        if q < 5:
+            return "Hurry — almost gone!"
         return "In stock"
 
     def __str__(self):
@@ -327,24 +368,7 @@ ORDER_STATUS = [
 ]
 
 
-class OrderItem(models.Model):
-    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="order_items")
-    quantity = models.PositiveIntegerField()
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
 
-    def line_total(self):
-        return (self.unit_price * self.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-    @property
-    def product_name(self):
-        # defensive: works even if the product title field differs
-        try:
-            return getattr(self.product, "title_en", None) or getattr(self.product, "title", None) or str(self.product)
-        except Exception:
-            return "Product"
-
-    def __str__(self):
-        return f"{self.product_name} x {self.quantity}"
 
 class Order(models.Model):
     PAYMENT_METHODS = [
@@ -353,7 +377,11 @@ class Order(models.Model):
         ("paypal", "PayPal"),
         ("bank_transfer", "Bank Transfer"),
     ]
-    user = models.ForeignKey("server.User", on_delete=models.CASCADE, related_name='orders')
+    user = models.ForeignKey("server.User", on_delete=models.CASCADE, related_name='orders',null=True, blank=True)
+    email = models.EmailField()
+    guest_email = models.EmailField(blank=True, null=True)
+    guest_name  = models.CharField(max_length=200, blank=True, null=True)
+
 
     # legacy (optional)
     product = models.ForeignKey("server.Product", on_delete=models.SET_NULL, null=True, blank=True)
@@ -385,11 +413,15 @@ class Order(models.Model):
     total_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     installments_months = models.PositiveIntegerField(null=True, blank=True)  
     shipping_address = models.ForeignKey('server.Address', on_delete=models.SET_NULL, null=True, blank=True)
-    number = models.CharField(max_length=32, unique=True, null=True, blank=True, default=None)  # ← avoid ""
+    number = models.CharField(max_length=32, unique=True, null=True, blank=True, default=None) 
     created_at = models.DateTimeField(auto_now_add=True)
+    stripe_pi = models.CharField(max_length=255, blank=True, null=True)  
+    stripe_si = models.CharField(max_length=255, blank=True, null=True)
     updated_at = models.DateTimeField(auto_now=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
+    stock_locked = models.BooleanField(default=False)    
+    stock_released = models.BooleanField(default=False)
 
     class Meta:
         constraints = [
@@ -498,6 +530,26 @@ class Order(models.Model):
             p.save(update_fields=["quantity"])
         self.stock_released = True
         self.save(update_fields=["stock_released"])
+
+class OrderItem(models.Model):
+    order = models.ForeignKey(Order, related_name="items", on_delete=models.CASCADE)
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="order_items")
+    quantity = models.PositiveIntegerField()
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    def line_total(self):
+        return (self.unit_price * self.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    @property
+    def product_name(self):
+        # defensive: works even if the product title field differs
+        try:
+            return getattr(self.product, "title_en", None) or getattr(self.product, "title", None) or str(self.product)
+        except Exception:
+            return "Product"
+
+    def __str__(self):
+        return f"{self.product_name} x {self.quantity}"
     
 #--------------Coupon code------------
 
