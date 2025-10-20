@@ -111,31 +111,36 @@ class PromotionAdmin(admin.ModelAdmin):
     code_display.short_description = "Coupon code"
 
 # ---------- Order ----------
-class OrderItemThroughInline(admin.TabularInline):
-    """Show items for the order (m2m) read-only to avoid price drift)."""
-    model = Order.items.through
+class OrderItemInline(admin.TabularInline):
+    """Show OrderItem rows (FK to Order)."""
+    model = OrderItem
+    fk_name = "order"          # clarify the FK field
     extra = 0
     can_delete = False
+    readonly_fields = ("item_name", "quantity", "unit_price_fmt", "line_total_fmt")
+    fields = ("item_name", "quantity", "unit_price_fmt", "line_total_fmt")
     verbose_name = "Order item"
     verbose_name_plural = "Order items"
-    readonly_fields = ("orderitem_link", "quantity", "unit_price", "line_total")
 
     def has_add_permission(self, request, obj=None):
         return False
 
-    def orderitem_link(self, obj):
-        oi = obj.orderitem
-        return format_html("<b>{}</b>", oi.product_name)
+    # Readonly display helpers
+    def item_name(self, obj):
+        return obj.product_name
+    item_name.short_description = "Item"
 
-    def quantity(self, obj):
-        return obj.orderitem.quantity
+    def unit_price_fmt(self, obj):
+        return f"{obj.unit_price:.2f} €"
+    unit_price_fmt.short_description = "Unit price"
 
-    def unit_price(self, obj):
-        return f"{obj.orderitem.unit_price:.2f} €"
-
-    def line_total(self, obj):
-        return f"{obj.orderitem.line_total():.2f} €"
-
+    def line_total_fmt(self, obj):
+        try:
+            return f"{obj.line_total():.2f} €"
+        except Exception:
+            return "-"
+    line_total_fmt.short_description = "Line total"
+    
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
@@ -157,7 +162,7 @@ class OrderAdmin(admin.ModelAdmin):
         "items_readonly",
         ("payment_ref", "payment_id"),
     )
-    inlines = [OrderItemThroughInline]
+    inlines = [OrderItemInline]
 
     def items_readonly(self, obj):
         rows = [
