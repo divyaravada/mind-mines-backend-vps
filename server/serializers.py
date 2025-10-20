@@ -666,7 +666,7 @@ class OrderCreateSerializer(serializers.Serializer):
                     raise serializers.ValidationError(
                         {"items": f"Not enough stock for {product.title_en} (have {product.quantity}, need {qty})."}
                     )
-                unit = product.final_price
+                unit = getattr(product, "final_price", product.price)
                 OrderItem.objects.create(order=order, product=product, quantity=qty, unit_price=unit)
                 subtotal += unit * qty
 
