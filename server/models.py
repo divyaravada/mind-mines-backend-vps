@@ -105,6 +105,7 @@ class Profile(models.Model):
     mobile = models.CharField(max_length=20, blank=True)
     image = models.ImageField(upload_to="profile_pics/", blank=True, null=True)
     verified = models.BooleanField(default=False)
+    stripe_customer_id = models.CharField(max_length=64, blank=True, null=True)
 
     def __str__(self):
         return f"{self.user.email} profile"
