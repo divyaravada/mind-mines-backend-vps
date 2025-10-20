@@ -624,12 +624,13 @@ class OrderCreateSerializer(serializers.Serializer):
         disc = coup.discount_amount(user, items, subtotal)
         return coup, disc, None
 
-   def create(self, validated_data):
+    def create(self, validated_data):
         req = self.context["request"]
         user = req.user if req.user.is_authenticated else None
 
         guest_email = (self.initial_data.get("email") or "").strip() or None
-        guest_name  = (self.initial_data.get("name")  or "").strip() or None
+        guest_name = (self.initial_data.get("name") or "").strip() or None
+
         # create/update address
         addr = self._resolve_address(user, validated_data)
 
@@ -645,7 +646,7 @@ class OrderCreateSerializer(serializers.Serializer):
                     raise serializers.ValidationError(
                         {"items": f"Not enough stock for {product.title_en} (have {product.quantity}, need {qty})."}
                     )
-                # ✅ use final (gross) price including product discount
+                # use gross price incl. 19% VAT (and product discounts already reflected in your logic if needed)
                 unit = product.vat_included_price()
                 oi = OrderItem.objects.create(product=product, quantity=qty, unit_price=unit)
                 order_items.append(oi)
@@ -674,10 +675,11 @@ class OrderCreateSerializer(serializers.Serializer):
             )
             order.items.add(*order_items)
 
-            # ✅ reserve stock immediately
+            # reserve stock immediately
             order.lock_stock()
-        return order
 
+        return order
+        
 class OrderListItemSerializer(serializers.ModelSerializer):
     product = ProductMiniSerializer()
     class Meta:
