@@ -1223,22 +1223,22 @@ def _get_or_create_stripe_customer(user=None, email: str | None = None) -> str:
     - If `user` has profile.stripe_customer_id, reuse it.
     - If guest (no user), create a customer using provided `email`.
     """
-    # Authenticated user path
-    if user is not None and getattr(user, "is_authenticated", False):
-        cust_id = getattr(getattr(user, "profile", None), "stripe_customer_id", None)
-        if cust_id:
-            return cust_id
+        # Authenticated user path
+       if user is not None and getattr(user, "is_authenticated", False):
+            prof = getattr(user, "profile", None)
+            # reuse if already known
+            if prof and getattr(prof, "stripe_customer_id", None):
+                return prof.stripe_customer_id
 
-        customer = stripe.Customer.create(
-            email=(user.email or email) or None,
-            name=(f"{user.first_name} {user.last_name}".strip() or None),
-            metadata={"user_id": str(user.id)},
-        )
-        prof = getattr(user, "profile", None)
-        if prof:
-            prof.stripe_customer_id = customer.id
-            prof.save(update_fields=["stripe_customer_id"])
-        return customer.id
+            customer = stripe.Customer.create(
+                email=(user.email or email) or None,
+                name=(f"{user.first_name} {user.last_name}".strip() or None),
+                metadata={"user_id": str(user.id)},
+            )
+            if prof and hasattr(prof, "stripe_customer_id"):
+                prof.stripe_customer_id = customer.id
+                prof.save(update_fields=["stripe_customer_id"])
+            return customer.id
 
     # Guest path (no user)
     customer = stripe.Customer.create(
@@ -1361,7 +1361,6 @@ class StripeCreateIntent(APIView):
         # (Optional) SEPA pending email
         if pm_type == "sepa_debit":
             try:
-                from server.utils.email import send_sepa_pending_email
                 locale = (
                     getattr(getattr(request, "user", None), "profile", None) and
                     getattr(request.user.profile, "language", None)
@@ -1722,7 +1721,7 @@ class CreateBankTransferOrder(APIView):
         s.is_valid(raise_exception=True)
         with transaction.atomic():
             order = s.save()
-            order.payment_method = "bank"
+            order.payment_method = "bank_transfer"
             order.status = "pending"  
             order.save(update_fields=["payment_method", "status"])
 
@@ -1976,10 +1975,8 @@ class GuestOrderLookupView(APIView):
         if not order:
             return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        order_email = (getattr(order, "customer_email", "") or "").strip()
+        order_email = (getattr(order, "email", "") or getattr(order, "guest_email", "") or "").strip()
         if order_email.lower() != email.lower():
-            # do not reveal whether the email or number is wrong
             return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
-
         ser = OrderPublicSerializer(order, context={"request": request})
         return Response(ser.data, status=status.HTTP_200_OK)
