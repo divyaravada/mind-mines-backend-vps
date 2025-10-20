@@ -610,7 +610,6 @@ class OrderCreateSerializer(serializers.Serializer):
             addr.set_default_for_user()
         return addr
 
-
     def _apply_coupon(self, user, items, subtotal, code):
         if not code:
             return None, Decimal("0.00"), None
@@ -635,10 +634,23 @@ class OrderCreateSerializer(serializers.Serializer):
         addr = self._resolve_address(user, validated_data)
 
         items_in = validated_data["items"]
-        order_items, subtotal = [], Decimal("0.00")
+        subtotal = Decimal("0.00")
 
         with transaction.atomic():
-            # build items
+            # 1) create the order FIRST (so FK can point to it)
+            order = Order.objects.create(
+                user=user,
+                guest_email=None if user else guest_email,
+                guest_name=None if user else guest_name,
+                status="pending",
+                payment_method=validated_data.get("payment_method") or "card",
+                subtotal=Decimal("0.00"),  # temp, updated below
+                shipping_fee=Decimal("0.00"),
+                total_price=Decimal("0.00"),
+                shipping_address=addr,
+            )
+
+            # 2) add line items (FK to order), compute subtotal
             for it in items_in:
                 product = Product.objects.select_for_update().get(pk=it["product_id"])
                 qty = int(it["qty"])
@@ -646,12 +658,11 @@ class OrderCreateSerializer(serializers.Serializer):
                     raise serializers.ValidationError(
                         {"items": f"Not enough stock for {product.title_en} (have {product.quantity}, need {qty})."}
                     )
-                # use gross price incl. 19% VAT (and product discounts already reflected in your logic if needed)
-                unit = product.vat_included_price()
-                oi = OrderItem.objects.create(product=product, quantity=qty, unit_price=unit)
-                order_items.append(oi)
+                unit = product.vat_included_price()  # gross (19% VAT), discount baked if you want
+                OrderItem.objects.create(order=order, product=product, quantity=qty, unit_price=unit)
                 subtotal += unit * qty
 
+            # 3) coupon & totals
             coupon_code = (validated_data.get("coupon_code") or "").strip()
             coupon_obj, discount, _ = self._apply_coupon(user, items_in, subtotal, coupon_code)
 
@@ -660,22 +671,15 @@ class OrderCreateSerializer(serializers.Serializer):
             if total < 0:
                 total = Decimal("0.00")
 
-            order = Order.objects.create(
-                user=user,
-                guest_email=None if user else guest_email,
-                guest_name=None if user else guest_name,
-                status="pending",
-                payment_method=validated_data.get("payment_method") or "card",
-                subtotal=subtotal.quantize(Decimal("0.01")),
-                shipping_fee=shipping_fee,
-                total_price=total,
-                shipping_address=addr,
-                coupon=coupon_obj,
-                discount_amount=discount,
-            )
-            order.items.add(*order_items)
+            # 4) persist money & coupon
+            order.subtotal = subtotal.quantize(Decimal("0.01"))
+            order.shipping_fee = shipping_fee
+            order.total_price = total
+            order.coupon = coupon_obj
+            order.discount_amount = discount
+            order.save(update_fields=["subtotal", "shipping_fee", "total_price", "coupon", "discount_amount"])
 
-            # reserve stock immediately
+            # 5) reserve stock
             order.lock_stock()
 
         return order
