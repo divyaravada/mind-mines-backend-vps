@@ -560,6 +560,12 @@ class OrderCreateSerializer(serializers.Serializer):
         months = attrs.get("months")
         if months is not None and months not in (3, 6, 9):
             raise serializers.ValidationError({"months": "Choose 3, 6, or 9 months."})
+            
+        # require email if not authenticated
+        req = self.context.get("request")
+        if not (req and req.user and req.user.is_authenticated):
+            if not (attrs.get("email") or "").strip():
+                raise serializers.ValidationError({"email": "Email is required."})
 
         return attrs
 
@@ -631,9 +637,7 @@ class OrderCreateSerializer(serializers.Serializer):
         guest_name = (self.initial_data.get("name") or "").strip() or None
 
         # pick an order email
-        order_email = user.email if user else guest_email
-        if not order_email:
-            raise serializers.ValidationError({"email": "Email is required."})
+        order_email = (user.email if user and getattr(user, "email", None) else guest_email) or ""
 
         addr = self._resolve_address(user, validated_data)
         items_in = validated_data["items"]
