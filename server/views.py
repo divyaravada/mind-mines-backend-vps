@@ -1279,8 +1279,7 @@ class StripeCreateIntent(APIView):
     confirmSepaDebitPayment, etc).
     """
     permission_classes = [AllowAny]
-    authentication_classes = [CsrfExemptSessionAuthentication, BasicAuthentication]
-
+    
     def post(self, request):
         data = request.data.copy()
         pm = (data.get("payment_method") or "card").strip().lower()
@@ -1306,9 +1305,22 @@ class StripeCreateIntent(APIView):
 
         # Ensure Stripe Customer (guest-safe)
         try:
-            email = _extract_email_from_payload(data)
-            user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
-            customer_id = _get_or_create_stripe_customer(user=user, email=email)
+            if request.user.is_authenticated:
+                customer_id = _get_or_create_stripe_customer(request.user)
+            else:
+                # guest: derive from order.guest_email / name (set by serializer)
+                guest_email = order.guest_email or (data.get("email") or None)
+                guest_name  = order.guest_name  or (data.get("name") or None)
+                if not guest_email:
+                    return Response({"detail": "Email is required for guest checkout."}, status=400)
+                # You can try to re-use by email; simplest is to always create
+                cust = stripe.Customer.create(
+                    email=guest_email,
+                    name=guest_name or None,
+                    metadata={"guest_order_id": str(order.id)},
+                )
+                customer_id = cust.id
+
         except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
@@ -1335,10 +1347,12 @@ class StripeCreateIntent(APIView):
         except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
+            order.release_stock()
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
         except Exception as e:
             order.status = "failed"
             order.save(update_fields=["status"])
+            order.release_stock()
             return Response({"detail": f"Server error: {str(e)}"}, status=500)
 
         order.payment_ref = intent.id
@@ -1475,11 +1489,12 @@ class StripeSepaCreateInstallments(APIView):
         months = int(request.data.get("months") or 0)
         if months not in (3, 6, 9):
             return Response({"detail": "Invalid months. Choose 3, 6, or 9."}, status=400)
-
+   
+        country = (request.data.get("country") or "").upper()[:2]
         method = (request.data.get("method") or "sepa_debit").strip()
-        if method not in ("sepa_debit", "card"):
-            return Response({"detail": "method must be 'sepa_debit' or 'card'."}, status=400)
-
+        if method == "sepa_debit" and country != "DE":
+            return Response({"detail": "SEPA installments are available in DE only."}, status=400)
+        
         s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
         with transaction.atomic():
@@ -1681,8 +1696,16 @@ def stripe_webhook(request):
     elif etype in ("payment_intent.payment_failed", "invoice.payment_failed"):
         oid = (data.get("metadata") or {}).get("order_id")
         if oid:
-            Order.objects.filter(pk=oid).update(status="failed")
-
+            try:
+                order = Order.objects.select_for_update().get(pk=oid)
+                # mark failed
+                prev = order.status
+                order.status = "failed"
+                order.save(update_fields=["status"])
+                # ✅ release reserved stock if not already released
+                order.release_stock()
+            except Order.DoesNotExist:
+                pass
     return HttpResponse(status=200)
 
 
