@@ -1280,20 +1280,17 @@ class StripeCreateIntent(APIView):
             return Response({"detail": f"Unsupported payment_method '{pm}'"}, status=400)
 
         # Build order in 'pending'
-        try:
+        
             s = OrderCreateSerializer(data=data, context={"request": request})
-            s.is_valid(raise_exception=True)
-        except serializers.ValidationError as e:
-            return Response(
-                {"detail": "Order validation failed", "errors": getattr(s, "errors", str(e))},
-                status=400,
-            )
+        if not s.is_valid():
+            return Response({"detail": "Order validation failed", "errors": s.errors}, status=400)
 
-        with transaction.atomic():
-            order = s.save()
-            order.payment_method = pm
-            order.status = "pending"
-            order.save(update_fields=["payment_method", "status"])
+        try:
+            with transaction.atomic():
+                order = s.save()
+                order.payment_method = pm
+                order.status = "pending"
+                order.save(update_fields=["payment_method", "status"])
         except Exception as e:
             # helpful during debugging
             return Response({"detail": "Order creation failed", "error": str(e)}, status=400)
