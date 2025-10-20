@@ -969,14 +969,13 @@ def resend_verification_email(request):
 # -------------------- Helpers for payment lines --------------------
 
 def _order_lines(items):
-    """Convert items to Klarna order_lines with 19% VAT included in price."""
     lines = []
     total_tax = 0
     for it in items:
         p = Product.objects.get(pk=it["product_id"])
         qty = int(it["qty"])
-        unit = Decimal(p.price)     # gross
-        total = unit * qty          # gross
+        unit = Decimal(p.final_price)   
+        total = unit * qty
         net = (total / Decimal("1.19"))
         tax = total - net
         lines.append({
@@ -988,15 +987,14 @@ def _order_lines(items):
             "total_tax_amount": int(tax * 100),
         })
         total_tax += tax
-       
     return lines, int(total_tax * 100)
 
 def _compute_from_items(items):
     subtotal = Decimal("0.00")
     for it in items:
         p = Product.objects.get(pk=it["product_id"])
-        subtotal += (Decimal(p.price) * int(it["qty"]))
-    shipping = Decimal("0.00") 
+        subtotal += (Decimal(p.final_price) * int(it["qty"]))  
+    shipping = Decimal("0.00")
     total = (subtotal + shipping).quantize(Decimal("0.01"))
     return subtotal, shipping, total
 
