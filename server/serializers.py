@@ -514,6 +514,9 @@ class OrderCreateSerializer(serializers.Serializer):
 
     def validate_payment_method(self, value: str) -> str:
         # Accept common aliases and map them to your canonical choices
+        if not value:
+            return None
+        
         aliases = {
             "stripe_sepa": "sepa_debit",
             "stripe_card": "card",
@@ -523,11 +526,11 @@ class OrderCreateSerializer(serializers.Serializer):
             "paypal": "paypal",
         }
         key = (value or "").strip().lower()
-        mapped = aliases.get(key, key) if key else ""
+        mapped = aliases.get(key, key)
         valid = {c[0] for c in Order.PAYMENT_METHODS}
         if mapped and mapped not in valid:
             raise serializers.ValidationError(f"'{value}' is not a valid payment method.")
-        return mapped or None
+        return mapped
 
     def validate(self, attrs):
         """
