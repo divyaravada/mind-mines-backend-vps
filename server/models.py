@@ -151,7 +151,8 @@ class Address(models.Model):
             self.save(update_fields=["is_default"])
 
     def __str__(self):
-        name = " ".join(filter(None, [self.first_name, self.last_name])) or self.full_name or self.user.email
+        user_email = getattr(self.user, "email", "Guest")
+        name = " ".join(filter(None, [self.first_name, self.last_name])) or self.full_name or user_email
         line1 = self.address_line1 or " ".join([self.street_name, self.house_number]).strip() or "Address"
         return f"{name} — {line1}"
     
@@ -436,13 +437,17 @@ class Order(models.Model):
     
     def _iter_items(self):
         # Defensive; supports both M2M and legacy single product/quantity
+        has_lines = False
         for it in self.items.all().select_related("product"):
+            has_lines = True
             yield it
+        if not has_lines and self.product_id and self.quantity:
+            yield OrderItem(
+                product=self.product,
+                quantity=self.quantity,
+                unit_price=getattr(self.product, "price", 0),
+            )
             
-        if getattr(self, "product", None) and getattr(self, "quantity", None):
-            oi = OrderItem(product=self.product, quantity=self.quantity, unit_price=self.product.price)
-            yield oi
-
     # Human invoice number base (unique per order pk/month)
     @property
     def ordered_at(self):
@@ -502,8 +507,6 @@ class Order(models.Model):
         """Decrease Product.quantity for all order items if not already done."""
         if self.stock_locked:
             return
-        from server.models import Product
-        # SELECT ... FOR UPDATE to prevent race conditions
         for it in self._iter_items():
             # lock the product row
             p = Product.objects.select_for_update().get(pk=it.product_id)
