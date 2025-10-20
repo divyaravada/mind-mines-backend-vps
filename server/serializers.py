@@ -489,8 +489,11 @@ class OrderCreateSerializer(serializers.Serializer):
     email = serializers.EmailField()
     items = OrderItemIn(many=True)
     payment_method = serializers.ChoiceField(
-         choices=[c[0] for c in Order.PAYMENT_METHODS],
+        choices=[c[0] for c in Order.PAYMENT_METHODS],
         default="card",
+        required=False,
+        allow_blank=True,
+        allow_null=True,
     )
     coupon_code = serializers.CharField(allow_blank=True, required=False)
     address_id = serializers.IntegerField(required=False)
@@ -500,7 +503,7 @@ class OrderCreateSerializer(serializers.Serializer):
     address_line2 = serializers.CharField(allow_blank=True, required=False)
     postal_code = serializers.CharField(allow_blank=True, required=False)
     city = serializers.CharField(allow_blank=True, required=False)
-    method = serializers.ChoiceField(choices=["card", "sepa_debit"], required=True)
+    method = serializers.ChoiceField(choices=["card", "sepa_debit"], required=False)
     months = serializers.IntegerField(required=False, min_value=2, max_value=24)
     country = serializers.CharField(allow_blank=True, required=False)
     phone = serializers.CharField(allow_blank=True, required=False)
@@ -509,32 +512,53 @@ class OrderCreateSerializer(serializers.Serializer):
     house_number = serializers.CharField(allow_blank=True, required=False)
     street_name  = serializers.CharField(allow_blank=True, required=False)
 
-    def validate(self, attrs):
+    def validate_payment_method(self, value: str) -> str:
         # Accept common aliases and map them to your canonical choices
         aliases = {
             "stripe_sepa": "sepa_debit",
             "stripe_card": "card",
             "debit_card": "card",
-            "bank_transfer": "bank_transfer",
+            "bank": "bank_transfer",
             "bank_transfer": "bank_transfer",
             "paypal": "paypal",
         }
-        pm_in = (attrs.get("payment_method") or attrs.get("method") or "card").strip().lower()
-        pm = aliases.get(pm_in, pm_in)
+        key = (value or "").strip().lower()
+        mapped = aliases.get(key, key) if key else ""
         valid = {c[0] for c in Order.PAYMENT_METHODS}
-        if pm not in valid:
-            raise serializers.ValidationError({"payment_method": f"'{pm_in}' is not supported."})
-        attrs["payment_method"] = pm  # canonicalize
+        if mapped and mapped not in valid:
+            raise serializers.ValidationError(f"'{value}' is not a valid payment method.")
+        return mapped or None
 
-        # SEPA installments: DE only
+    def validate(self, attrs):
+        """
+        Cross-field validation:
+        - If 'method' was sent, use it to fill/override payment_method
+        - Enforce SEPA installments (or SEPA usage you want to restrict) to DE only
+        """
+        # Normalize: prefer explicit 'payment_method', else fallback to 'method'
+        pm = attrs.get("payment_method")
+        if not pm and attrs.get("method"):
+            pm = attrs["method"]
+        # Run through the same mapper as field-level validator
+        pm = self.validate_payment_method(pm) if pm else None
+
+        # Save back the normalized value
+        attrs["payment_method"] = pm or "card"
+
+        # SEPA region rule (DE only)
+        if attrs["payment_method"] == "sepa_debit":
+            cc = (attrs.get("country") or "").strip().upper()[:2]
+            if cc != "DE":
+                raise serializers.ValidationError(
+                    {"payment_method": "SEPA is available only in DE."}
+                )
+
+        # Optional: months rules for installments (if you’re using them here)
         months = attrs.get("months")
-        country = (attrs.get("country") or "").upper()[:2]
-        if months and pm == "sepa_debit" and country != "DE":
-            raise serializers.ValidationError({"country": "SEPA installments are available in DE only."})
+        if months is not None and months not in (3, 6, 9):
+            raise serializers.ValidationError({"months": "Choose 3, 6, or 9 months."})
 
-        # one-off SEPA also needs IBAN + mandate in frontend; here we only limit installments
         return attrs
-    
 
     def _resolve_address(self, user, validated):
         aid = validated.get("address_id")
@@ -597,25 +621,17 @@ class OrderCreateSerializer(serializers.Serializer):
         disc = coup.discount_amount(user, items, subtotal)
         return coup, disc, None
 
-    def create(self, validated):
-    def create(self, validated):
+   def create(self, validated_data):
         req = self.context["request"]
         user = req.user if req.user.is_authenticated else None
 
         guest_email = (self.initial_data.get("email") or "").strip() or None
         guest_name  = (self.initial_data.get("name")  or "").strip() or None
         # create/update address
-        addr = self._resolve_address(user, validated)
+        addr = self._resolve_address(user, validated_data)
 
-        items_in = validated["items"]
+        items_in = validated_data["items"]
         order_items, subtotal = [], Decimal("0.00")
-
-        order = Order.objects.create(
-            user=user,
-            email=validated["email"],
-            status="pending",
-        )
-        subtotal = Decimal("0.00")
 
         with transaction.atomic():
             # build items
@@ -627,12 +643,12 @@ class OrderCreateSerializer(serializers.Serializer):
                         {"items": f"Not enough stock for {product.title_en} (have {product.quantity}, need {qty})."}
                     )
                 # ✅ use final (gross) price including product discount
-                unit = Decimal(product.final_price)
+                unit = product.vat_included_price()
                 oi = OrderItem.objects.create(product=product, quantity=qty, unit_price=unit)
                 order_items.append(oi)
                 subtotal += unit * qty
 
-            coupon_code = validated.get("coupon_code", "").strip()
+            coupon_code = (validated_data.get("coupon_code") or "").strip()
             coupon_obj, discount, _ = self._apply_coupon(user, items_in, subtotal, coupon_code)
 
             shipping_fee = Decimal("0.00")
@@ -645,7 +661,7 @@ class OrderCreateSerializer(serializers.Serializer):
                 guest_email=None if user else guest_email,
                 guest_name=None if user else guest_name,
                 status="pending",
-                payment_method=validated["payment_method"],
+                payment_method=validated_data.get("payment_method") or "card",
                 subtotal=subtotal.quantize(Decimal("0.01")),
                 shipping_fee=shipping_fee,
                 total_price=total,
