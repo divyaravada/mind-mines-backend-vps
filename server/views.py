@@ -1472,6 +1472,8 @@ class StripeSepaCreateInstallments(APIView):
             return Response({"detail": "Invalid months. Choose 3, 6, or 9."}, status=400)
    
         country = (request.data.get("country") or "").upper()[:2]
+        if country != "DE":
+            return Response({"detail": "Installments are available in DE only."}, status=400)
         method = (request.data.get("method") or "sepa_debit").strip()
         if method == "sepa_debit" and country != "DE":
             return Response({"detail": "SEPA installments are available in DE only."}, status=400)
