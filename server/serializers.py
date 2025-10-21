@@ -688,7 +688,7 @@ class OrderCreateSerializer(serializers.Serializer):
             order.save(update_fields=["subtotal", "shipping_fee", "total_price", "coupon", "discount_amount"])
 
             # 5) reserve stock
-            order.lock_stock()
+            order.reserve_stock()
 
         return order
         

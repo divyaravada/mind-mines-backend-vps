@@ -7,8 +7,6 @@ from django.utils.timezone import now
 from django.db.models.functions import Lower
 from rest_framework import permissions,generics, status, filters, throttling, serializers
 from rest_framework.authentication import SessionAuthentication, BasicAuthentication
-
-
 from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
@@ -72,13 +70,14 @@ def _safe(func, *args, **kwargs):
 
 
 # Optional async pipeline used in your code
+
 try:
     from server.tasks import post_payment_pipeline, fire_and_forget
 except Exception:
-    def fire_and_forget(func, *args, **kwargs): _safe(func, *args, **kwargs)
-    def post_payment_pipeline(*a, **k): pass
-# -------------------- Auth / Profile --------------------
-
+    def fire_and_forget(func, *args, **kwargs):
+        _safe(func, *args, **kwargs)
+    def post_payment_pipeline(*_, **__):
+        pass
 class MyTokenObtainPairView(TokenObtainPairView):
     serializer_class = MyTokenObtainPairSerializer
 
@@ -1228,7 +1227,6 @@ def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> st
             metadata={"guest": "true"},
         )
         return customer.id
-        return customer.id
 
 def _extract_email_from_payload(data: dict) -> Optional[str]:
     """
@@ -1360,7 +1358,7 @@ class StripeCreateIntent(APIView):
 # 1b) Save card for later (authenticated)
 # ============================================================================
 class StripeCreateCardSetupIntent(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
         try:
@@ -1662,7 +1660,11 @@ def stripe_webhook(request):
         oid = (data.get("metadata") or {}).get("order_id")
         if oid:
             try:
-                order = Order.objects.get(pk=oid)
+                order = Order.objects.select_for_update().get(pk=oid)
+                try:
+                    order.reserve_stock()
+                except Exception as e:
+                    log.exception("reserve_stock failed for order %s:%s", order.id, e)
                 _mark_paid(order)
             except Order.DoesNotExist:
                 pass
@@ -1682,7 +1684,6 @@ def stripe_webhook(request):
             try:
                 order = Order.objects.select_for_update().get(pk=oid)
                 # mark failed
-                prev = order.status
                 order.status = "failed"
                 order.save(update_fields=["status"])
                 # ✅ release reserved stock if not already released

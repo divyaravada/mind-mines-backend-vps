@@ -511,18 +511,16 @@ class Order(models.Model):
         return timezone.now() <= (self.delivered_at + timedelta(days=1))
     
     @transaction.atomic
-    def lock_stock(self):
-        """Decrease Product.quantity for all order items if not already done."""
+    def reserve_stock(self):
+        """Decrease stock for all items after payment succeeds."""
         if self.stock_locked:
             return
         for it in self._iter_items():
-            # lock the product row
             p = Product.objects.select_for_update().get(pk=it.product_id)
             if p.quantity < it.quantity:
                 raise ValueError(f"Insufficient stock for {p} (have {p.quantity}, need {it.quantity})")
             p.quantity = F("quantity") - it.quantity
             p.save(update_fields=["quantity"])
-        # mark flag
         self.stock_locked = True
         self.save(update_fields=["stock_locked"])
 
