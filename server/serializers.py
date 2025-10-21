@@ -418,11 +418,14 @@ class OrderSerializer(serializers.ModelSerializer):
 
 # ✅ Order items + order serializers
 class OrderItemReadSerializer(serializers.ModelSerializer):
-    product = ProductMiniSerializer(read_only=True)
-
+    product = ProductMiniSerializer()
+    line_total = serializers.SerializerMethodField()
     class Meta:
         model = OrderItem
-        fields = ["id", "product", "quantity", "unit_price"]
+        fields = ["id", "product", "quantity", "unit_price", "line_total"]
+    def get_line_total(self, obj):
+        try: return obj.line_total()
+        except: return Decimal("0.00")
 
 class OrderReadSerializer(serializers.ModelSerializer):
     items = OrderItemReadSerializer(many=True, read_only=True)
@@ -452,10 +455,20 @@ class OrderReadSerializer(serializers.ModelSerializer):
 
     def get_invoice_pdf(self, obj):
         try:
-            if hasattr(obj, "invoice") and obj.invoice and obj.invoice.pdf:
-                return obj.invoice.pdf.url
-        except Exception:
-            pass
+            inv = getattr(obj, "invoice", None)
+            f = getattr(inv, "pdf", None)
+            if f and getattr(f, "url", None):
+                req = self.context.get("request")
+                url = f.url
+                return req.build_absolute_uri(url) if req and not url.startswith("http") else url
+        except: pass
+        try:
+            f = getattr(obj, "invoice_pdf", None)
+            if f and getattr(f, "url", None):
+                req = self.context.get("request")
+                url = f.url
+                return req.build_absolute_uri(url) if req and not url.startswith("http") else url
+        except: pass
         return None
     
     def get_is_returnable(self, obj):
@@ -486,7 +499,7 @@ class OrderItemIn(serializers.Serializer):
     qty = serializers.IntegerField(min_value=1)
 
 class OrderCreateSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    email = serializers.EmailField(required=False, allow_blank=True)
     items = OrderItemIn(many=True)
     payment_method = serializers.ChoiceField(
         choices=[c[0] for c in Order.PAYMENT_METHODS],
@@ -629,66 +642,57 @@ class OrderCreateSerializer(serializers.Serializer):
         disc = coup.discount_amount(user, items, subtotal)
         return coup, disc, None
 
-    def create(self, validated_data):
-        req = self.context["request"]
-        user = req.user if req.user.is_authenticated else None
+    def create(self, validated):
+        user = self.context["request"].user
+        addr = self._resolve_address(user, validated)
 
-        guest_email = (self.initial_data.get("email") or "").strip() or None
-        guest_name = (self.initial_data.get("name") or "").strip() or None
-
-        # pick an order email
-        order_email = (user.email if user and getattr(user, "email", None) else guest_email) or ""
-
-        addr = self._resolve_address(user, validated_data)
-        items_in = validated_data["items"]
-        subtotal = Decimal("0.00")
-
-        with transaction.atomic():
-            # 1) create the order FIRST (so FK can point to it)
-            order = Order.objects.create(
-                user=user,
-                email=order_email,  
-                guest_email=None if user else guest_email,
-                guest_name=None if user else guest_name,
-                status="pending",
-                payment_method=validated_data.get("payment_method") or "card",
-                subtotal=Decimal("0.00"),  # temp, updated below
-                shipping_fee=Decimal("0.00"),
-                total_price=Decimal("0.00"),
-                shipping_address=addr,
+        items_in = validated["items"]
+        order_items, subtotal = [], Decimal("0.00")
+        for it in items_in:
+            product = Product.objects.get(pk=it["product_id"])
+            qty = int(it["qty"])
+            oi = OrderItem.objects.create(
+                order=None,  # attach later to avoid orphan, see below if you prefer
+                product=product,
+                quantity=qty,
+                unit_price=Product.vat_included_price(product),
             )
+            order_items.append(oi)
+            subtotal += Product.vat_included_price(product) * qty
 
-            # 2) add line items (FK to order), compute subtotal
-            for it in items_in:
-                product = Product.objects.select_for_update().get(pk=it["product_id"])
-                qty = int(it["qty"])
-                if product.quantity < qty:
-                    raise serializers.ValidationError(
-                        {"items": f"Not enough stock for {product.title_en} (have {product.quantity}, need {qty})."}
-                    )
-                unit = getattr(product, "final_price", product.price)
-                OrderItem.objects.create(order=order, product=product, quantity=qty, unit_price=unit)
-                subtotal += unit * qty
+        coupon_code = (validated.get("coupon_code") or "").strip()
+        coupon_obj, discount, _ = self._apply_coupon(user if user.is_authenticated else None,
+                                                 items_in, subtotal, coupon_code)
 
-            # 3) coupon & totals
-            coupon_code = (validated_data.get("coupon_code") or "").strip()
-            coupon_obj, discount, _ = self._apply_coupon(user, items_in, subtotal, coupon_code)
+        shipping_fee = Decimal("0.00")
+        total = (subtotal - discount + shipping_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if total < 0: total = Decimal("0.00")
 
-            shipping_fee = Decimal("0.00")
-            total = (subtotal - discount + shipping_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            if total < 0:
-                total = Decimal("0.00")
+        # ←─ choose the correct email
+        order_email = (user.email if getattr(user, "is_authenticated", False) and user.email
+                    else (validated.get("email") or ""))
 
-            # 4) persist money & coupon
-            order.subtotal = subtotal.quantize(Decimal("0.01"))
-            order.shipping_fee = shipping_fee
-            order.total_price = total
-            order.coupon = coupon_obj
-            order.discount_amount = discount
-            order.save(update_fields=["subtotal", "shipping_fee", "total_price", "coupon", "discount_amount"])
+        if not order_email:
+            raise serializers.ValidationError({"email": "This field is required."})
 
-            # 5) reserve stock
-            order.reserve_stock()
+        order = Order.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            email=order_email,
+            guest_email=None if getattr(user, "is_authenticated", False) else order_email,
+            guest_name=" ".join(filter(None, [validated.get("first_name",""), validated.get("last_name","")])),
+            status="pending",
+            payment_method=validated["payment_method"],
+            subtotal=subtotal.quantize(Decimal("0.01")),
+            shipping_fee=shipping_fee,
+            total_price=total,
+            shipping_address=addr,
+            coupon=coupon_obj,
+            discount_amount=discount
+        )
+        # attach items now that order exists
+        for oi in order_items:
+            oi.order = order
+            oi.save(update_fields=["order"])
 
         return order
         

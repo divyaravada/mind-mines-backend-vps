@@ -717,8 +717,7 @@ class OrderListAPIView(generics.ListAPIView):
         return Order.objects.filter(user=self.request.user).order_by('-created_at')
 
     def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset()
-        ser = self.get_serializer(queryset, many=True, context={"request": request})
+        ser = self.get_serializer(self.get_queryset, many=True, context={"request": request})
         return Response(ser.data)
 
 
@@ -737,6 +736,9 @@ class OrderDetailAPIView(generics.RetrieveAPIView):
     permission_classes = [IsAuthenticated]
     def get_queryset(self):
         return Order.objects.filter(user=self.request.user)
+    def retrieve(self, request, *args, **kwargs):
+        ser = self.get_serializer(self.get_object(), context={"request": request})
+        return Response(ser.data)
 
 
 class OrderInvoiceAPIView(APIView):
@@ -1271,9 +1273,10 @@ class StripeCreateIntent(APIView):
 
         # Build order in 'pending'
         
-        s = OrderCreateSerializer(data=data, context={"request": request})
-        s.is_valid(raise_exception=True)
+        
         try:
+            s = OrderCreateSerializer(data=data, context={"request": request})
+            s.is_valid(raise_exception=True)
             with transaction.atomic():
                 order = s.save()
                 order.payment_method = pm
@@ -1410,6 +1413,9 @@ class StripeCreateSepaIntent(APIView):
     def post(self, request):
         s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
+        email = (s.validated_data.get("email") or request.user.email or "").strip()
+        if not email:
+            return Response({"detail": "Email is required for SEPA payments."}, status=400)
 
         with transaction.atomic():
             order = s.save()
@@ -1428,6 +1434,7 @@ class StripeCreateSepaIntent(APIView):
                 description=f"Order {order.number or order.id} — MindMines",
                 metadata={"order_id": str(order.id)},
                 customer=customer_id,
+                receipt_email=email,
                 confirm=False,
                 idempotency_key=f"pi-create-{order.id}",
             )
@@ -1480,6 +1487,9 @@ class StripeSepaCreateInstallments(APIView):
         
         s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
+        email = (s.validated_data.get("email") or request.user.email or "").strip()
+        if not email:
+            return Response({"detail": "Email is required for installments."}, status=400)
         with transaction.atomic():
             order = s.save()
             order.payment_method = method
@@ -1510,6 +1520,12 @@ class StripeSepaCreateInstallments(APIView):
                 stripe.PaymentMethod.attach(pm_id, customer=customer_id)
 
             stripe.Customer.modify(customer_id, invoice_settings={"default_payment_method": pm_id})
+            try:
+                cust = stripe.Customer.retrieve(customer_id)
+                if not cust.get("email") and email:
+                    stripe.Customer.modify(customer_id, email=email)
+            except Exception:
+                pass
 
             def mk_price(amount: int, label: str):
                 return stripe.Price.create(

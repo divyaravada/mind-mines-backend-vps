@@ -9,6 +9,7 @@ from django.core.exceptions import ValidationError
 from datetime import timedelta
 from django.utils import timezone
 from django.conf import settings
+import uuid
 
 
 STONE_TYPES = [
@@ -422,6 +423,7 @@ class Order(models.Model):
     cancelled_at = models.DateTimeField(null=True, blank=True)
     stock_locked = models.BooleanField(default=False)    
     stock_released = models.BooleanField(default=False)
+    lookup_token = models.CharField(max_length=36, blank=True, default="")
 
     class Meta:
         constraints = [
@@ -489,10 +491,10 @@ class Order(models.Model):
     def save(self, *args, **kwargs):
         creating = self.pk is None
         super().save(*args, **kwargs)
-        if creating and not self.number:
+        if creating and not self.lookup_token:
             # Assign order number once we have a PK
-            self.number = f"ORD-{self.created_at:%Y%m%d}-{self.pk:06d}"
-            super().save(update_fields=["number"])
+            self.lookup_token = str(uuid.uuid4())
+            super().save(update_fields=["lookup_token"])
 
     @property
     def payment_method_label(self):
