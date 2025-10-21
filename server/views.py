@@ -1,12 +1,11 @@
-from django.http import HttpResponse
-
 from decimal import Decimal,ROUND_HALF_UP,InvalidOperation
 from dateutil.relativedelta import relativedelta
 import json, re
 import requests as http
+from typing import Optional
 from django.utils.timezone import now
 from django.db.models.functions import Lower
-from rest_framework import permissions, status, throttling
+from rest_framework import permissions,generics, status, filters, throttling
 from rest_framework.authentication import SessionAuthentication, BasicAuthentication
 
 
@@ -22,8 +21,7 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.db import transaction
 from django.utils import timezone
-from dateutil.relativedelta import relativedelta
-from datetime import datetime, timezone as dt_tz
+from datetime import datetime
 from django.db.models import Avg, Count, Q
 
 
@@ -31,7 +29,6 @@ from django.db.models import Avg, Count, Q
 from google.oauth2 import id_token
 from google.auth.transport.requests import Request as GoogleRequest
 
-from rest_framework import generics, status, filters
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
@@ -517,15 +514,15 @@ class ProductSuggestList(generics.ListAPIView):
     permission_classes = [AllowAny]
     serializer_class = ProductMiniSerializer
     filter_backends = [filters.SearchFilter]
-    search_fields = ['title_en', 'title_de']
     pagination_class = None  # return small list
 
     def get_queryset(self):
-        q = Product.objects.all()
-        term = self.request.query_params.get("search") or ""
+        term = (self.request.query_params.get("search") or "").strip()
         if not term:
             return Product.objects.none()
-        return q[:10]
+        return Product.objects.filter(
+            Q(title_en__icontains=term) | Q(title_de__icontains=term)
+        ).order_by(Lower("title_en")).all()[:10]
 
 class ProductReviewListCreate(generics.ListCreateAPIView):
     """
@@ -733,13 +730,8 @@ class OrderCreateView(APIView):
         ser.is_valid(raise_exception=True)
         with transaction.atomic():
           order = ser.save()
-            # if you have CartItem:
-            # CartItem.objects.filter(user=request.user).delete()
         return Response(OrderReadSerializer(order, context={"request": request}).data, status=201)
-        # if ser.is_valid():
-        #     order = ser.save()
-        #     return Response(OrderReadSerializer(order, context={"request": request}).data, status=201)
-        # return Response(ser.errors, status=400)
+        
 
 class OrderDetailAPIView(generics.RetrieveAPIView):
     serializer_class = OrderReadSerializer
@@ -1037,9 +1029,8 @@ class PaypalBase(APIView):
 
 
 class PaypalCreateOrder(PaypalBase):
-    """
-    Creates a local order + a PayPal order and returns both ids.
-    """
+    permission_classes = [AllowAny] 
+
     def post(self, request):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
@@ -1098,9 +1089,8 @@ class PaypalCreateOrder(PaypalBase):
         return Response({"id": data.get("id"), "order_id": order.id}, status=201)
 
 class PaypalCaptureOrder(PaypalBase):
-    """
-    Captures a PayPal order (order_id from PayPal), marks local order paid.
-    """
+    permission_classes = [AllowAny]
+
     def post(self, request, order_id):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
@@ -1110,7 +1100,7 @@ class PaypalCaptureOrder(PaypalBase):
 
         # Find the local order expecting this PayPal order
         try:
-            q = {"payment_ref": order_id, "user": request.user}
+            q = {"payment_ref": order_id}
             if local_order_id:
                 q["id"] = local_order_id
             ord_obj = Order.objects.select_for_update().get(**q)
@@ -1188,8 +1178,10 @@ PAYMENT_METHOD_MAP = {
     "sepa_debit": "sepa_debit"
 }
 
-# ------------------- Utils ----------------------
-def _split_installments_eur(total_cents: int, months: int) -> list[Decimal]:
+from typing import List, Optional
+from typing import List
+
+def _split_installments_eur(total_cents: int, months: int) -> List[Decimal]:
     """
     Return a list of Decimal EUR amounts (2dp) for each month.
     Last month absorbs remainder; matches your schedule math.
@@ -1213,10 +1205,8 @@ def _month_dates(anchor_dt, months: int):
 def _amount_cents(d: Decimal) -> int:
     """Convert Decimal amount in EUR to integer cents."""
     return int((d * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-
-
-def _get_or_create_stripe_customer(user=None, email: str | None = None) -> str:
-       if user is not None and getattr(user, "is_authenticated", False):
+def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> str:
+        if user is not None and getattr(user, "is_authenticated", False):
             prof = getattr(user, "profile", None)
             # reuse if already known
             if prof and getattr(prof, "stripe_customer_id", None):
@@ -1230,17 +1220,17 @@ def _get_or_create_stripe_customer(user=None, email: str | None = None) -> str:
             if prof and hasattr(prof, "stripe_customer_id"):
                 prof.stripe_customer_id = customer.id
                 prof.save(update_fields=["stripe_customer_id"])
-                return customer.id
-    
-            # Guest path (no user)
-            customer = stripe.Customer.create(
-                email=email or None,
-                metadata={"guest": "true"},
-            )
             return customer.id
+    
+        # Guest path (no user)
+        customer = stripe.Customer.create(
+            email=email or None,
+            metadata={"guest": "true"},
+        )
+        return customer.id
+        return customer.id
 
-
-def _extract_email_from_payload(data: dict) -> str | None:
+def _extract_email_from_payload(data: dict) -> Optional[str]:
     """
     Try a few common places you may be sending an email in your order payload.
     Adjust to match your serializer/payload.
@@ -1251,12 +1241,13 @@ def _extract_email_from_payload(data: dict) -> str | None:
         or (data.get("shipping_address") or {}).get("email")
         or None
     )
-
+  
 
 
 # ============================================================================
 # 1) Unified one-off PaymentIntent (card, sepa_debit, giropay, sofort)
 # ============================================================================
+# WARNING: Only use CsrfExemptSessionAuthentication on endpoints where CSRF protection is intentionally disabled and it is safe to do so.
 class CsrfExemptSessionAuthentication(SessionAuthentication):
     def enforce_csrf(self, request):
         # Skip CSRF checks for this endpoint (guest checkout from SPA)
@@ -1271,6 +1262,7 @@ class StripeCreateIntent(APIView):
     confirmSepaDebitPayment, etc).
     """
     permission_classes = [AllowAny]
+    authentication_classes = [CsrfExemptSessionAuthentication, BasicAuthentication]
     
     def post(self, request):
         data = request.data.copy()
@@ -1704,7 +1696,7 @@ def stripe_webhook(request):
 
 class CreateBankTransferOrder(APIView):
    
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
         data = request.data.copy()
@@ -1763,9 +1755,8 @@ class InvoiceDownloadView(APIView):
     
 # -------------------- Returns / Cancellations --------------------
 
-
 def _can_return(order: Order) -> tuple[bool, str]: 
-    """Return only within 15 days after delivery.""" 
+    """Return only within RETURNS_WINDOW_DAYS after delivery.""" 
     if order.status != "delivered": 
         return False, "Returns are only possible after delivery." 
     if not order.delivered_at: 
@@ -1773,8 +1764,9 @@ def _can_return(order: Order) -> tuple[bool, str]:
     
     now = timezone.now() 
     age_days = (now - order.delivered_at).days 
-    if age_days > 15: 
-        return False, "Return window (15 days) has expired." 
+    if age_days > RETURNS_WINDOW_DAYS: 
+        return False, f"Return window ({RETURNS_WINDOW_DAYS} days) has expired." 
+    return True, None
     return True, None
 
 
@@ -1834,8 +1826,9 @@ class OrderCancelRequestAPIView(APIView):
         if order.status in ("pending", "processing", "shipped"):
             allowed = True
         elif order.status == "delivered" and order.delivered_at:
+            CANCELLATION_WINDOW_DAYS = getattr(settings, "CANCELLATION_WINDOW_DAYS", RETURNS_WINDOW_DAYS)
             delta = timezone.now() - order.delivered_at
-            allowed = (delta.days <= 1)
+            allowed = (delta.days <= CANCELLATION_WINDOW_DAYS)
 
         if not allowed:
             return Response(
