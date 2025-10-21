@@ -1282,15 +1282,15 @@ class StripeCreateIntent(APIView):
         # Build order in 'pending'
         
         s = OrderCreateSerializer(data=data, context={"request": request})
-        if not s.is_valid():
-            return Response({"detail": "Order validation failed", "errors": s.errors}, status=400)
-
+        s.is_valid(raise_exception=True)
         try:
             with transaction.atomic():
                 order = s.save()
                 order.payment_method = pm
                 order.status = "pending"
                 order.save(update_fields=["payment_method", "status"])
+        except serializers.ValidationError as ve:
+            return Response({"detail": "Order validation failed", "errors": ve.detail}, status=400)
         except Exception as e:
             # helpful during debugging
             return Response({"detail": "Order creation failed", "error": str(e)}, status=400)
