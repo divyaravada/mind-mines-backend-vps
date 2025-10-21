@@ -1,14 +1,18 @@
-from threading import Thread
-from django.db import close_old_connections
-import logging
+# server/utils/background.py
+import threading
+from typing import Callable, Any
 
-log = logging.getLogger(__name__)
+def fire_and_forget(func: Callable[..., Any], *args, **kwargs) -> None:
+    """
+    Run a callable in a daemon thread and return immediately.
+    """
+    t = threading.Thread(target=_safe_wrap, args=(func, args, kwargs), daemon=True)
+    t.start()
 
-def fire_and_forget(fn, *args, **kwargs):
-    def _runner():
-        try:
-            close_old_connections()  # avoid DB connection reuse issues across threads
-            fn(*args, **kwargs)
-        except Exception:
-            log.exception("Background task failed")
-    Thread(target=_runner, daemon=True).start()
+def _safe_wrap(func, args, kwargs):
+    try:
+        func(*args, **kwargs)
+    except Exception:
+        # Swallow exceptions to avoid crashing the main request thread
+        import logging
+        logging.getLogger(__name__).exception("fire_and_forget task failed: %s", func)

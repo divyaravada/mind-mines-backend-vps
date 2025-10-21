@@ -1,14 +1,12 @@
-
+# server/signals.py
+from __future__ import annotations
 from django.db.models.signals import post_save, pre_save
 from django.contrib.auth import get_user_model
+from django.dispatch import receiver
 from django.utils import timezone
-
-
+from .models import Order
 from .utils.invoices import generate_invoice_pdf
 from .utils.emails import send_invoice_email,send_order_confirmation
-
-
-
 
 def create_or_update_user_profile(sender, instance, created, **kwargs):
     # Import here to avoid early app-registry import cycles
@@ -18,7 +16,6 @@ def create_or_update_user_profile(sender, instance, created, **kwargs):
     else:
         # If profile missing for some reason, ensure it's present
         Profile.objects.get_or_create(user=instance)
-
 
 def remember_old_status(sender, instance, **kwargs):
     if not instance.pk:
@@ -31,40 +28,43 @@ def remember_old_status(sender, instance, **kwargs):
     except Order.DoesNotExist:
         instance._old_status = None
 
-        
-
-
 def on_paid_generate_and_mail(sender, instance, created, **kwargs):
     became_paid = instance.status == "paid" and getattr(instance, "_old_status", None) != "paid"
     if not became_paid:
         return
-
-    # 1) generate/attach invoice
+    
     generate_invoice_pdf(instance)
 
-    # 2) send invoice email (+ optional order confirmation)
     send_invoice_email(instance)
     try:
         locale = getattr(getattr(instance.user, "profile", None), "language", "en") or "en"
         send_order_confirmation(instance, user_locale=locale)
     except Exception:
-        # don't block if confirmation fails
         pass
 
-
+@receiver(post_save, sender=Order)
+def ensure_order_number(sender, instance: Order, created, **kwargs):
+    """
+    Ensure an order number is assigned on initial creation.
+    (Avoids re-sending emails here — handled in views/webhooks/tasks.)
+    """
+    if created and not getattr(instance, "number", None):
+        try:
+            instance.assign_unique_order_number()  # if your model has this
+        except AttributeError:
+            # fallback simple numbering
+            instance.number = f"MM{instance.pk:08d}"
+        instance.save(update_fields=["number"])
 
 def stamp_status_times(sender, instance, created, **kwargs):
-    """Optional: stamp delivered_at / cancelled_at once when status changes."""
     old = getattr(instance, "_old_status", None)
     updates = {}
-    # Guard with hasattr in case your model doesn't have these fields yet
     if hasattr(instance, "delivered_at") and instance.status == "delivered" and old != "delivered" and not getattr(instance, "delivered_at", None):
         updates["delivered_at"] = timezone.now()
     if hasattr(instance, "cancelled_at") and instance.status == "cancelled" and old != "cancelled" and not getattr(instance, "cancelled_at", None):
         updates["cancelled_at"] = timezone.now()
     if updates:
         type(instance).objects.filter(pk=instance.pk).update(**updates)
-
 
 def connect_signals():
     """

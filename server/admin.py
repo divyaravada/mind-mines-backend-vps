@@ -1,4 +1,4 @@
-
+# server/admin.py
 from django.contrib import admin
 from django.utils.html import format_html_join, format_html
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin

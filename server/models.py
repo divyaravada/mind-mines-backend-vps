@@ -93,7 +93,7 @@ class User(AbstractUser):
     email = models.EmailField(unique=True)
 
     USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = []  # createsuperuser will only ask for email + password
+    REQUIRED_FIELDS = ["email"]  # createsuperuser will only ask for email + password
 
     objects = CustomUserManager()  # <-- IMPORTANT
 
@@ -370,9 +370,6 @@ ORDER_STATUS = [
     ("failed", "Failed"),
 ]
 
-
-
-
 class Order(models.Model):
     PAYMENT_METHODS = [
         ("card", "Card"),
@@ -593,7 +590,6 @@ class Coupon(models.Model):
 
     # ---- helpers
     def is_time_ok(self, now=None):
-        from django.utils import timezone
         now = now or timezone.now()
         if self.starts_at and now < self.starts_at: return False
         if self.ends_at and now > self.ends_at:     return False

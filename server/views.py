@@ -3,7 +3,6 @@ from dateutil.relativedelta import relativedelta
 import json, re
 import requests as http
 from typing import Optional
-from django.utils.timezone import now
 from django.db.models.functions import Lower
 from rest_framework import permissions,generics, status, filters, throttling, serializers
 from rest_framework.authentication import SessionAuthentication, BasicAuthentication
@@ -21,6 +20,7 @@ from django.db import transaction
 from django.utils import timezone
 from datetime import datetime
 from django.db.models import Avg, Count, Q
+from uuid import uuid4
 
 
 
@@ -34,8 +34,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
-
-
+from django.core.signing import TimestampSigner, BadSignature, SignatureExpired
+from django.urls import reverse
 
 from .pagination import StandardResultsSetPagination
 from .serializers import (
@@ -58,18 +58,38 @@ from .utils.emails import send_installments_started_email, send_return_request_e
 import logging
 logger = logging.getLogger(__name__)
 
-
-
 User = get_user_model()
+
 def _safe(func, *args, **kwargs):
     try:
         return func(*args, **kwargs)
     except Exception:
         return None
 
+SIGNER_SALT = "invoice-public-download-v1"
+INVOICE_TOKEN_MAX_AGE = 60 * 60 * 2  # 2 hours default
 
+signer = TimestampSigner(salt=SIGNER_SALT)
 
 # Optional async pipeline used in your code
+def _make_invoice_token(order):
+    # Include both id + number so link is bound to the exact order metadata
+    payload = f"{order.id}:{order.number}"
+    return signer.sign(payload)
+
+def _verify_invoice_token(token, order):
+    payload = f"{order.id}:{order.number}"
+    try:
+        data = signer.unsign(token, max_age=INVOICE_TOKEN_MAX_AGE)
+    except SignatureExpired:
+        return False, "expired"
+    except BadSignature:
+        return False, "bad_signature"
+    return data == payload, None
+
+
+# ---- Return window default -> 15 days ----
+RETURNS_WINDOW_DAYS = getattr(settings, "RETURNS_WINDOW_DAYS", 15)
 
 try:
     from server.tasks import post_payment_pipeline, fire_and_forget
@@ -78,6 +98,7 @@ except Exception:
         _safe(func, *args, **kwargs)
     def post_payment_pipeline(*_, **__):
         pass
+
 class MyTokenObtainPairView(TokenObtainPairView):
     serializer_class = MyTokenObtainPairSerializer
 
@@ -157,6 +178,59 @@ class AccountDeleteRequestView(APIView):
 
         return Response({"detail": "We received your request."}, status=200)
 
+class AccountDeleteConfirmView(APIView):
+    """
+    Permanently deletes the authenticated user's account and sends a bilingual
+    confirmation email to the user (if an email exists).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        email = user.email
+
+        # Compose email *before* deleting the user
+        subj = "Your account has been deleted / Ihr Konto wurde gelöscht"
+        en = (
+            "We have deleted your MindMines account as requested.\n\n"
+            "We're sorry to see you go. If this wasn't you, please contact support.\n"
+        )
+        de = (
+            "Wir haben Ihr MindMines-Konto wie gewünscht gelöscht.\n\n"
+            "Schade, dass Sie gehen. Falls dies nicht von Ihnen veranlasst wurde, kontaktieren Sie bitte den Support.\n"
+        )
+        text = f"ENGLISH\n{en}\nDEUTSCH\n{de}"
+        html = (
+            "<div style='font-family:sans-serif'>"
+            "<h3>ENGLISH</h3>"
+            "<p>We have deleted your MindMines account as requested.</p>"
+            "<p>We're sorry to see you go. If this wasn't you, please contact support.</p>"
+            "<hr/>"
+            "<h3>DEUTSCH</h3>"
+            "<p>Wir haben Ihr MindMines-Konto wie gewünscht gelöscht.</p>"
+            "<p>Schade, dass Sie gehen. Falls dies nicht von Ihnen veranlasst wurde, "
+            "kontaktieren Sie bitte den Support.</p>"
+            "</div>"
+        )
+
+        # Delete user & everything cascaded (Profile, etc.)
+        user.delete()
+
+        # Try to send confirmation email
+        if email:
+            try:
+                msg = EmailMultiAlternatives(
+                    subject=subj,
+                    body=text,
+                    from_email=settings.EMAIL_HOST_USER,
+                    to=[email],
+                )
+                msg.attach_alternative(html, "text/html")
+                msg.send(fail_silently=True)
+            except Exception:
+                logger.exception("Failed sending account deletion confirmation email")
+
+        return Response({"detail": "Your account has been deleted."}, status=200)
 # -------------------- Addresses --------------------
 
 class AddressListCreateAPIView(generics.ListCreateAPIView):
@@ -904,12 +978,54 @@ def verify_email(request, uidb64, token):
         user = User.objects.get(pk=uid)
     except Exception:
         return Response({"detail": "Invalid user ID"}, status=400)
+
     if user.is_active:
         return Response({"detail": "Account already verified"}, status=200)
+
     if default_token_generator.check_token(user, token):
         user.is_active = True
         user.save()
+
+        # Bilingual welcome / happy shopping email
+        try:
+            subj = "Welcome to MindMines / Willkommen bei MindMines"
+            en = (
+                "Welcome! Your email has been verified successfully.\n\n"
+                "You can now sign in and start shopping. Have fun!\n"
+                "https://mindmines.eu\n"
+            )
+            de = (
+                "Willkommen! Ihre E-Mail wurde erfolgreich verifiziert.\n\n"
+                "Sie können sich jetzt anmelden und einkaufen. Viel Spaß!\n"
+                "https://mindmines.eu\n"
+            )
+            text = f"ENGLISH\n{en}\nDEUTSCH\n{de}"
+            html = (
+                "<div style='font-family:sans-serif'>"
+                "<h3>ENGLISH</h3>"
+                "<p>Welcome! Your email has been verified successfully.</p>"
+                "<p>You can now sign in and start shopping. Have fun!</p>"
+                "<p><a href='https://mindmines.eu'>mindmines.eu</a></p>"
+                "<hr/>"
+                "<h3>DEUTSCH</h3>"
+                "<p>Willkommen! Ihre E-Mail wurde erfolgreich verifiziert.</p>"
+                "<p>Sie können sich jetzt anmelden und einkaufen. Viel Spaß!</p>"
+                "<p><a href='https://mindmines.eu'>mindmines.eu</a></p>"
+                "</div>"
+            )
+            msg = EmailMultiAlternatives(
+                subject=subj,
+                body=text,
+                from_email=settings.EMAIL_HOST_USER,
+                to=[user.email],
+            )
+            msg.attach_alternative(html, "text/html")
+            msg.send(fail_silently=not settings.DEBUG)
+        except Exception:
+            logger.exception("Failed to send happy-shopping email after verification")
+
         return Response({"detail": "Email verified successfully"}, status=200)
+
     return Response({"detail": "Invalid or expired token"}, status=400)
 
 @api_view(["POST"])
@@ -958,38 +1074,6 @@ def resend_verification_email(request):
     if settings.DEBUG:
         payload["dev_verification_link"] = link
     return Response(payload, status=200)
-
-# -------------------- Helpers for payment lines --------------------
-
-def _order_lines(items):
-    lines = []
-    total_tax = 0
-    for it in items:
-        p = Product.objects.get(pk=it["product_id"])
-        qty = int(it["qty"])
-        unit = Decimal(p.final_price)   
-        total = unit * qty
-        net = (total / Decimal("1.19"))
-        tax = total - net
-        lines.append({
-            "name": p.title_en[:255],
-            "quantity": qty,
-            "unit_price": int(unit * 100),
-            "total_amount": int(total * 100),
-            "tax_rate": 1900,
-            "total_tax_amount": int(tax * 100),
-        })
-        total_tax += tax
-    return lines, int(total_tax * 100)
-
-def _compute_from_items(items):
-    subtotal = Decimal("0.00")
-    for it in items:
-        p = Product.objects.get(pk=it["product_id"])
-        subtotal += (Decimal(p.final_price) * int(it["qty"]))  
-    shipping = Decimal("0.00")
-    total = (subtotal + shipping).quantize(Decimal("0.01"))
-    return subtotal, shipping, total
 
 # -------------------- PayPal --------------------
 
@@ -1454,8 +1538,8 @@ class StripeCreateSepaIntent(APIView):
         order.payment_ref = intent.id
         order.save(update_fields=["payment_ref"])
 
+        # Already imported at top: from .utils.emails import send_sepa_pending_email
         try:
-            from server.utils.email import send_sepa_pending_email
             locale = (
                 getattr(getattr(order, "user", None), "profile", None) and
                 getattr(order.user.profile, "language", None)
@@ -1882,7 +1966,7 @@ class OrderCancelRequestAPIView(APIView):
             status=201,
         )
 # --- GUEST CHECKOUT LOGIN ---
-from uuid import uuid4
+
 
 def _get_or_create_guest_user(email: str, full_name: str = ""):
     """
@@ -1959,9 +2043,6 @@ class GuestLookupThrottle(throttling.SimpleRateThrottle):
         return self.cache_format % {"scope": self.scope, "ident": ident}
 
 class GuestOrderLookupView(APIView):
-    """
-    POST { email, number } -> public order details if email matches the order's customer email.
-    """
     permission_classes = [permissions.AllowAny]
     throttle_classes = [GuestLookupThrottle]
 
@@ -1971,9 +2052,6 @@ class GuestOrderLookupView(APIView):
         email = inp.validated_data["email"].strip()
         number = inp.validated_data["number"].strip()
 
-        # IMPORTANT:
-        # - number should be unique (your order.number)
-        # - email is compared case-insensitively
         qs = Order.objects.select_related("shipping_address").prefetch_related("items__product")
         order = qs.filter(number=number).first()
         if not order:
@@ -1982,5 +2060,45 @@ class GuestOrderLookupView(APIView):
         order_email = (getattr(order, "email", "") or getattr(order, "guest_email", "") or "").strip()
         if order_email.lower() != email.lower():
             return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+
         ser = OrderPublicSerializer(order, context={"request": request})
-        return Response(ser.data, status=status.HTTP_200_OK)
+        data = ser.data
+
+        # If paid and invoice exists -> add a short-lived, tokenized public download URL
+        has_invoice = bool(data.get("invoice_pdf"))
+        if order.status == "paid" and has_invoice:
+            token = _make_invoice_token(order)
+            url = request.build_absolute_uri(
+                reverse("invoice-public-download", kwargs={"pk": order.id})
+            ) + f"?token={token}"
+            data["invoice_download_url"] = url
+
+        return Response(data, status=status.HTTP_200_OK)
+    
+    # ---------- Public, tokenized invoice download ----------
+class InvoicePublicDownloadView(APIView):
+    """
+    Allow guests to download their invoice PDF using a short-lived signed token.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [GuestLookupThrottle]  # reuse a conservative rate limit
+
+    def get(self, request, pk):
+        order = get_object_or_404(Order, pk=pk)
+        token = request.GET.get("token")
+        if not token:
+            return Response({"detail": "Missing token."}, status=400)
+
+        ok, reason = _verify_invoice_token(token, order)
+        if not ok:
+            return Response({"detail": f"Invalid token ({reason})."}, status=400)
+
+        # Only allow when an invoice file exists
+        inv = getattr(order, "invoice", None)
+        if not inv or not getattr(inv, "pdf", None):
+            return Response({"detail": "Invoice not available."}, status=404)
+
+        return FileResponse(inv.pdf.open("rb"),
+                            content_type="application/pdf",
+                            as_attachment=True,
+                            filename=f"{inv.number}.pdf")

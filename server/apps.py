@@ -1,4 +1,4 @@
-
+# server/apps.py
 from django.apps import AppConfig
 
 class ServerConfig(AppConfig):

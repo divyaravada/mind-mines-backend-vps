@@ -874,15 +874,28 @@ class OrderPublicSerializer(serializers.Serializer):
 
     def get_invoice_pdf(self, obj):
         # Return a public/absolute URL if your storage requires it
-        f = getattr(obj, "invoice_pdf", None)
-        if not f:
-            return None
-        try:
-            url = f.url  # Django FileField
-        except Exception:
-            return None
         request = self.context.get("request")
-        return request.build_absolute_uri(url) if request else url
+
+        # 1) Related Invoice model
+        try:
+            inv = getattr(obj, "invoice", None)
+            f = getattr(inv, "pdf", None)
+            if f and getattr(f, "url", None):
+                url = f.url
+                return request.build_absolute_uri(url) if request and not url.startswith(("http://", "https://")) else url
+        except Exception:
+            pass
+
+        # 2) Legacy FileField on Order
+        try:
+            f = getattr(obj, "invoice_pdf", None)
+            if f and getattr(f, "url", None):
+                url = f.url
+                return request.build_absolute_uri(url) if request and not url.startswith(("http://", "https://")) else url
+        except Exception:
+            pass
+
+        return None
 
     def get_shipping_address(self, obj):
         a = getattr(obj, "shipping_address", None)
