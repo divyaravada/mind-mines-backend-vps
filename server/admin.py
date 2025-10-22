@@ -4,7 +4,7 @@ from django.utils.html import format_html_join, format_html
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from .models import (
     Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage,
-    StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber,Coupon,
+    StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber,Coupon,StockAlert,
     Address, Order, Review,OrderItem, Invoice,ReturnRequest,ReturnAttachment,Promotion
 )
 from .utils.invoices import generate_invoice_pdf 
@@ -242,7 +242,12 @@ class AddressAdmin(admin.ModelAdmin):
         for addr in queryset:
             addr.set_default_for_user()
         self.message_user(request, f"Set {queryset.count()} address(es) as default.")
-
+        
+@admin.register(StockAlert)
+class StockAlertAdmin(admin.ModelAdmin):
+    list_display = ("product", "email", "is_active", "created_at", "notified_at")
+    list_filter = ("is_active", "created_at", "notified_at")
+    search_fields = ("email", "product__title_en", "product__title_de")
 
 admin.site.register(NaturalStoneImage)
 admin.site.register(ContactMessage)
