@@ -1,7 +1,7 @@
 #server/serializers.py
 from rest_framework import serializers
 from django.utils import timezone
-from .models import Promotion, ReturnRequest, NaturalStoneImage, OrderItem, User,Profile,Wishlist,NaturalStone,StoneEnquiry, Product,ProductMedia, ContactMessage, NewsletterSubscriber,Address, Order, Review
+from .models import Promotion,StockAlert, ReturnRequest, NaturalStoneImage, OrderItem, User,Profile,Wishlist,NaturalStone,StoneEnquiry, Product,ProductMedia, ContactMessage, NewsletterSubscriber,Address, Order, Review
 from django.utils.http import urlsafe_base64_encode
 from django.utils.encoding import force_bytes 
 from django.contrib.auth.password_validation import validate_password
@@ -11,9 +11,7 @@ from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.core.mail import EmailMultiAlternatives
 from django.contrib.auth.tokens import default_token_generator
 from decimal import Decimal, ROUND_HALF_UP
-from django.db.models import F
 from django.contrib.auth import get_user_model
-from django.db import transaction
 
 def _norm(s):
     return " ".join((s or "").strip().split()).lower()
@@ -912,3 +910,24 @@ class OrderPublicSerializer(serializers.Serializer):
             "country": getattr(a, "country", "") or getattr(a, "state", ""),
             "phone": getattr(a, "phone", ""),
         }
+    
+class StockAlertCreateSerializer(serializers.Serializer):
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
+    email = serializers.EmailField()
+
+    def validate_email(self, v):
+        return (v or "").strip().lower()
+
+    def create(self, validated_data):
+        # upsert: if exists but inactive, re-activate
+        alert, created = StockAlert.objects.get_or_create(
+            product=validated_data["product"],
+            email=validated_data["email"],
+            defaults={"is_active": True},
+        )
+        if not created and not alert.is_active:
+            alert.is_active = True
+            alert.notified_at = None
+            alert.save(update_fields=["is_active", "notified_at"])
+        return alert
+    
