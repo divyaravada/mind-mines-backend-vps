@@ -63,7 +63,10 @@ from .views import (
     OrderRequestReturnAPIView, OrderCancelRequestAPIView,
 
     # Guest flows
-    GuestCheckoutLoginView, GuestOrderLookupView,)
+    GuestCheckoutLoginView, GuestOrderLookupView,
+
+    #Stock Alerts
+    StockAlertCreateView, StockAlertUnsubscribeView,)
 from django.contrib.sitemaps.views import sitemap
 from .sitemaps import ProductSitemap, CategorySitemap, StaticSitemap
 from django.http import HttpResponse
@@ -182,18 +185,13 @@ urlpatterns = [
 
     path("accounts/", include("allauth.urls")),
 
-
+    # Stock alerts
+    path("stock-alerts/", StockAlertCreateView.as_view(), name="stock-alerts-create"),
+    path("stock-alerts/unsubscribe/<str:unsubscribe_token>/", StockAlertUnsubscribeView.as_view(), name="stock-alerts-unsubscribe"),
 
 
   
 ]
-
-
-
-
-
-  
-
 
 
 
