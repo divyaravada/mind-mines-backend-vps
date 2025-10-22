@@ -7,7 +7,7 @@ from django.template.loader import render_to_string
 from django.core.mail import send_mail,EmailMultiAlternatives
 from django.contrib.staticfiles import finders
 from email.mime.image import MIMEImage
-from django.template import TemplateDoesNotExist
+from django.template.loader import render_to_string, TemplateDoesNotExist
 from collections.abc import Iterable, Sequence, Mapping
 
 log = logging.getLogger(__name__)
@@ -420,6 +420,50 @@ def send_invoice_email(order, user_locale: str = "en"):
     )
     _send_bilingual("Your invoice / Ihre Rechnung", to_email, en, de)
 
+# ------------------ Stock Alert ------------------
+
+def send_stock_alert_email(product, to_email: str, unsubscribe_url: str, user_locale: str = "en"):
+    """
+    Sends a bilingual stock notification email to a subscriber.
+    Falls back to a plain-text body if the HTML template is missing.
+    """
+    subject = {
+        "en": f"Back in stock: {getattr(product, 'title_en', product.__str__())}",
+        "de": f"Wieder verfügbar: {getattr(product, 'title_de', getattr(product, 'title_en', product.__str__()))}",
+    }
+    subj = f"{subject['en']} / {subject['de']}"
+
+    ctx = {
+        "product": product,
+        "product_url": getattr(settings, "FRONTEND_URL", "").rstrip("/") + f"/product/{product.id}",
+        "unsubscribe_url": unsubscribe_url,
+    }
+
+    html_body = None
+    try:
+        html_body = render_to_string("emails/stock_alert.html", ctx)
+    except TemplateDoesNotExist:
+        pass
+
+    text_fallback = (
+        f"EN:\n{subject['en']}\n\nCheck it out: {ctx['product_url']}\n"
+        f"If you no longer want these alerts, unsubscribe: {unsubscribe_url}\n\n"
+        f"— MindMines\n\n"
+        f"DE:\n{subject['de']}\n\nHier ansehen: {ctx['product_url']}\n"
+        f"Wenn Sie keine Benachrichtigungen mehr erhalten möchten: {unsubscribe_url}\n\n"
+        f"— MindMines\n"
+    )
+
+    msg = EmailMultiAlternatives(
+        subject=subj,
+        body=text_fallback,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[to_email],
+    )
+    if html_body:
+        msg.attach_alternative(html_body, "text/html")
+    msg.send(fail_silently=not settings.DEBUG)
+    
 # ------------------ RETURN / CANCELLATION REQUEST ------------------
 
 ADMIN_ORDERS_EMAIL = getattr(settings, "ORDERS_ADMIN_EMAIL", "info@mindmines.eu")
