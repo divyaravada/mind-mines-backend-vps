@@ -8,6 +8,8 @@ from django.db.models.functions import Lower
 from django.core.exceptions import ValidationError
 from datetime import timedelta
 from django.utils import timezone
+from django.core.validators import EmailValidator
+import secrets
 from django.conf import settings
 import uuid
 
@@ -327,6 +329,40 @@ class ProductMedia(models.Model):
 
     def __str__(self):
         return f"{self.media_type.capitalize()} for {self.product}"
+
+   
+class StockAlert(models.Model):
+    """
+    A simple "notify me when back in stock" subscription.
+    One email per product. Deactivated after notification is sent.
+    """
+    product = models.ForeignKey("Product", related_name="stock_alerts", on_delete=models.CASCADE)
+    email = models.EmailField(validators=[EmailValidator()], db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    unsubscribe_token = models.CharField(max_length=64, unique=True, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    notified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ("product", "email")
+        indexes = [
+            models.Index(fields=["product", "is_active"]),
+            models.Index(fields=["email"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.unsubscribe_token:
+            self.unsubscribe_token = secrets.token_urlsafe(32)
+        # normalize email
+        if self.email:
+            self.email = self.email.strip().lower()
+        super().save(*args, **kwargs)
+
+    def mark_notified(self):
+        self.is_active = False
+        self.notified_at = timezone.now()
+        self.save(update_fields=["is_active", "notified_at"])
+
 
 class Wishlist(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
