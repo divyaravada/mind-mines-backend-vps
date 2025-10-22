@@ -21,12 +21,8 @@ from django.utils import timezone
 from datetime import datetime
 from django.db.models import Avg, Count, Q
 from uuid import uuid4
-
-
-
 from google.oauth2 import id_token
 from google.auth.transport.requests import Request as GoogleRequest
-
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
@@ -39,7 +35,7 @@ from django.urls import reverse
 
 from .pagination import StandardResultsSetPagination
 from .serializers import (
-    ProfileSerializer, RegisterSerializer, MyTokenObtainPairSerializer,
+    ProfileSerializer, RegisterSerializer, MyTokenObtainPairSerializer,,StockAlertCreateSerializer,
     ProductSerializer,ProductMiniSerializer, ContactMessageSerializer,ReviewWriteSerializer,
     NewsletterSubscriberSerializer, AddressSerializer, PromotionSerializer,GuestOrderLookupInputSerializer,
     OrderPublicSerializer,
@@ -47,13 +43,13 @@ from .serializers import (
     StoneEnquirySerializer, AccountSerializer, OrderCreateSerializer, OrderReadSerializer, 
 )
 from .models import (
-    User, Product, ContactMessage, NewsletterSubscriber,Promotion,
+    User, Product, ContactMessage, NewsletterSubscriber,Promotion,StockAlert,
     Address, Order, Review, Wishlist, NaturalStone, NaturalStoneImage,ReturnRequest,ReturnAttachment
 )
 from .utils.invoices import generate_invoice_pdf
 from .utils.background import fire_and_forget
 from .tasks import post_payment_pipeline
-from .utils.emails import send_installments_started_email, send_return_request_emails,send_cancel_request_emails,send_order_confirmation, send_bank_transfer_instructions, send_invoice_email,send_sepa_pending_email
+from .utils.emails import send_stock_alert_email, send_installments_started_email, send_return_request_emails,send_cancel_request_emails,send_order_confirmation, send_bank_transfer_instructions, send_invoice_email,send_sepa_pending_email
 
 import logging
 logger = logging.getLogger(__name__)
@@ -2102,3 +2098,63 @@ class InvoicePublicDownloadView(APIView):
                             content_type="application/pdf",
                             as_attachment=True,
                             filename=f"{inv.number}.pdf")
+
+
+#-------------------Stock Alert Creation-------------------
+class StockAlertCreateView(generics.CreateAPIView):
+    """
+    POST { product, email }
+    - If product is already in stock, send immediately and do NOT keep an active subscription.
+    - Else, create/activate a subscription to notify on restock.
+    """
+    permission_classes = [permissions.AllowAny]
+    serializer_class = StockAlertCreateSerializer
+
+    def perform_create(self, serializer):
+        alert = serializer.save()
+        product = alert.product
+
+        # If in stock now -> send immediately and deactivate
+        if (getattr(product, "quantity", 0) or 0) > 0:
+            unsub = self._unsubscribe_url(alert)
+            try:
+                send_stock_alert_email(product, alert.email, unsub)
+            finally:
+                alert.mark_notified()
+            self._payload = {"ok": True, "sent_now": True}
+        else:
+            self._payload = {"ok": True, "sent_now": False, "id": alert.id}
+
+    def create(self, request, *args, **kwargs):
+        resp = super().create(request, *args, **kwargs)
+        # replace default response with our payload
+        return Response(getattr(self, "_payload", {"ok": True}), status=201)
+
+    def _unsubscribe_url(self, alert: StockAlert) -> str:
+        base = getattr(settings, "FRONTEND_URL", "").rstrip("/")
+        # Public API endpoint is on backend; you might also build a FE route that calls it
+        api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
+        return f"{base}{api_base}/stock-alerts/unsubscribe/{alert.unsubscribe_token}/"
+
+
+class StockAlertUnsubscribeView(generics.DestroyAPIView):
+    """
+    GET or DELETE by token to deactivate an alert.
+    """
+    permission_classes = [permissions.AllowAny]
+    lookup_field = "unsubscribe_token"
+    queryset = StockAlert.objects.all()
+
+    def get(self, request, *args, **kwargs):
+        alert = get_object_or_404(self.get_queryset(), unsubscribe_token=kwargs.get("unsubscribe_token"))
+        if alert.is_active:
+            alert.is_active = False
+            alert.save(update_fields=["is_active"])
+        return Response({"ok": True, "unsubscribed": True}, status=200)
+
+    def delete(self, request, *args, **kwargs):
+        alert = get_object_or_404(self.get_queryset(), unsubscribe_token=kwargs.get("unsubscribe_token"))
+        if alert.is_active:
+            alert.is_active = False
+            alert.save(update_fields=["is_active"])
+        return Response(status=204)
