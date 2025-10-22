@@ -8,6 +8,7 @@ from django.core.mail import send_mail,EmailMultiAlternatives
 from django.contrib.staticfiles import finders
 from email.mime.image import MIMEImage
 from django.template import TemplateDoesNotExist
+from collections.abc import Iterable, Sequence, Mapping
 
 log = logging.getLogger(__name__)
 CURRENCY = "€"

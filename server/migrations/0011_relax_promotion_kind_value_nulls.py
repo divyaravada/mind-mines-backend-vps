@@ -7,7 +7,47 @@ ALTER TABLE server_promotion
   ALTER COLUMN kind DROP NOT NULL,
   ALTER COLUMN value DROP NOT NULL;
 """
+SQL_ADD_IF_MISSING = """
+DO $$
+BEGIN
+    -- add columns if they don't exist (no-op if they do)
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'server_promotion' AND column_name = 'kind'
+    ) THEN
+        ALTER TABLE server_promotion
+        ADD COLUMN kind VARCHAR(20);
+    END IF;
 
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'server_promotion' AND column_name = 'value'
+    ) THEN
+        ALTER TABLE server_promotion
+        ADD COLUMN value NUMERIC(10,2);
+    END IF;
+END$$;
+"""
+
+SQL_RELAX_NOT_NULL_IF_EXISTS = """
+DO $$
+BEGIN
+    -- drop NOT NULL only if the column exists
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'server_promotion' AND column_name = 'kind'
+    ) THEN
+        ALTER TABLE server_promotion ALTER COLUMN kind DROP NOT NULL;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'server_promotion' AND column_name = 'value'
+    ) THEN
+        ALTER TABLE server_promotion ALTER COLUMN value DROP NOT NULL;
+    END IF;
+END$$;
+"""
 
 class Migration(migrations.Migration):
 
@@ -17,4 +57,6 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.RunSQL(SQL),
+        migrations.RunSQL(SQL_ADD_IF_MISSING, reverse_sql=""),
+        migrations.RunSQL(SQL_RELAX_NOT_NULL_IF_EXISTS, reverse_sql=""),
     ]

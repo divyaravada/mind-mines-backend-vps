@@ -89,11 +89,11 @@ class CustomUserManager(BaseUserManager):
 
 class User(AbstractUser):
     # keep an optional username field so admin can fill it if desired
-    username = models.CharField(max_length=100, blank=True, null=True)
     email = models.EmailField(unique=True)
+    username = models.CharField(max_length=100, blank=True, null=True)
 
     USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = ["email"]  # createsuperuser will only ask for email + password
+    REQUIRED_FIELDS = []  # createsuperuser will only ask for email + password
 
     objects = CustomUserManager()  # <-- IMPORTANT
 
