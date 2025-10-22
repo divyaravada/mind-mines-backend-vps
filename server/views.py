@@ -35,7 +35,7 @@ from django.urls import reverse
 
 from .pagination import StandardResultsSetPagination
 from .serializers import (
-    ProfileSerializer, RegisterSerializer, MyTokenObtainPairSerializer,,StockAlertCreateSerializer,
+    ProfileSerializer, RegisterSerializer, MyTokenObtainPairSerializer,StockAlertCreateSerializer,
     ProductSerializer,ProductMiniSerializer, ContactMessageSerializer,ReviewWriteSerializer,
     NewsletterSubscriberSerializer, AddressSerializer, PromotionSerializer,GuestOrderLookupInputSerializer,
     OrderPublicSerializer,
