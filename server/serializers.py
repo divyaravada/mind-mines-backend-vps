@@ -641,51 +641,47 @@ class OrderCreateSerializer(serializers.Serializer):
         return coup, disc, None
 
     def create(self, validated):
-        request = self.context["request"]
-        user = request.user if request.user.is_authenticated else None
+        user = self.context["request"].user
 
         items_in = validated["items"]
-        if not items_in:
-            raise serializers.ValidationError({"items": ["No items provided."]})
-
-        # Collect product ids and fetch in one query
-        pids = [it["product_id"] for it in items_in]
-        products = {p.id: p for p in Product.objects.select_for_update().filter(id__in=pids)}
-        missing = [pid for pid in pids if pid not in products]
-        if missing:
-            raise serializers.ValidationError({"items": [f"Invalid product_id: {missing[0]}"]})
-
-        # Resolve / create address (can be None if your Order allows null)
         addr = self._resolve_address(user, validated)
-
-        # Build pending (unsaved) OrderItem data + compute subtotal
-        pending_items = []
+        products={}
         subtotal = Decimal("0.00")
+        clean_items = []
         for it in items_in:
-            product = products[it["product_id"]]
+            pid = int(it["product_id"])
             qty = int(it["qty"])
-            unit = Product.vat_included_price(product)
-            subtotal += Product.vat_included_price(product) * qty
-            pending_items.append({
-                "product": product,
-                "quantity": qty,
-                "unit_price": unit
-            })
+            if qty <= 0:
+                raise serializers.ValidationError({"items": "Quantity must be >= 1"})
+            if pid not in products:
+                try:
+                    products[pid] = Product.objects.get(pk=pid)
+                except Product.DoesNotExist:
+                    raise serializers.ValidationError({"items": f"Product {pid} not found"})
+            p = products[pid]
+            unit = p.vat_included_price()  # instance method
+            clean_items.append((p, qty, unit))
+            subtotal += (unit * qty)
 
+        # 3) Coupon logic
         coupon_code = (validated.get("coupon_code") or "").strip()
-        coupon_obj, discount, _ = self._apply_coupon(user if user.is_authenticated else None,
-                                                 items_in, subtotal, coupon_code)
-
+        coupon_obj, discount, _ = self._apply_coupon(
+            user if user.is_authenticated else None, items_in, subtotal, coupon_code
+        )
         shipping_fee = Decimal("0.00")
         total = (subtotal - discount + shipping_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if total < 0: total = Decimal("0.00")
+        if total < 0:
+            total = Decimal("0.00")
 
-        # ←─ choose the correct email
-        order_email = (getattr(user, "email", "") if user and user.email else (validated.get("email") or "")).strip()
-
+        # 4) Email source: guest vs user
+        order_email = (
+            user.email if getattr(user, "is_authenticated", False) and user.email
+            else (validated.get("email") or "")
+        )
         if not order_email:
             raise serializers.ValidationError({"email": "This field is required."})
 
+        # 5) Create Order, then its OrderItems (IMPORTANT: order must exist first)
         with transaction.atomic():
             order = Order.objects.create(
                 user=user if getattr(user, "is_authenticated", False) else None,
@@ -693,7 +689,7 @@ class OrderCreateSerializer(serializers.Serializer):
                 guest_email=None if getattr(user, "is_authenticated", False) else order_email,
                 guest_name=" ".join(filter(None, [validated.get("first_name",""), validated.get("last_name","")])),
                 status="pending",
-                payment_method=validated["payment_method"],
+                payment_method=validated.get("payment_method") or "card",
                 subtotal=subtotal.quantize(Decimal("0.01")),
                 shipping_fee=shipping_fee,
                 total_price=total,
@@ -701,10 +697,15 @@ class OrderCreateSerializer(serializers.Serializer):
                 coupon=coupon_obj,
                 discount_amount=discount
             )
-        # attach items now that order exists
-        OrderItem.objects.bulk_create([
-                OrderItem(order=order, **pi) for pi in pending_items
-            ])
+
+            # Now create the items with order set
+            for p, qty, unit in clean_items:
+                OrderItem.objects.create(
+                    order=order,
+                    product=p,
+                    quantity=qty,
+                    unit_price=unit,
+                )
 
         return order
         
