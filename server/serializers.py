@@ -11,7 +11,11 @@ from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.core.mail import EmailMultiAlternatives
 from django.contrib.auth.tokens import default_token_generator
 from decimal import Decimal, ROUND_HALF_UP
+from django.db import transaction
 from django.contrib.auth import get_user_model
+from datetime import timedelta
+from django.utils.timezone import now
+from server.models import Coupon
 
 def _norm(s):
     return " ".join((s or "").strip().split()).lower()
@@ -471,14 +475,11 @@ class OrderReadSerializer(serializers.ModelSerializer):
     
     def get_is_returnable(self, obj):
         # simple 15-day window from created_at (adjust if you add delivered_at)
-        from datetime import timedelta
-        from django.utils.timezone import now
         if obj.status in ("cancelled",):
             return False
         return now() <= (obj.created_at + timedelta(days=1))
 
     def get_return_deadline(self, obj):
-        from datetime import timedelta
         return (obj.created_at + timedelta(days=1)).isoformat()
     
     def get_coupon_code(self, obj):
@@ -630,7 +631,6 @@ class OrderCreateSerializer(serializers.Serializer):
     def _apply_coupon(self, user, items, subtotal, code):
         if not code:
             return None, Decimal("0.00"), None
-        from server.models import Coupon
         coup = Coupon.objects.filter(code__iexact=str(code).strip()).first()
         if not coup:
             raise serializers.ValidationError({"coupon_code": "Coupon not found."})
@@ -641,22 +641,36 @@ class OrderCreateSerializer(serializers.Serializer):
         return coup, disc, None
 
     def create(self, validated):
-        user = self.context["request"].user
-        addr = self._resolve_address(user, validated)
+        request = self.context["request"]
+        user = request.user if request.user.is_authenticated else None
 
         items_in = validated["items"]
-        order_items, subtotal = [], Decimal("0.00")
+        if not items_in:
+            raise serializers.ValidationError({"items": ["No items provided."]})
+
+        # Collect product ids and fetch in one query
+        pids = [it["product_id"] for it in items_in]
+        products = {p.id: p for p in Product.objects.select_for_update().filter(id__in=pids)}
+        missing = [pid for pid in pids if pid not in products]
+        if missing:
+            raise serializers.ValidationError({"items": [f"Invalid product_id: {missing[0]}"]})
+
+        # Resolve / create address (can be None if your Order allows null)
+        addr = self._resolve_address(user, validated)
+
+        # Build pending (unsaved) OrderItem data + compute subtotal
+        pending_items = []
+        subtotal = Decimal("0.00")
         for it in items_in:
-            product = Product.objects.get(pk=it["product_id"])
+            product = products[it["product_id"]]
             qty = int(it["qty"])
-            oi = OrderItem.objects.create(
-                order=None,  # attach later to avoid orphan, see below if you prefer
-                product=product,
-                quantity=qty,
-                unit_price=Product.vat_included_price(product),
-            )
-            order_items.append(oi)
+            unit = Product.vat_included_price(product)
             subtotal += Product.vat_included_price(product) * qty
+            pending_items.append({
+                "product": product,
+                "quantity": qty,
+                "unit_price": unit
+            })
 
         coupon_code = (validated.get("coupon_code") or "").strip()
         coupon_obj, discount, _ = self._apply_coupon(user if user.is_authenticated else None,
@@ -667,30 +681,30 @@ class OrderCreateSerializer(serializers.Serializer):
         if total < 0: total = Decimal("0.00")
 
         # ←─ choose the correct email
-        order_email = (user.email if getattr(user, "is_authenticated", False) and user.email
-                    else (validated.get("email") or ""))
+        order_email = (getattr(user, "email", "") if user and user.email else (validated.get("email") or "")).strip()
 
         if not order_email:
             raise serializers.ValidationError({"email": "This field is required."})
 
-        order = Order.objects.create(
-            user=user if getattr(user, "is_authenticated", False) else None,
-            email=order_email,
-            guest_email=None if getattr(user, "is_authenticated", False) else order_email,
-            guest_name=" ".join(filter(None, [validated.get("first_name",""), validated.get("last_name","")])),
-            status="pending",
-            payment_method=validated["payment_method"],
-            subtotal=subtotal.quantize(Decimal("0.01")),
-            shipping_fee=shipping_fee,
-            total_price=total,
-            shipping_address=addr,
-            coupon=coupon_obj,
-            discount_amount=discount
-        )
+        with transaction.atomic():
+            order = Order.objects.create(
+                user=user if getattr(user, "is_authenticated", False) else None,
+                email=order_email,
+                guest_email=None if getattr(user, "is_authenticated", False) else order_email,
+                guest_name=" ".join(filter(None, [validated.get("first_name",""), validated.get("last_name","")])),
+                status="pending",
+                payment_method=validated["payment_method"],
+                subtotal=subtotal.quantize(Decimal("0.01")),
+                shipping_fee=shipping_fee,
+                total_price=total,
+                shipping_address=addr,
+                coupon=coupon_obj,
+                discount_amount=discount
+            )
         # attach items now that order exists
-        for oi in order_items:
-            oi.order = order
-            oi.save(update_fields=["order"])
+        OrderItem.objects.bulk_create([
+                OrderItem(order=order, **pi) for pi in pending_items
+            ])
 
         return order
         
