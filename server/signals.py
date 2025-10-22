@@ -3,10 +3,11 @@ from __future__ import annotations
 from django.db.models.signals import post_save, pre_save
 from django.contrib.auth import get_user_model
 from django.dispatch import receiver
+from django.conf import settings
 from django.utils import timezone
-from .models import Order
+from .models import Order, Product, StockAlert
 from .utils.invoices import generate_invoice_pdf
-from .utils.emails import send_invoice_email,send_order_confirmation
+from .utils.emails import send_invoice_email,send_order_confirmation,send_stock_alert_email
 
 def create_or_update_user_profile(sender, instance, created, **kwargs):
     # Import here to avoid early app-registry import cycles
@@ -65,6 +66,46 @@ def stamp_status_times(sender, instance, created, **kwargs):
         updates["cancelled_at"] = timezone.now()
     if updates:
         type(instance).objects.filter(pk=instance.pk).update(**updates)
+
+@receiver(pre_save, sender=Product)
+def _stash_old_qty(sender, instance: Product, **kwargs):
+    if instance.pk:
+        try:
+            old = sender.objects.get(pk=instance.pk)
+            instance._old_qty = int(getattr(old, "quantity", 0) or 0)
+        except sender.DoesNotExist:
+            instance._old_qty = None
+    else:
+        instance._old_qty = None
+
+@receiver(post_save, sender=Product)
+def _notify_restock(sender, instance: Product, created, **kwargs):
+    try:
+        old_qty = getattr(instance, "_old_qty", None)
+        new_qty = int(getattr(instance, "quantity", 0) or 0)
+        if old_qty is None:
+            # new product; only notify if it "was effectively 0" before — skip
+            return
+        # Trigger only if transitioned from <=0 to >0
+        if (old_qty <= 0) and (new_qty > 0):
+            alerts = StockAlert.objects.filter(product=instance, is_active=True).order_by("created_at")
+            for alert in alerts:
+                unsub = _build_unsub_url(alert)
+                try:
+                    send_stock_alert_email(instance, alert.email, unsub)
+                except Exception:
+                    # don't crash signal; keep active if email failed
+                    continue
+                alert.mark_notified()
+    except Exception:
+        # never crash request due to email issues
+        pass
+
+def _build_unsub_url(alert: StockAlert) -> str:
+    base = getattr(settings, "FRONTEND_URL", "").rstrip("/")
+    api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
+    return f"{base}{api_base}/stock-alerts/unsubscribe/{alert.unsubscribe_token}/"
+
 
 def connect_signals():
     """
