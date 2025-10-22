@@ -132,3 +132,11 @@ def connect_signals():
         stamp_status_times, sender=Order,
         dispatch_uid="server_order_stamp_status_times"
     )
+    post_save.connect(
+        _notify_restock, sender=Product,
+        dispatch_uid="server_product_notify_restock"
+    )
+    post_save.connect(
+        _stash_old_qty, sender=Product,
+        dispatch_uid="server_product_stash_old_qty"
+    )
