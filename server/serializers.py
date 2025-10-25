@@ -342,6 +342,10 @@ class OrderItemInSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
     qty = serializers.IntegerField(min_value=1)
 
+class CouponPreviewIn(serializers.Serializer):
+    code  = serializers.CharField()
+    items = OrderItemInSerializer(many=True)
+
 class AddressSnapshotSerializer(serializers.Serializer):
     first_name = serializers.CharField(allow_blank=True, required=False)
     last_name  = serializers.CharField(allow_blank=True, required=False)
