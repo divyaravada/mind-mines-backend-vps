@@ -9,20 +9,17 @@ from .models import (
     Address, Order, Review, OrderItem, Invoice, ReturnRequest, ReturnAttachment, Promotion
 )
 
-@admin.register(Invoice)
-class InvoiceAdmin(admin.ModelAdmin):
-    list_display = ("number", "order", "created_at")
-    search_fields = ("number", "order__order_number", "order__number", "order__user__email")
-    
-# Optional utilities (if you have them; otherwise the admin will still work without)
+# --------------------------------------------------------------------------------------
+# Optional utilities (safe fallbacks if utils are missing)
+# --------------------------------------------------------------------------------------
 try:
-    from .utils.invoices import generate_invoice_pdf
+    from .utils.invoices import generate_invoice_pdf  # noqa
 except Exception:
     def generate_invoice_pdf(*args, **kwargs):
         return None
 
 try:
-    from .utils.emails import send_invoice_email, send_shipping_update, send_cancellation_email
+    from .utils.emails import send_invoice_email, send_shipping_update, send_cancellation_email  # noqa
 except Exception:
     def send_invoice_email(*args, **kwargs): pass
     def send_shipping_update(*args, **kwargs): pass
@@ -31,7 +28,6 @@ except Exception:
 # --------------------------------------------------------------------------------------
 # Helpers that safely read possibly-renamed fields
 # --------------------------------------------------------------------------------------
-
 def get_order_number(o):
     """Works with either .order_number (new) or .number (old)."""
     return getattr(o, "order_number", None) or getattr(o, "number", None) or "-"
@@ -49,11 +45,9 @@ def get_total(o):
         val = getattr(o, name, None)
         if val is not None:
             return val
-    # compute from items as a last resort
     try:
         total = 0
         for oi in o.items.all():
-            # prefer a method if it exists
             if hasattr(oi, "line_total") and callable(getattr(oi, "line_total")):
                 total += oi.line_total()
             else:
@@ -75,7 +69,6 @@ def fmt_eur(v):
 # --------------------------------------------------------------------------------------
 # Inline for order items
 # --------------------------------------------------------------------------------------
-
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     fk_name = "order"
@@ -89,7 +82,6 @@ class OrderItemInline(admin.TabularInline):
         return False
 
     def item_name(self, obj):
-        # Common fields: product_name or product.title_*
         name = getattr(obj, "product_name", None)
         if name:
             return name
@@ -122,7 +114,6 @@ class OrderItemInline(admin.TabularInline):
 # --------------------------------------------------------------------------------------
 # Order admin
 # --------------------------------------------------------------------------------------
-
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
@@ -130,7 +121,7 @@ class OrderAdmin(admin.ModelAdmin):
     list_filter = ("status", "created_at")
     search_fields = ("order_number", "number", "user__email")  # support old + new
 
-    actions = []  # you can add actions back later when utils are stable
+    actions = []
 
     readonly_fields = (
         "order_number_col",
@@ -157,8 +148,6 @@ class OrderAdmin(admin.ModelAdmin):
     )
 
     inlines = [OrderItemInline]
-
-    # ----- Display helpers -----
 
     def order_number_col(self, obj):
         return get_order_number(obj)
@@ -189,7 +178,6 @@ class OrderAdmin(admin.ModelAdmin):
     canceled_at_safe.short_description = "Canceled at"
 
     def stripe_refs(self, obj):
-        # show whatever exists
         bits = []
         for label, attr in (
             ("PI", "stripe_payment_intent"),
@@ -208,25 +196,19 @@ class OrderAdmin(admin.ModelAdmin):
     def items_readonly(self, obj):
         rows = []
         for oi in obj.items.all():
-            # Item title
             if hasattr(oi, "product_name") and oi.product_name:
                 title = oi.product_name
             else:
                 p = getattr(oi, "product", None)
                 title = (getattr(p, "title_en", None) or getattr(p, "title_de", None) or str(p)) if p else "-"
-
-            # Unit price
             unit = getattr(oi, "unit_price_gross", None)
             if unit is None:
                 unit = getattr(oi, "unit_price", None)
-
-            # Line total
             if hasattr(oi, "line_total") and callable(getattr(oi, "line_total")):
                 lt = oi.line_total()
             else:
                 qty = getattr(oi, "quantity", 1)
                 lt = (unit or 0) * qty
-
             rows.append((title, f"{getattr(oi,'quantity',1)}", fmt_eur(unit or 0), fmt_eur(lt)))
 
         if not rows:
@@ -247,9 +229,8 @@ class OrderAdmin(admin.ModelAdmin):
     items_readonly.short_description = "Items"
 
 # --------------------------------------------------------------------------------------
-# Invoice
+# Invoice (REGISTERED ONCE ONLY)
 # --------------------------------------------------------------------------------------
-
 @admin.register(Invoice)
 class InvoiceAdmin(admin.ModelAdmin):
     list_display = ("number", "order", "created_at")
@@ -258,11 +239,10 @@ class InvoiceAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 # User & Profile
 # --------------------------------------------------------------------------------------
-
 @admin.register(User)
 class CustomUserAdmin(DjangoUserAdmin):
     model = User
-    # Support either .username (old) or .display_name (new)
+
     def display_name_col(self, obj):
         return getattr(obj, "display_name", None) or getattr(obj, "username", None) or obj.email
     display_name_col.short_description = "Name"
@@ -290,7 +270,6 @@ class ProfileAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 # Product & Media
 # --------------------------------------------------------------------------------------
-
 class ProductMediaInline(admin.TabularInline):
     model = ProductMedia
     extra = 1
@@ -308,7 +287,6 @@ class ProductAdmin(admin.ModelAdmin):
     price_col.short_description = "Price"
 
     def quantity_col(self, obj):
-        # Some schemas removed quantity; show "-" if missing
         q = getattr(obj, "quantity", None)
         return q if q is not None else "-"
     quantity_col.short_description = "Qty"
@@ -319,7 +297,6 @@ class ProductAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 # Natural stones
 # --------------------------------------------------------------------------------------
-
 class NaturalStoneImageInline(admin.TabularInline):
     model = NaturalStoneImage
     extra = 1
@@ -336,7 +313,6 @@ class NaturalStoneAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 # Addresses
 # --------------------------------------------------------------------------------------
-
 @admin.register(Address)
 class AddressAdmin(admin.ModelAdmin):
     list_display = (
@@ -352,7 +328,6 @@ class AddressAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 # Returns
 # --------------------------------------------------------------------------------------
-
 class ReturnAttachmentInline(admin.TabularInline):
     model = ReturnAttachment
     extra = 0
@@ -368,17 +343,11 @@ class ReturnRequestAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 # Misc simple models
 # --------------------------------------------------------------------------------------
-
 @admin.register(StockAlert)
 class StockAlertAdmin(admin.ModelAdmin):
     list_display = ("product", "email", "is_active", "created_at", "notified_at")
     list_filter = ("is_active", "created_at", "notified_at")
     search_fields = ("email", "product__title_en", "product__title_de")
-
-@admin.register(Invoice)
-class InvoiceAdmin(admin.ModelAdmin):
-    list_display = ("number", "order", "created_at")
-    search_fields = ("number", "order__order_number", "order__number", "order__user__email")
 
 admin.site.register(ContactMessage)
 admin.site.register(NewsletterSubscriber)
