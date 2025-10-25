@@ -1,41 +1,13 @@
 # server/admin.py
 from django.contrib import admin
+from django.utils.html import format_html_join, format_html
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
-from django.utils.html import format_html, format_html_join
-from django.conf import settings
 
 from .models import (
-    Address,
-    ContactMessage,
-    Coupon,
-    Invoice,
-    NaturalStone,
-    NaturalStoneImage,
-    Order,
-    OrderItem,
-    Product,
-    ProductMedia,
-    Profile,
-    Promotion,
-    ReturnAttachment,
-    ReturnRequest,
-    Review,
-    StockAlert,
-    StoneEnquiry,
-    User,
-    Wishlist,
-    NewsletterSubscriber
+    Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage,
+    StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber, Coupon, StockAlert,
+    Address, Order, Review, OrderItem, Invoice, ReturnRequest, ReturnAttachment, Promotion
 )
-from .utils.invoices import generate_invoice_pdf
-from .utils.emails import (
-    send_cancellation_email,
-    send_invoice_email,
-    send_shipping_update,
-)
-from .utils.background import fire_and_forget
-from .tasks import post_payment_pipeline, send_user_birthday_coupon
-
-
 
 # Optional utilities (if you have them; otherwise the admin will still work without)
 try:
@@ -50,6 +22,7 @@ except Exception:
     def send_invoice_email(*args, **kwargs): pass
     def send_shipping_update(*args, **kwargs): pass
     def send_cancellation_email(*args, **kwargs): pass
+
 # --------------------------------------------------------------------------------------
 # Helpers that safely read possibly-renamed fields
 # --------------------------------------------------------------------------------------
@@ -93,6 +66,7 @@ def fmt_eur(v):
         return f"{v:.2f} €"
     except Exception:
         return "-"
+
 # --------------------------------------------------------------------------------------
 # Inline for order items
 # --------------------------------------------------------------------------------------
@@ -139,6 +113,134 @@ class OrderItemInline(admin.TabularInline):
         except Exception:
             return "-"
     line_total_display.short_description = "Line total"
+
+# --------------------------------------------------------------------------------------
+# Order admin
+# --------------------------------------------------------------------------------------
+
+@admin.register(Order)
+class OrderAdmin(admin.ModelAdmin):
+    date_hierarchy = "created_at"
+    list_display = ("order_number_col", "user", "status", "total_col", "created_at")
+    list_filter = ("status", "created_at")
+    search_fields = ("order_number", "number", "user__email")  # support old + new
+
+    actions = []  # you can add actions back later when utils are stable
+
+    readonly_fields = (
+        "order_number_col",
+        "created_at",
+        "updated_at",
+        "paid_at_safe",
+        "canceled_at_safe",
+        "total_col",
+        "subtotal_col",
+        "vat_col",
+        "items_readonly",
+        "stripe_refs",
+    )
+
+    fields = (
+        ("order_number_col", "user", "created_at", "paid_at_safe", "canceled_at_safe"),
+        ("status", "payment_method"),
+        ("tracking_number",),
+        ("subtotal_col", "vat_col", "total_col"),
+        ("shipping_address", "billing_address"),
+        "items_readonly",
+        ("stripe_refs",),
+        "remarks",
+    )
+
+    inlines = [OrderItemInline]
+
+    # ----- Display helpers -----
+
+    def order_number_col(self, obj):
+        return get_order_number(obj)
+    order_number_col.short_description = "Order #"
+
+    def total_col(self, obj):
+        return fmt_eur(get_total(obj))
+    total_col.short_description = "Total"
+
+    def subtotal_col(self, obj):
+        val = getattr(obj, "subtotal", None)
+        if val is None:
+            val = getattr(obj, "subtotal_gross", None)
+        return fmt_eur(val) if val is not None else "-"
+    subtotal_col.short_description = "Subtotal"
+
+    def vat_col(self, obj):
+        val = getattr(obj, "vat_amount", None)
+        return fmt_eur(val) if val is not None else "-"
+    vat_col.short_description = "VAT"
+
+    def paid_at_safe(self, obj):
+        return getattr(obj, "paid_at", None)
+    paid_at_safe.short_description = "Paid at"
+
+    def canceled_at_safe(self, obj):
+        return get_canceled_at(obj)
+    canceled_at_safe.short_description = "Canceled at"
+
+    def stripe_refs(self, obj):
+        # show whatever exists
+        bits = []
+        for label, attr in (
+            ("PI", "stripe_payment_intent"),
+            ("Customer", "stripe_customer"),
+            ("SEPA mandate", "sepa_mandate_id"),
+            ("Payment ID", "payment_id"),         # old
+            ("Payment Ref", "payment_ref"),       # old
+        ):
+            val = getattr(obj, attr, "") or ""
+            if val:
+                bits.append(f"<div><b>{label}:</b> {val}</div>")
+        return format_html("".join(bits)) if bits else "-"
+    stripe_refs.allow_tags = True
+    stripe_refs.short_description = "Stripe/Payment"
+
+    def items_readonly(self, obj):
+        rows = []
+        for oi in obj.items.all():
+            # Item title
+            if hasattr(oi, "product_name") and oi.product_name:
+                title = oi.product_name
+            else:
+                p = getattr(oi, "product", None)
+                title = (getattr(p, "title_en", None) or getattr(p, "title_de", None) or str(p)) if p else "-"
+
+            # Unit price
+            unit = getattr(oi, "unit_price_gross", None)
+            if unit is None:
+                unit = getattr(oi, "unit_price", None)
+
+            # Line total
+            if hasattr(oi, "line_total") and callable(getattr(oi, "line_total")):
+                lt = oi.line_total()
+            else:
+                qty = getattr(oi, "quantity", 1)
+                lt = (unit or 0) * qty
+
+            rows.append((title, f"{getattr(oi,'quantity',1)}", fmt_eur(unit or 0), fmt_eur(lt)))
+
+        if not rows:
+            return "-"
+
+        return format_html(
+            "<table style='width:100%'><tr>"
+            "<th align='left'>Item</th>"
+            "<th align='right'>Qty</th>"
+            "<th align='right'>Unit</th>"
+            "<th align='right'>Total</th></tr>{}</table>",
+            format_html_join(
+                "",
+                "<tr><td>{}</td><td align='right'>{}</td><td align='right'>{}</td><td align='right'>{}</td></tr>",
+                rows,
+            ),
+        )
+    items_readonly.short_description = "Items"
+
 # --------------------------------------------------------------------------------------
 # Invoice
 # --------------------------------------------------------------------------------------
@@ -179,6 +281,7 @@ class CustomUserAdmin(DjangoUserAdmin):
 class ProfileAdmin(admin.ModelAdmin):
     list_display = ["user", "full_name", "date_of_birth"]
     search_fields = ("user__email", "full_name")
+
 # --------------------------------------------------------------------------------------
 # Product & Media
 # --------------------------------------------------------------------------------------
@@ -207,6 +310,7 @@ class ProductAdmin(admin.ModelAdmin):
 
     list_display = ["title_en", "category", "price_col", "quantity_col"]
     search_fields = ("title_en", "title_de", "category")
+
 # --------------------------------------------------------------------------------------
 # Natural stones
 # --------------------------------------------------------------------------------------
@@ -223,6 +327,7 @@ class NaturalStoneImageInline(admin.TabularInline):
 class NaturalStoneAdmin(admin.ModelAdmin):
     list_display = ["type"]
     inlines = [NaturalStoneImageInline]
+
 # --------------------------------------------------------------------------------------
 # Addresses
 # --------------------------------------------------------------------------------------
@@ -270,7 +375,6 @@ class InvoiceAdmin(admin.ModelAdmin):
     list_display = ("number", "order", "created_at")
     search_fields = ("number", "order__order_number", "order__number", "order__user__email")
 
-
 admin.site.register(ContactMessage)
 admin.site.register(NewsletterSubscriber)
 admin.site.register(Review)
@@ -278,4 +382,3 @@ admin.site.register(StoneEnquiry)
 admin.site.register(Wishlist)
 admin.site.register(Promotion)
 admin.site.register(Coupon)
-
