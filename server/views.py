@@ -8,6 +8,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from typing import List, Optional
 
+from django.views.decorators.csrf import csrf_exempt
 import requests as http
 import stripe
 from dateutil.relativedelta import relativedelta
@@ -43,16 +44,14 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
+
 from .models import (
     Address,
-    Invoice,
     NaturalStone,
     NaturalStoneImage,
     Order,
-    OrderItem,
     Product,
     Promotion,
-    Profile,
     ReturnAttachment,
     ReturnRequest,
     Review,
