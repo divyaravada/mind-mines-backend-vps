@@ -12,6 +12,8 @@ from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
 from django.template.exceptions import TemplateDoesNotExist
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from datetime import timedelta, datetime
+
 
 from .models import (
     User, Profile,
@@ -226,6 +228,42 @@ class StoneEnquirySerializer(serializers.ModelSerializer):
 
 # ---------------------- Products & Media ----------------------
 
+class ProductMiniSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField()
+    title_en = serializers.CharField()
+    title_de = serializers.CharField()
+    image = serializers.SerializerMethodField()
+    thumbnail_url = serializers.SerializerMethodField()
+    price = serializers.DecimalField(max_digits=10, decimal_places=2)
+
+    def _abs(self, request, url: str) -> str:
+        if not url:
+            return ""
+        if request and not str(url).startswith("http"):
+            return request.build_absolute_uri(url)
+        return url
+
+    def get_image(self, obj):
+        request = self.context.get("request")
+        try:
+            if getattr(obj, "image", None) and getattr(obj.image, "url", None):
+                return self._abs(request, obj.image.url)
+        except Exception:
+            pass
+        return ""
+
+    def get_thumbnail_url(self, obj):
+        request = self.context.get("request")
+        try:
+            thumb = getattr(obj, "thumbnail", None)
+            if thumb and getattr(thumb, "url", None):
+                return self._abs(request, thumb.url)
+            if getattr(obj, "image", None) and getattr(obj.image, "url", None):
+                return self._abs(request, obj.image.url)
+        except Exception:
+            pass
+        return ""
+
 class ProductMediaSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
@@ -353,7 +391,80 @@ class NewsletterSubscriberSerializer(serializers.ModelSerializer):
 
 
 # ---------------------- Orders (CREATE) ----------------------
+class OrderItemReadSerializer(serializers.ModelSerializer):
+    product = ProductMiniSerializer()
+    line_total = serializers.SerializerMethodField()
 
+    class Meta:
+        model = OrderItem
+        fields = ["id", "product", "quantity", "unit_price", "line_total"]
+
+    def get_line_total(self, obj):
+        try:
+            return obj.line_total()
+        except Exception:
+            return Decimal("0.00")
+
+# --- Full order read serializer used by views (the one missing) ---
+class OrderReadSerializer(serializers.ModelSerializer):
+    items = OrderItemReadSerializer(many=True, read_only=True)
+    invoice_pdf = serializers.SerializerMethodField()
+    shipping_address = AddressSerializer(read_only=True)
+    is_returnable = serializers.SerializerMethodField()
+    return_deadline = serializers.SerializerMethodField()
+    payment_method_label = serializers.SerializerMethodField()
+    coupon_code = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = [
+            "id", "number", "status", "payment_method", "payment_method_label",
+            "subtotal", "discount_amount", "shipping_fee", "total_price",
+            "created_at", "updated_at", "tracking_number",
+            "items", "invoice_pdf", "is_returnable", "return_deadline",
+            "shipping_address", "coupon_code",
+        ]
+
+    def get_payment_method_label(self, obj):
+        try:
+            return obj.get_payment_method_display()
+        except Exception:
+            return (obj.payment_method or "").title()
+
+    def get_invoice_pdf(self, obj):
+        # Prefer related Invoice model if present
+        try:
+            inv = getattr(obj, "invoice", None)
+            f = getattr(inv, "pdf", None)
+            if f and getattr(f, "url", None):
+                req = self.context.get("request")
+                url = f.url
+                return req.build_absolute_uri(url) if req and not url.startswith(("http://", "https://")) else url
+        except Exception:
+            pass
+        # Legacy FileField fallback on Order
+        try:
+            f = getattr(obj, "invoice_pdf", None)
+            if f and getattr(f, "url", None):
+                req = self.context.get("request")
+                url = f.url
+                return req.build_absolute_uri(url) if req and not url.startswith(("http://", "https://")) else url
+        except Exception:
+            pass
+        return None
+
+    def get_is_returnable(self, obj):
+        # If you have delivered_at logic on the model, prefer its property; otherwise keep the 1-day fallback
+        if obj.status in ("cancelled",):
+            return False
+        return now() <= (obj.created_at + timedelta(days=1))
+
+    def get_return_deadline(self, obj):
+        return (obj.created_at + timedelta(days=1)).isoformat()
+
+    def get_coupon_code(self, obj):
+        return getattr(getattr(obj, "coupon", None), "code", None)
+    
 class OrderItemInSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
     qty = serializers.IntegerField(min_value=1)
