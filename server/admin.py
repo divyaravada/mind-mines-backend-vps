@@ -134,6 +134,8 @@ class OrderAdmin(admin.ModelAdmin):
         "vat_col",
         "items_readonly",
         "stripe_refs",
+        "shipping_address_display",
+        "billing_address_display",
     )
 
     fields = (
@@ -141,13 +143,16 @@ class OrderAdmin(admin.ModelAdmin):
         ("status", "payment_method"),
         ("tracking_number",),
         ("subtotal_col", "vat_col", "total_col"),
-        ("shipping_address", "billing_address"),
+        "shipping_address_display",
+        "billing_address_display",
         "items_readonly",
         ("stripe_refs",),
         "remarks",
     )
 
     inlines = [OrderItemInline]
+
+    # ----- Display helpers -----
 
     def order_number_col(self, obj):
         return get_order_number(obj)
@@ -174,6 +179,7 @@ class OrderAdmin(admin.ModelAdmin):
     paid_at_safe.short_description = "Paid at"
 
     def canceled_at_safe(self, obj):
+        # supports canceled_at (new) / cancelled_at (old)
         return get_canceled_at(obj)
     canceled_at_safe.short_description = "Canceled at"
 
@@ -192,6 +198,68 @@ class OrderAdmin(admin.ModelAdmin):
         return format_html("".join(bits)) if bits else "-"
     stripe_refs.allow_tags = True
     stripe_refs.short_description = "Stripe/Payment"
+
+    # ----- Address renderers (support JSON or old FK) -----
+
+    def _render_address_dict(self, d: dict) -> str:
+        # Flexible keys across schemas
+        def g(*names, default=""):
+            for n in names:
+                if d.get(n):
+                    return d.get(n)
+            return default
+
+        lines = [
+            g("full_name", default="").strip() or
+            (" ".join([g("first_name",""), g("last_name","")]).strip()),
+            g("address_line1") or " ".join([g("street_name",""), g("house_number","")]).strip(),
+            g("address_line2") or g("apartment",""),
+            " ".join([g("postal_code","pincode",""), g("city","state","")]).strip(),
+            g("country",""),
+            (f"Phone: {g('phone','')}" if g("phone","") else ""),
+        ]
+        lines = [x for x in lines if x]
+        if not lines:
+            return "-"
+        return format_html("<div>{}</div>", format_html_join("", "<div>{}</div>", [(l,) for l in lines]))
+
+    def _render_address_model(self, a) -> str:
+        if not a:
+            return "-"
+        parts = [
+            getattr(a, "full_name", "") or " ".join([getattr(a, "first_name", "") or "", getattr(a, "last_name", "") or ""]).strip(),
+            getattr(a, "address_line1", "") or " ".join([getattr(a, "street_name", "") or "", getattr(a, "house_number", "") or ""]).strip(),
+            getattr(a, "address_line2", "") or getattr(a, "apartment", "") or "",
+            " ".join([
+                getattr(a, "postal_code", "") or getattr(a, "pincode", "") or "",
+                getattr(a, "city", "") or getattr(a, "state", "") or "",
+            ]).strip(),
+            getattr(a, "country", "") or "",
+            (f"Phone: {getattr(a, 'phone')}" if getattr(a, "phone", "") else ""),
+        ]
+        parts = [x for x in parts if x]
+        if not parts:
+            return "-"
+        return format_html("<div>{}</div>", format_html_join("", "<div>{}</div>", [(p,) for p in parts]))
+
+    def shipping_address_display(self, obj):
+        d = getattr(obj, "shipping_address_json", None)
+        if isinstance(d, dict) and d:
+            return self._render_address_dict(d)
+        # fallback to old FK
+        a = getattr(obj, "shipping_address", None)
+        return self._render_address_model(a)
+    shipping_address_display.short_description = "Shipping address"
+
+    def billing_address_display(self, obj):
+        d = getattr(obj, "billing_address_json", None)
+        if isinstance(d, dict) and d:
+            return self._render_address_dict(d)
+        a = getattr(obj, "billing_address", None)
+        return self._render_address_model(a)
+    billing_address_display.short_description = "Billing address"
+
+    # ----- Items table (unchanged logic but kept here for completeness) -----
 
     def items_readonly(self, obj):
         rows = []
