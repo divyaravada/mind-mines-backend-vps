@@ -52,7 +52,7 @@ from .views import (
     CouponPreviewAPIView, ActivePromotionAPIView,
 
     # Misc
-    getRoutes, testEndPoint, TestPostView,
+    getRoutes, testEndPoint,
 
     # PayPal
     PaypalCreateOrder, PaypalCaptureOrder,
@@ -72,7 +72,7 @@ from .views import (
 
     # Stock Alerts
     StockAlertCreateView, StockAlertUnsubscribeView,
-    
+
     # Admin birthday coupon send
     SendBirthdayCouponAPIView
 )
@@ -163,7 +163,6 @@ urlpatterns = [
     # -------- Misc --------
     path("", getRoutes, name="routes"),
     path("test/", testEndPoint, name="test_endpoint"),
-    path("test-post/", TestPostView.as_view(), name="test_post"),
 
     # -------- PayPal --------
     path("paypal/create-order/", PaypalCreateOrder.as_view(), name="paypal_create_order"),
