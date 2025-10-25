@@ -122,7 +122,8 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='order',
             name='order_number',
-            field=models.CharField(default=1, max_length=20, unique=True),
+            field=models.CharField(max_length=20, null=True, blank=True, db_index=True,
+        ),
             preserve_default=False,
         ),
         migrations.AddField(
