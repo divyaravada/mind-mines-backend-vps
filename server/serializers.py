@@ -11,6 +11,7 @@ from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
 from django.template.exceptions import TemplateDoesNotExist
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from .models import (
     User, Profile,
@@ -23,6 +24,21 @@ from .models import (
     Review,
     Promotion, StockAlert,Coupon
 )
+
+# ---------------------- JWT Serializer ----------------------
+class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """
+    Extend the JWT payload with a few user fields used by the frontend.
+    """
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        # Safe extras (customize as you like)
+        token["email"] = getattr(user, "email", "")
+        token["username"] = getattr(user, "username", "") or ""
+        token["full_name"] = getattr(getattr(user, "profile", None), "full_name", "")
+        token["verified"] = bool(getattr(getattr(user, "profile", None), "verified", False))
+        return token
 
 # ---------------------- User / Profile ----------------------
 
