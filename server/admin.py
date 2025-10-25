@@ -9,6 +9,11 @@ from .models import (
     Address, Order, Review, OrderItem, Invoice, ReturnRequest, ReturnAttachment, Promotion
 )
 
+@admin.register(Invoice)
+class InvoiceAdmin(admin.ModelAdmin):
+    list_display = ("number", "order", "created_at")
+    search_fields = ("number", "order__order_number", "order__number", "order__user__email")
+    
 # Optional utilities (if you have them; otherwise the admin will still work without)
 try:
     from .utils.invoices import generate_invoice_pdf
