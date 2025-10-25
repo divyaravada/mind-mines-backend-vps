@@ -24,7 +24,8 @@ def dedupe_order_numbers(apps, schema_editor):
 
 class Migration(migrations.Migration):
 
-    dependencies = [
+    dependencies = [        
+        ('server', '0021_stockalert'),
         ('server', '0022_remove_order_uniq_invoice_number_nonempty_and_more'),  # update to your real dependency
     ]
 
