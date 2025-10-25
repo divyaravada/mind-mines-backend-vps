@@ -10,7 +10,6 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('server', '0021_stockalert'),
-        ('server', '0023_dedupe_order_number'),
     ]
 
     operations = [
