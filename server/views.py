@@ -1,99 +1,139 @@
-from decimal import Decimal,ROUND_HALF_UP,InvalidOperation
-from dateutil.relativedelta import relativedelta
-import json, re
+# server/views.py
+from __future__ import annotations
+
+import json
+import logging
+import re
+from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from typing import List, Optional
+
 import requests as http
-from typing import Optional
-from django.db.models.functions import Lower
-from rest_framework import permissions,generics, status, filters, throttling, serializers
-from rest_framework.authentication import SessionAuthentication, BasicAuthentication
+import stripe
+from dateutil.relativedelta import relativedelta
 from django.conf import settings
-from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
-from django.core.mail import send_mail, EmailMultiAlternatives
-from django.http import FileResponse , Http404,HttpResponse, JsonResponse
-from django.shortcuts import get_object_or_404
-from django.template.loader import render_to_string,TemplateDoesNotExist
-from django.utils.encoding import force_bytes
-from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.core.mail import EmailMultiAlternatives, send_mail
+from django.core.signing import TimestampSigner, BadSignature, SignatureExpired
 from django.db import transaction
-from django.utils import timezone
-from datetime import datetime
 from django.db.models import Avg, Count, Q
-from uuid import uuid4
-from google.oauth2 import id_token
+from django.db.models.functions import Lower
+from django.http import (
+    FileResponse,
+    Http404,
+    HttpResponse,
+    JsonResponse,
+)
+from django.shortcuts import get_object_or_404
+from django.template.loader import render_to_string, TemplateDoesNotExist
+from django.urls import reverse
+from django.utils import timezone
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2 import id_token
+from rest_framework import filters, generics, permissions, serializers, status, throttling
+from rest_framework.authentication import BasicAuthentication, SessionAuthentication
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
-from django.core.signing import TimestampSigner, BadSignature, SignatureExpired
-from django.urls import reverse
 
+from .models import (
+    Address,
+    Invoice,
+    NaturalStone,
+    NaturalStoneImage,
+    Order,
+    OrderItem,
+    Product,
+    Promotion,
+    Profile,
+    ReturnAttachment,
+    ReturnRequest,
+    Review,
+    StockAlert,
+    Wishlist,
+    ContactMessage,
+    NewsletterSubscriber,
+    User,
+    Coupon
+)
 from .pagination import StandardResultsSetPagination
 from .serializers import (
-    ProfileSerializer, RegisterSerializer, MyTokenObtainPairSerializer,StockAlertCreateSerializer,
-    ProductSerializer,ProductMiniSerializer, ContactMessageSerializer,ReviewWriteSerializer,
-    NewsletterSubscriberSerializer, AddressSerializer, PromotionSerializer,GuestOrderLookupInputSerializer,
-    OrderPublicSerializer,
-    ReviewSerializer, WishlistSerializer, NaturalStoneSerializer,CouponPreviewIn,
-    StoneEnquirySerializer, AccountSerializer, OrderCreateSerializer, OrderReadSerializer, 
+    AccountSerializer,
+    AddressSerializer,
+    ContactMessageSerializer,StoneEnquirySerializer,
+    CouponPreviewIn,
+    GuestOrderLookupSerializer,
+    MyTokenObtainPairSerializer,
+    NaturalStoneSerializer,
+    NewsletterSubscriberSerializer,
+    OrderCreateSerializer,
+    OrderReadSerializer,
+    ProductDetailSerializer,
+    ProductListSerializer,
+    ProfileSerializer,
+    PromotionSerializer,
+    RegisterSerializer,
+    ReviewSerializer,
+    ReviewWriteSerializer,
+    StockAlertCreateSerializer,
+    WishlistSerializer,
 )
-from .models import (
-    User, Product, ContactMessage, NewsletterSubscriber,Promotion,StockAlert,
-    Address, Order, Review, Wishlist, NaturalStone, NaturalStoneImage,ReturnRequest,ReturnAttachment
+from .utils.background import fire_and_forget
+from .utils.emails import (
+    send_bank_transfer_instructions,
+    send_cancel_request_emails,
+    send_invoice_email,
+    send_order_confirmation,
+    send_return_request_emails,
+    send_sepa_pending_email,
+    send_stock_alert_email,
 )
 from .utils.invoices import generate_invoice_pdf
-from .utils.background import fire_and_forget
-from .tasks import post_payment_pipeline
-from .utils.emails import send_stock_alert_email, send_installments_started_email, send_return_request_emails,send_cancel_request_emails,send_order_confirmation, send_bank_transfer_instructions, send_invoice_email,send_sepa_pending_email
 
-import logging
 logger = logging.getLogger(__name__)
-
 User = get_user_model()
+
+# -------------------- helpers / constants --------------------
 
 def _safe(func, *args, **kwargs):
     try:
         return func(*args, **kwargs)
     except Exception:
+        logger.exception("safe-call failed")
         return None
 
-SIGNER_SALT = "invoice-public-download-v1"
-INVOICE_TOKEN_MAX_AGE = 60 * 60 * 2  # 2 hours default
 
+RETURNS_WINDOW_DAYS = getattr(settings, "RETURNS_WINDOW_DAYS", 15)
+
+SIGNER_SALT = "invoice-public-download-v1"
+INVOICE_TOKEN_MAX_AGE = 60 * 60 * 2  # 2 hours
 signer = TimestampSigner(salt=SIGNER_SALT)
 
-# Optional async pipeline used in your code
-def _make_invoice_token(order):
-    # Include both id + number so link is bound to the exact order metadata
-    payload = f"{order.id}:{order.number}"
+def _make_invoice_token(order: Order) -> str:
+    payload = f"{order.id}:{order.order_number}"
     return signer.sign(payload)
 
-def _verify_invoice_token(token, order):
-    payload = f"{order.id}:{order.number}"
+def _verify_invoice_token(token: str, order: Order) -> tuple[bool, Optional[str]]:
+    payload = f"{order.id}:{order.order_number}"
     try:
         data = signer.unsign(token, max_age=INVOICE_TOKEN_MAX_AGE)
     except SignatureExpired:
         return False, "expired"
     except BadSignature:
         return False, "bad_signature"
-    return data == payload, None
+    return (data == payload), None
 
+def d2(x: Decimal | str | float) -> Decimal:
+    return Decimal(x).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-# ---- Return window default -> 15 days ----
-RETURNS_WINDOW_DAYS = getattr(settings, "RETURNS_WINDOW_DAYS", 15)
-
-try:
-    from server.tasks import post_payment_pipeline, fire_and_forget
-except Exception:
-    def fire_and_forget(func, *args, **kwargs):
-        _safe(func, *args, **kwargs)
-    def post_payment_pipeline(*_, **__):
-        pass
+# -------------------- Auth / User Profile / Registration --------------------
 
 class MyTokenObtainPairView(TokenObtainPairView):
     serializer_class = MyTokenObtainPairSerializer
@@ -104,10 +144,9 @@ class UserProfileAPIView(APIView):
         return Response(ProfileSerializer(request.user.profile).data)
     def put(self, request):
         ser = ProfileSerializer(request.user.profile, data=request.data, partial=True)
-        if ser.is_valid():
-            ser.save()
-            return Response(ser.data)
-        return Response(ser.errors, status=400)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(ser.data)
 
 class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
@@ -118,8 +157,6 @@ class IsOwnerOrAdmin(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
         return bool(request.user and (obj.user_id == request.user.id or request.user.is_staff))
 
-
-# ✅ Account view (username/full_name/mobile/image update)
 class AccountAPIView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
@@ -127,14 +164,12 @@ class AccountAPIView(APIView):
         return Response(AccountSerializer(request.user).data)
     def put(self, request):
         ser = AccountSerializer(instance=request.user, data=request.data, partial=True)
-        if ser.is_valid():
-            ser.save()
-            return Response(ser.data)
-        return Response(ser.errors, status=400)
-
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(ser.data)
+    
 class AccountDeleteRequestView(APIView):
     permission_classes = [IsAuthenticated]
-
     def post(self, request):
         reason = (request.data.get("reason") or "").strip()
         if not reason:
@@ -142,13 +177,13 @@ class AccountDeleteRequestView(APIView):
 
         user = request.user
         full_name = getattr(getattr(user, "profile", None), "full_name", "") or ""
-        admin_to = getattr(settings, "ADMIN_EMAIL", None) or "info@mindmines.eu"
+        admin_to = getattr(settings, "ADMIN_EMAIL", None) or "info@example.com"
 
         subject = "Account deletion request"
         plain = (
             f"User requested account deletion.\n\n"
             f"Email: {user.email}\n"
-            f"Username: {user.username or '-'}\n"
+            f"Display name: {getattr(user, 'display_name', '-')}\n"
             f"Full name: {full_name or '-'}\n"
             f"User ID: {user.id}\n"
             f"Reason:\n{reason}\n"
@@ -156,93 +191,88 @@ class AccountDeleteRequestView(APIView):
         html = (
             f"<p><strong>User requested account deletion.</strong></p>"
             f"<p><b>Email:</b> {user.email}<br/>"
-            f"<b>Username:</b> {user.username or '-'}<br/>"
+            f"<b>Display name:</b> {getattr(user, 'display_name', '-') }<br/>"
             f"<b>Full name:</b> {full_name or '-'}<br/>"
             f"<b>User ID:</b> {user.id}</p>"
             f"<p><b>Reason:</b><br/>{reason.replace(chr(10), '<br/>')}</p>"
         )
 
         email = EmailMultiAlternatives(
-                subject=subject,
-                body=plain,
-                from_email=settings.EMAIL_HOST_USER,  # enforce the authenticated mailbox
-                to=[admin_to],
-                reply_to=[user.email],                # you can still receive replies at user’s email
+            subject=subject,
+            body=plain,
+            from_email=settings.EMAIL_HOST_USER,
+            to=[admin_to],
+            reply_to=[user.email],
         )
         email.attach_alternative(html, "text/html")
         email.send(fail_silently=False)
 
-        return Response({"detail": "We received your request."}, status=200)
+        return Response({"detail": "We received your request."})
 
 class AccountDeleteConfirmView(APIView):
-    """
-    Permanently deletes the authenticated user's account and sends a bilingual
-    confirmation email to the user (if an email exists).
-    """
     permission_classes = [IsAuthenticated]
-
     def post(self, request):
         user = request.user
         email = user.email
 
-        # Compose email *before* deleting the user
         subj = "Your account has been deleted / Ihr Konto wurde gelöscht"
-        en = (
-            "We have deleted your MindMines account as requested.\n\n"
-            "We're sorry to see you go. If this wasn't you, please contact support.\n"
-        )
-        de = (
-            "Wir haben Ihr MindMines-Konto wie gewünscht gelöscht.\n\n"
-            "Schade, dass Sie gehen. Falls dies nicht von Ihnen veranlasst wurde, kontaktieren Sie bitte den Support.\n"
-        )
+        en = ("We have deleted your account as requested.\n\n"
+              "If this wasn't you, please contact support.\n")
+        de = ("Wir haben Ihr Konto wie gewünscht gelöscht.\n\n"
+              "Falls dies nicht von Ihnen veranlasst wurde, kontaktieren Sie bitte den Support.\n")
         text = f"ENGLISH\n{en}\nDEUTSCH\n{de}"
         html = (
             "<div style='font-family:sans-serif'>"
-            "<h3>ENGLISH</h3>"
-            "<p>We have deleted your MindMines account as requested.</p>"
-            "<p>We're sorry to see you go. If this wasn't you, please contact support.</p>"
-            "<hr/>"
-            "<h3>DEUTSCH</h3>"
-            "<p>Wir haben Ihr MindMines-Konto wie gewünscht gelöscht.</p>"
-            "<p>Schade, dass Sie gehen. Falls dies nicht von Ihnen veranlasst wurde, "
-            "kontaktieren Sie bitte den Support.</p>"
+            "<h3>ENGLISH</h3><p>We have deleted your account as requested.</p>"
+            "<p>If this wasn't you, please contact support.</p><hr/>"
+            "<h3>DEUTSCH</h3><p>Wir haben Ihr Konto wie gewünscht gelöscht.</p>"
+            "<p>Falls dies nicht von Ihnen veranlasst wurde, kontaktieren Sie bitte den Support.</p>"
             "</div>"
         )
 
-        # Delete user & everything cascaded (Profile, etc.)
         user.delete()
 
-        # Try to send confirmation email
         if email:
             try:
-                msg = EmailMultiAlternatives(
-                    subject=subj,
-                    body=text,
-                    from_email=settings.EMAIL_HOST_USER,
-                    to=[email],
-                )
+                msg = EmailMultiAlternatives(subj, text, settings.EMAIL_HOST_USER, [email])
                 msg.attach_alternative(html, "text/html")
                 msg.send(fail_silently=True)
             except Exception:
-                logger.exception("Failed sending account deletion confirmation email")
+                logger.exception("Failed sending deletion confirmation")
 
-        return Response({"detail": "Your account has been deleted."}, status=200)
+        return Response({"detail": "Your account has been deleted."})
+
+# -------------------- Admin: send birthday coupon --------------------
+   
+class SendBirthdayCouponAPIView(APIView):
+    """
+    Admin-only endpoint to send a birthday coupon email to a specific user.
+    POST: { "user_id": 123, "coupon_code": "ABC123" }
+    """
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        user_id = request.data.get("user_id")
+        coupon_code = (request.data.get("coupon_code") or "").strip()
+        if not user_id or not coupon_code:
+            return Response({"detail": "user_id and coupon_code are required."}, status=400)
+        from .tasks import send_user_birthday_coupon
+        res = send_user_birthday_coupon(int(user_id), coupon_code)
+        if not res.get("ok"):
+            return Response(res, status=400)
+        return Response({"ok": True}, status=200)
+    
 # -------------------- Addresses --------------------
 
 class AddressListCreateAPIView(generics.ListCreateAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAuthenticated]
     serializer_class = AddressSerializer
-
     def get_queryset(self):
-        # default first, then most recent
-        return Address.objects.filter(user=self.request.user).order_by("-is_default", "-updated_at", '-id')
-
+        return Address.objects.filter(user=self.request.user).order_by("-is_default", "-updated_at", "-id")
     def perform_create(self, serializer):
-        addr = serializer.save()  # serializer sets user from request
-        # if first ever, force default
+        addr = serializer.save()
         if not Address.objects.filter(user=self.request.user).exclude(pk=addr.pk).exists():
             addr.set_default_for_user()
-
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
         ctx["request"] = self.request
@@ -251,33 +281,29 @@ class AddressListCreateAPIView(generics.ListCreateAPIView):
 class AddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = AddressSerializer
-
     def get_queryset(self):
         return Address.objects.filter(user=self.request.user)
-
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
         ctx["request"] = self.request
         return ctx
-
     def perform_destroy(self, instance):
         user = instance.user
         was_default = instance.is_default
         instance.delete()
         if was_default:
-            new_default = Address.objects.filter(user=user).order_by('-updated_at', '-created_at').first()
+            new_default = Address.objects.filter(user=user).order_by("-updated_at", "-created_at").first()
             if new_default:
                 new_default.set_default_for_user()
 
 class AddressSetDefaultAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAuthenticated]
     def post(self, request, pk):
         addr = get_object_or_404(Address, pk=pk, user=request.user)
         addr.set_default_for_user()
         return Response(AddressSerializer(addr, context={"request": request}).data)
 
-
-# -------------------- Social Login --------------------
+# -------------------- google login --------------------
 
 class GoogleLoginAPIView(APIView):
     permission_classes = [AllowAny]
@@ -287,38 +313,31 @@ class GoogleLoginAPIView(APIView):
             return Response({"detail": "Missing token"}, status=400)
         try:
             idinfo = id_token.verify_oauth2_token(
-                token,
-                GoogleRequest(),
-                settings.SOCIAL_AUTH_GOOGLE_OAUTH2_KEY,  # must match frontend client ID exactly
+                token, GoogleRequest(), settings.SOCIAL_AUTH_GOOGLE_OAUTH2_KEY
             )
             if idinfo.get("iss") not in {"accounts.google.com", "https://accounts.google.com"}:
                 return Response({"detail": "Invalid issuer"}, status=400)
 
             email = idinfo["email"]
-            username = email.split("@")[0]
-            full_name = idinfo.get("name", "")
+            display_name = idinfo.get("name") or (email.split("@")[0])
 
             user, created = User.objects.get_or_create(
-                email=email,
-                defaults={"username": username, "is_active": True},
+                email=email, defaults={"is_active": True, "display_name": display_name}
             )
             if created and hasattr(user, "profile"):
-                user.profile.full_name = full_name
+                user.profile.full_name = display_name
                 user.profile.save()
 
             refresh = RefreshToken.for_user(user)
             return Response({
                 "refresh": str(refresh),
                 "access": str(refresh.access_token),
-                "user": {"id": user.id, "email": user.email, "username": user.username},
+                "user": {"id": user.id, "email": user.email, "display_name": user.display_name},
             })
         except ValueError as e:
-            # token parse/verify issues (audience, exp, etc.)
             return Response({"detail": f"Google token invalid: {e}"}, status=400)
         except Exception as e:
             return Response({"detail": f"Auth error: {e}"}, status=400)
-
-
 
 # -------------------- Password reset --------------------
 
@@ -330,7 +349,7 @@ class CustomPasswordResetView(generics.GenericAPIView):
         if user:
             uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
             token = default_token_generator.make_token(user)
-            reset_url = f"https://mindmines.eu/reset-password/{uidb64}/{token}/"
+            reset_url = f"{getattr(settings,'FRONTEND_URL','https://example.com').rstrip('/')}/reset-password/{uidb64}/{token}/"
             message = render_to_string("registration/password_reset_email.html", {
                 "reset_link": reset_url, "user": user,
             })
@@ -342,7 +361,7 @@ class CustomPasswordResetView(generics.GenericAPIView):
                 recipient_list=[email],
                 fail_silently=True,
             )
-        return Response({"detail": "Password reset e-mail has been sent."}, status=200)
+        return Response({"detail": "Password reset e-mail has been sent."})
 
 class CustomPasswordResetConfirmView(generics.GenericAPIView):
     permission_classes = [AllowAny]
@@ -360,7 +379,7 @@ class CustomPasswordResetConfirmView(generics.GenericAPIView):
             return Response({"error": "Passwords do not match"}, status=400)
         user.set_password(password1)
         user.save()
-        return Response({"detail": "Password has been reset successfully."}, status=200)
+        return Response({"detail": "Password has been reset successfully."})
 
 # -------------------- Natural stones --------------------
 
@@ -386,64 +405,44 @@ class UploadStoneImagesView(APIView):
 
 class StoneEnquiryCreateView(APIView):
     permission_classes = [AllowAny]
-
     def post(self, request):
-        """
-        - If authenticated: use account email, ignore any client-provided email.
-        - If guest: require 'email' in payload.
-        """
         data = request.data.copy()
         user = request.user if request.user.is_authenticated else None
-
         if user:
             if not user.email:
-                return Response(
-                    {"email": ["Your account has no email on file."]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                return Response({"email": ["Your account has no email on file."]}, status=400)
             data["email"] = user.email
         else:
             if not data.get("email"):
-                return Response(
-                    {"email": ["This field is required."]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                return Response({"email": ["This field is required."]}, status=400)
 
+        ser = NaturalStoneSerializer
         serializer = StoneEnquirySerializer(data=data)
-        if not serializer.is_valid():
-            # You’ll see exactly why you got 400 in the client
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
+        serializer.is_valid(raise_exception=True)
         enquiry = serializer.save()
 
-        # Send confirmation to the user
         try:
             send_mail(
                 subject="Thank you for your enquiry",
                 message=(
                     f"Dear {enquiry.name},\n\n"
-                    f"Thank you for reaching out regarding our natural stone: {enquiry.stone_type}.\n"
+                    f"Thank you for reaching out regarding: {enquiry.stone_type}.\n"
                     f"We will get back to you shortly.\n\n"
-                    f"Best regards,\nMindMines Team"
+                    f"Best regards,\nTeam"
                 ),
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 recipient_list=[enquiry.email],
                 fail_silently=False,
             )
         except Exception as e:
-            logger.exception("Failed sending enquiry confirmation email: %s", e)
+            logger.exception("Failed sending enquiry confirmation: %s", e)
 
-        # Notify admin
         try:
-            admin_to = getattr(settings, "ADMIN_EMAIL", None) or "info@mindmines.eu"
+            admin_to = getattr(settings, "ADMIN_EMAIL", None) or "info@example.com"
             send_mail(
                 subject=f"New Natural Stone Enquiry: {enquiry.stone_type}",
-                message=(
-                    f"Stone: {enquiry.stone_type}\n"
-                    f"Name: {enquiry.name}\n"
-                    f"Email: {enquiry.email}\n"
-                    f"Message:\n{enquiry.message}\n"
-                ),
+                message=(f"Stone: {enquiry.stone_type}\nName: {enquiry.name}\n"
+                         f"Email: {enquiry.email}\n\nMessage:\n{enquiry.message}\n"),
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 recipient_list=[admin_to],
                 fail_silently=True,
@@ -451,15 +450,10 @@ class StoneEnquiryCreateView(APIView):
         except Exception:
             logger.exception("Failed sending admin enquiry email")
 
-        return Response(StoneEnquirySerializer(enquiry).data, status=status.HTTP_201_CREATED)
-
-
-class TestPostView(APIView):
-    permission_classes = [AllowAny]
-    def post(self, request):
-        return Response({"message": "POST request successful!"}, status=status.HTTP_200_OK)
-
+        return Response(StoneEnquirySerializer(enquiry).data, status=201)
+    
 # -------------------- Products / Reviews --------------------
+
 class ProductFilterMixin:
     def _parse_multi(self, key: str):
         q = self.request.query_params
@@ -469,22 +463,20 @@ class ProductFilterMixin:
             if not v or not isinstance(v, str):
                 continue
             s = v.strip()
-            # JSON array?
-            if s.startswith('[') and s.endswith(']'):
+            if s.startswith("[") and s.endswith("]"):
                 try:
                     arr = json.loads(s)
                     out.extend([str(x).strip().lower() for x in arr if str(x).strip()])
                     continue
                 except Exception:
                     pass
-            # comma-separated
-            out.extend([p.strip().lower() for p in s.split(',') if p.strip()])
+            out.extend([p.strip().lower() for p in s.split(",") if p.strip()])
         return out
 
     def _to_decimal(self, val):
         if val is None:
             return None
-        s = str(val).strip().replace('€', '').replace(',', '')
+        s = str(val).strip().replace("€", "").replace(",", "")
         if not s:
             return None
         try:
@@ -494,20 +486,20 @@ class ProductFilterMixin:
 
     def _parse_price_range(self):
         q = self.request.query_params
-        min_in = q.get('min_price') or q.get('price_min') or q.get('price_gte')
-        max_in = q.get('max_price') or q.get('price_max') or q.get('price_lte')
+        min_in = q.get("min_price") or q.get("price_min") or q.get("price_gte")
+        max_in = q.get("max_price") or q.get("price_max") or q.get("price_lte")
 
-        rng = q.get('price') or q.get('range')
+        rng = q.get("price") or q.get("range")
         if rng:
             s = str(rng).strip().lower()
-            m = re.match(r'^\s*(\d+(?:\.\d{1,2})?)\s*-\s*(\d+(?:\.\d{1,2})?)\s*$', s)
+            m = re.match(r"^\s*(\d+(?:\.\d{1,2})?)\s*-\s*(\d+(?:\.\d{1,2})?)\s*$", s)
             if m:
                 min_in = min_in or m.group(1)
                 max_in = max_in or m.group(2)
-            m = re.match(r'^\s*(below|under|lt|lte)\s+(\d+(?:\.\d{1,2})?)\s*$', s)
+            m = re.match(r"^\s*(below|under|lt|lte)\s+(\d+(?:\.\d{1,2})?)\s*$", s)
             if m:
                 max_in = max_in or m.group(2)
-            m = re.match(r'^\s*(above|over|gt|gte)\s+(\d+(?:\.\d{1,2})?)\s*$', s)
+            m = re.match(r"^\s*(above|over|gt|gte)\s+(\d+(?:\.\d{1,2})?)\s*$", s)
             if m:
                 min_in = min_in or m.group(2)
 
@@ -534,11 +526,10 @@ class ProductFilterMixin:
 
         min_price, max_price = self._parse_price_range()
         if min_price is not None:
-            qs = qs.filter(price__gte=min_price)
+            qs = qs.filter(price_gross__gte=min_price)
         if max_price is not None:
-            qs = qs.filter(price__lte=max_price)
+            qs = qs.filter(price_gross__lte=max_price)
 
-        # ✅ Correct reverse name is "reviews"
         qs = qs.annotate(
             reviews_count=Count("reviews", distinct=True),
             average_rating=Avg("reviews__rating"),
@@ -546,45 +537,36 @@ class ProductFilterMixin:
         return qs
 
 class ProductListCreate(ProductFilterMixin, generics.ListCreateAPIView):
-    serializer_class = ProductSerializer
+    serializer_class = ProductListSerializer
     permission_classes = [AllowAny]
-    authentication_classes = []
     filter_backends = [filters.SearchFilter]
-    search_fields = ['title_en', 'title_de']
+    search_fields = ["title_en", "title_de"]
     parser_classes = [MultiPartParser, FormParser]
-
     def get_queryset(self):
         return self.filtered_products_qs()
 
 class ProductListView(ProductFilterMixin, generics.ListAPIView):
-    serializer_class = ProductSerializer
+    serializer_class = ProductListSerializer
     permission_classes = [AllowAny]
     filter_backends = [filters.SearchFilter]
-    search_fields = ['title_en', 'title_de']
-
+    search_fields = ["title_en", "title_de"]
     def get_queryset(self):
         return self.filtered_products_qs()
 
 class ProductDetailView(generics.RetrieveAPIView):
-    serializer_class = ProductSerializer
+    serializer_class = ProductDetailSerializer
     permission_classes = [AllowAny]
-
     def get_queryset(self):
-        # also annotated for detail
         return Product.objects.annotate(
             reviews_count=Count("reviews", distinct=True),
             average_rating=Avg("reviews__rating"),
         )
 
-
-
-# views.py
 class ProductSuggestList(generics.ListAPIView):
     permission_classes = [AllowAny]
-    serializer_class = ProductMiniSerializer
+    serializer_class = ProductListSerializer
     filter_backends = [filters.SearchFilter]
-    pagination_class = None  # return small list
-
+    pagination_class = None
     def get_queryset(self):
         term = (self.request.query_params.get("search") or "").strip()
         if not term:
@@ -593,43 +575,27 @@ class ProductSuggestList(generics.ListAPIView):
             Q(title_en__icontains=term) | Q(title_de__icontains=term)
         ).order_by(Lower("title_en")).all()[:10]
 
-class ProductReviewListCreate(generics.ListCreateAPIView):
-    """
-    GET: anyone can read product reviews
-    POST: authenticated users can create;
-          admins may optionally set:
-            - author_name / author_avatar (cosmetic)
-            - user (attribute to any account)
-    """
-    parser_classes = [MultiPartParser, FormParser]
+# reviews
 
+class ProductReviewListCreate(generics.ListCreateAPIView):
+    parser_classes = [MultiPartParser, FormParser]
     def get_permissions(self):
         return [permissions.IsAuthenticated()] if self.request.method == "POST" else [permissions.AllowAny()]
-
     def get_queryset(self):
         return Review.objects.filter(product_id=self.kwargs["pk"]).order_by("-created_at")
-
     def get_serializer_class(self):
         return ReviewWriteSerializer if self.request.method == "POST" else ReviewSerializer
-
     def get_serializer_context(self):
         return {"request": self.request}
-
     def create(self, request, *args, **kwargs):
         write_ser = ReviewWriteSerializer(data=request.data)
         write_ser.is_valid(raise_exception=True)
-
         product = get_object_or_404(Product, pk=kwargs["pk"])
-
-        # default to current user
         review_user = request.user
-
-        # admins can attribute review to another user
         if request.user.is_staff:
             maybe_user = write_ser.validated_data.pop("user", None)
             if maybe_user:
                 review_user = maybe_user
-
         instance = Review.objects.create(
             user=review_user,
             product=product,
@@ -639,39 +605,30 @@ class ProductReviewListCreate(generics.ListCreateAPIView):
             author_name=write_ser.validated_data.get("author_name", ""),
             author_avatar=write_ser.validated_data.get("author_avatar"),
         )
-
         read_ser = ReviewSerializer(instance, context={"request": request})
         headers = self.get_success_headers(read_ser.data)
-        return Response(read_ser.data, status=status.HTTP_201_CREATED, headers=headers)
+        return Response(read_ser.data, status=201, headers=headers)
 
 
 class ReviewListAPIView(generics.ListAPIView):
-    """My reviews (dashboard)"""
     serializer_class = ReviewSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
+    permission_classes = [IsAuthenticated]
     def get_queryset(self):
         return Review.objects.filter(user=self.request.user).order_by("-created_at")
-
     def get_serializer_context(self):
         return {"request": self.request}
 
 
 class ReviewDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Review.objects.all()
-    permission_classes = [permissions.IsAuthenticated, IsOwnerOrAdmin]
+    permission_classes = [IsAuthenticated, IsOwnerOrAdmin]
     parser_classes = [MultiPartParser, FormParser]
-
     def get_serializer_class(self):
         return ReviewWriteSerializer if self.request.method in ("PUT", "PATCH") else ReviewSerializer
-
     def get_serializer_context(self):
         return {"request": self.request}
-
-    # IMPORTANT: let IsOwnerOrAdmin decide; don't re-check owner here
     def perform_update(self, serializer):
         serializer.save()
-
     def perform_destroy(self, instance):
         instance.delete()
 
@@ -680,41 +637,31 @@ class ReviewDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
 class ContactMessageCreateView(generics.CreateAPIView):
     queryset = ContactMessage.objects.all()
     serializer_class = ContactMessageSerializer
-
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [AllowAny]
     authentication_classes = []
-    
     def perform_create(self, serializer):
         instance = serializer.save()
         send_mail(
-            subject=f"New Contact Us message from {instance.name}",
+            subject=f"New Contact message from {instance.name}",
             message=f"Name: {instance.name}\nEmail: {instance.email}\n\nMessage:\n{instance.message}",
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[settings.ADMIN_EMAIL],
             fail_silently=True,
         )
 
+
 class NewsletterSubscriberCreateView(generics.CreateAPIView):
     queryset = NewsletterSubscriber.objects.all()
     serializer_class = NewsletterSubscriberSerializer
     permission_classes = [AllowAny]
-    authentication_classes = []  # avoid CSRF/session requirements for this public endpoint
-
+    authentication_classes = []
     def create(self, request, *args, **kwargs):
-        # normalize early
         email = (request.data.get("email") or "").strip().lower()
         if not email:
             return Response({"email": ["This field is required."]}, status=400)
-
-        # upsert behavior: duplicate -> 200 OK
         obj, created = NewsletterSubscriber.objects.get_or_create(email=email)
-
-        # Send admin notification
         try:
-            admin_html = render_to_string(
-                "emails/admin_newsletter_notify.html",
-                {"email": obj.email},
-            )
+            admin_html = render_to_string("emails/admin_newsletter_notify.html", {"email": obj.email})
             admin_msg = EmailMultiAlternatives(
                 subject="New Newsletter Subscription",
                 body=f"New subscriber: {obj.email}",
@@ -725,16 +672,11 @@ class NewsletterSubscriberCreateView(generics.CreateAPIView):
             admin_msg.send(fail_silently=True)
         except Exception:
             pass
-
-        # Always send user thank-you (even if already subscribed)
         try:
-            user_html = render_to_string(
-                "emails/newsletter_welcome.html",
-                {"email": obj.email, "already": not created},
-            )
+            user_html = render_to_string("emails/newsletter_welcome.html", {"email": obj.email, "already": not created})
             user_msg = EmailMultiAlternatives(
-                subject="Thanks for subscribing to MindMines",
-                body="Thanks for subscribing to MindMines!",
+                subject="Thanks for subscribing",
+                body="Thanks for subscribing!",
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 to=[obj.email],
             )
@@ -742,10 +684,8 @@ class NewsletterSubscriberCreateView(generics.CreateAPIView):
             user_msg.send(fail_silently=True)
         except Exception:
             pass
-
         data = NewsletterSubscriberSerializer(obj, context={"request": request}).data
         return Response(data, status=201 if created else 200)
-
 
 class NewsletterSubscriberListView(generics.ListAPIView):
     queryset = NewsletterSubscriber.objects.all().order_by("-subscribed_at")
@@ -777,29 +717,22 @@ class WishlistDetailView(generics.DestroyAPIView):
     def get_object(self):
         return Wishlist.objects.get(user=self.request.user, product_id=self.kwargs["pk"])
 
-# -------------------- Orders (read/create/invoice) --------------------
+# -------------------- orders (read/create/invoice) --------------------
 
 class OrderListAPIView(generics.ListAPIView):
     serializer_class = OrderReadSerializer
     permission_classes = [IsAuthenticated]
-
     def get_queryset(self):
-        return Order.objects.filter(user=self.request.user).order_by('-created_at')
-
-    def list(self, request, *args, **kwargs):
-        ser = self.get_serializer(self.get_queryset, many=True, context={"request": request})
-        return Response(ser.data)
-
+        return Order.objects.filter(user=self.request.user).order_by("-created_at")
 
 class OrderCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]  # guests allowed
     def post(self, request):
         ser = OrderCreateSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
         with transaction.atomic():
-          order = ser.save()
+            order = ser.save()
         return Response(OrderReadSerializer(order, context={"request": request}).data, status=201)
-        
 
 class OrderDetailAPIView(generics.RetrieveAPIView):
     serializer_class = OrderReadSerializer
@@ -810,7 +743,6 @@ class OrderDetailAPIView(generics.RetrieveAPIView):
         ser = self.get_serializer(self.get_object(), context={"request": request})
         return Response(ser.data)
 
-
 class OrderInvoiceAPIView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request, pk):
@@ -818,11 +750,8 @@ class OrderInvoiceAPIView(APIView):
             order = Order.objects.get(pk=pk, user=request.user)
         except Order.DoesNotExist:
             raise Http404("Order not found")
-
-        # Ensure invoice exists (utils should create Invoice instance)
         if not hasattr(order, "invoice") or not order.invoice.pdf:
-            generate_invoice_pdf(order)  # should attach/return Invoice model
-
+            generate_invoice_pdf(order)
         inv = order.invoice
         return FileResponse(inv.pdf.open("rb"),
                             content_type="application/pdf",
@@ -831,45 +760,27 @@ class OrderInvoiceAPIView(APIView):
 
 class OrderAdminUpdateAPIView(APIView):
     permission_classes = [IsAdminUser]
-
     def patch(self, request, pk):
         order = get_object_or_404(Order, pk=pk)
         allowed = {"status", "tracking_number"}
-        updated = False
         prev_status = order.status
-        status_in = request.data.get("status")
-        tracking_in = request.data.get("tracking_number")
-
         for field in allowed:
             if field in request.data:
                 setattr(order, field, request.data[field])
-                updated = True
-
-        if not updated:
-            return Response({"detail": "No updatable fields provided."}, status=400)
-
         order.save()
 
-
-
-         # 🔵 If status turned PAID, generate invoice + send emails
         if prev_status != "paid" and order.status == "paid":
-            inv = generate_invoice_pdf(order)
-            try:
-                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                send_invoice_email(order, user_locale=user_locale)
-            except Exception:
-                pass
+            generate_invoice_pdf(order)
             try:
                 locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+                send_invoice_email(order, user_locale=locale)
                 send_order_confirmation(order, user_locale=locale)
             except Exception:
                 pass
-        if prev_status != "cancelled" and order.status == "cancelled":
+        if prev_status != "canceled" and order.status == "canceled":
             order.release_stock()
 
-        return Response(OrderReadSerializer(order, context={"request": request}).data, status=200)
-    
+        return Response(OrderReadSerializer(order, context={"request": request}).data)
 
 
 class SetTrackingAPIView(APIView):
@@ -880,27 +791,27 @@ class SetTrackingAPIView(APIView):
         order.tracking_number = tracking
         order.save(update_fields=["tracking_number"])
         inv = generate_invoice_pdf(order)
-        user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-        send_invoice_email(order, user_locale=user_locale)
+        locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+        send_invoice_email(order, user_locale=locale)
         return Response({"status": "ok", "invoice": inv.number})
     
 
-#-----------------------coupon-------------------
+# -------------------- Coupons / Promotions --------------------
+
 class CouponPreviewAPIView(APIView):
-    permission_classes = [AllowAny]  # if you require auth, switch
+    permission_classes = [AllowAny]
     def post(self, request):
         s = CouponPreviewIn(data=request.data)
         s.is_valid(raise_exception=True)
-        code  = s.validated_data["code"]
+        code = s.validated_data["code"]
         items = s.validated_data["items"]
 
-        # compute subtotal (gross)
         subtotal = Decimal("0.00")
         for it in items:
             p = Product.objects.get(pk=it["product_id"])
-            subtotal += Product.vat_included_price(p) * int(it["qty"])
+            unit = p.sale_price_gross or p.price_gross
+            subtotal += unit * Decimal(it["qty"])
 
-        from server.models import Coupon
         coup = Coupon.objects.filter(code__iexact=code.strip()).first()
         if not coup:
             return Response({"ok": False, "error": "Coupon not found"}, status=404)
@@ -910,7 +821,7 @@ class CouponPreviewAPIView(APIView):
             return Response({"ok": False, "error": reason}, status=400)
 
         discount = coup.discount_amount(request.user if request.user.is_authenticated else None, items, subtotal)
-        total = (subtotal - discount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        total = d2(subtotal - discount)
         return Response({
             "ok": True,
             "code": coup.code,
@@ -921,37 +832,26 @@ class CouponPreviewAPIView(APIView):
             "total": f"{total:.2f}",
         })
 
-#------------------Promotion-------------
 class ActivePromotionAPIView(APIView):
     permission_classes = [AllowAny]
-
     def get(self, request):
-        # Use Europe/Berlin by default
         now = timezone.now()
-        # Optional country targeting (from query or headers)
         country = (request.GET.get("country")
                    or request.headers.get("X-Country")
                    or "DE").upper()
-
         qs = Promotion.objects.filter(
-            is_enabled=True,
-            start_at__lte=now,
-            end_at__gte=now,
+            is_enabled=True, start_at__lte=now, end_at__gte=now
         ).order_by("-priority", "-updated_at")
-
-        # allow empty whitelist or list containing country
         qs = qs.filter(Q(country_whitelist=[]) | Q(country_whitelist__contains=[country]))
-
         promo = qs.first()
         if not promo:
-            # No active promo
-            return Response({"active": False}, status=200)
-
+            return Response({"active": False})
         data = PromotionSerializer(promo, context={"request": request}).data
         data["active"] = True
-        return Response(data, status=200)
+        return Response(data)
 
-# -------------------- Misc --------------------
+
+# -------------------- misc routes --------------------
 
 @api_view(["GET"])
 def getRoutes(request):
@@ -961,13 +861,14 @@ def getRoutes(request):
 @permission_classes([IsAuthenticated])
 def testEndPoint(request):
     if request.method == "GET":
-        data = f"Congratulation {request.user}, your API just responded to GET request"
-        return Response({"response": data}, status=status.HTTP_200_OK)
+        data = f"Hi {request.user.email}, your API responded to GET"
+        return Response({"response": data})
     text = "Hello buddy"
-    data = f"Congratulation your API just responded to POST request with text: {text}"
-    return Response({"response": data}, status=status.HTTP_200_OK)
+    data = f"POST worked with text: {text}"
+    return Response({"response": data})
 
-@api_view(['GET'])
+@api_view(["GET"])
+@permission_classes([AllowAny])
 def verify_email(request, uidb64, token):
     try:
         uid = urlsafe_base64_decode(uidb64).decode()
@@ -976,52 +877,31 @@ def verify_email(request, uidb64, token):
         return Response({"detail": "Invalid user ID"}, status=400)
 
     if user.is_active:
-        return Response({"detail": "Account already verified"}, status=200)
+        return Response({"detail": "Account already verified"})
 
     if default_token_generator.check_token(user, token):
         user.is_active = True
         user.save()
 
-        # Bilingual welcome / happy shopping email
         try:
-            subj = "Welcome to MindMines / Willkommen bei MindMines"
-            en = (
-                "Welcome! Your email has been verified successfully.\n\n"
-                "You can now sign in and start shopping. Have fun!\n"
-                "https://mindmines.eu\n"
-            )
-            de = (
-                "Willkommen! Ihre E-Mail wurde erfolgreich verifiziert.\n\n"
-                "Sie können sich jetzt anmelden und einkaufen. Viel Spaß!\n"
-                "https://mindmines.eu\n"
-            )
-            text = f"ENGLISH\n{en}\nDEUTSCH\n{de}"
+            subj = "Welcome / Willkommen"
+            en = ("Welcome! Your email has been verified.\n\n"
+                  "You can now sign in and start shopping.")
+            de = ("Willkommen! Ihre E-Mail wurde verifiziert.\n\n"
+                  "Sie können sich jetzt anmelden und einkaufen.")
+            text = f"ENGLISH\n{en}\n\nDEUTSCH\n{de}"
             html = (
                 "<div style='font-family:sans-serif'>"
-                "<h3>ENGLISH</h3>"
-                "<p>Welcome! Your email has been verified successfully.</p>"
-                "<p>You can now sign in and start shopping. Have fun!</p>"
-                "<p><a href='https://mindmines.eu'>mindmines.eu</a></p>"
-                "<hr/>"
-                "<h3>DEUTSCH</h3>"
-                "<p>Willkommen! Ihre E-Mail wurde erfolgreich verifiziert.</p>"
-                "<p>Sie können sich jetzt anmelden und einkaufen. Viel Spaß!</p>"
-                "<p><a href='https://mindmines.eu'>mindmines.eu</a></p>"
+                "<h3>ENGLISH</h3><p>Welcome! Your email has been verified.</p>"
+                "<hr/><h3>DEUTSCH</h3><p>Willkommen! Ihre E-Mail wurde verifiziert.</p>"
                 "</div>"
             )
-            msg = EmailMultiAlternatives(
-                subject=subj,
-                body=text,
-                from_email=settings.EMAIL_HOST_USER,
-                to=[user.email],
-            )
+            msg = EmailMultiAlternatives(subj, text, settings.EMAIL_HOST_USER, [user.email])
             msg.attach_alternative(html, "text/html")
             msg.send(fail_silently=not settings.DEBUG)
         except Exception:
-            logger.exception("Failed to send happy-shopping email after verification")
-
-        return Response({"detail": "Email verified successfully"}, status=200)
-
+            logger.exception("Failed sending welcome email")
+        return Response({"detail": "Email verified successfully"})
     return Response({"detail": "Invalid or expired token"}, status=400)
 
 @api_view(["POST"])
@@ -1030,38 +910,27 @@ def resend_verification_email(request):
     email_addr = request.data.get("email")
     if not email_addr:
         return Response({"detail": "Email is required."}, status=400)
-
     try:
         user = User.objects.get(email=email_addr)
     except User.DoesNotExist:
         return Response({"detail": "User not found."}, status=404)
-    
     if user.is_active:
         return Response({"detail": "Account already verified."}, status=400)
 
     uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
     token = default_token_generator.make_token(user)
-    base = getattr(settings, "FRONTEND_URL", "https://mindmines.eu").rstrip("/")
+    base = getattr(settings, "FRONTEND_URL", "https://example.com").rstrip("/")
     link = f"{base}/verify-email/{uidb64}/{token}/"
 
-    subject = "Resend: Verify your MindMines account"
+    subject = "Resend: Verify your account"
     text_body = f"Please verify your email:\n{link}"
     from_email = settings.EMAIL_HOST_USER
-
     html_body = None
     try:
-        html_body = render_to_string("emails/verification_email.html", {
-            "user": user, "verification_link": link,
-        })
+        html_body = render_to_string("emails/verification_email.html", {"user": user, "verification_link": link})
     except TemplateDoesNotExist:
         pass
-
-    msg = EmailMultiAlternatives(
-        subject=subject,
-        body=text_body,
-        from_email=from_email,
-        to=[user.email],
-    )
+    msg = EmailMultiAlternatives(subject, text_body, from_email, [user.email])
     if html_body:
         msg.attach_alternative(html_body, "text/html")
     msg.send(fail_silently=not settings.DEBUG)
@@ -1069,7 +938,7 @@ def resend_verification_email(request):
     payload = {"detail": "Verification email sent."}
     if settings.DEBUG:
         payload["dev_verification_link"] = link
-    return Response(payload, status=200)
+    return Response(payload)
 
 # -------------------- PayPal --------------------
 
@@ -1245,177 +1114,118 @@ class PaypalCaptureOrder(PaypalBase):
 
         return Response({"status": "COMPLETED"}, status=200)
     
-# ------------ Stripe ---------------------------
-import stripe
+# -------------------- stripe payments --------------------
+
 try:
-    stripe_error = stripe.error     
+    stripe_error = stripe.error
 except AttributeError:
-    from stripe import _error as stripe_error 
+    from stripe import _error as stripe_error
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
 PAYMENT_METHOD_MAP = {
-    "card": "card",
-    "sepa_debit": "sepa_debit"
+    "stripe_card": "card",
+    "stripe_sepa": "sepa_debit",
 }
 
-from typing import List, Optional
-from typing import List
+class CsrfExemptSessionAuthentication(SessionAuthentication):
+    def enforce_csrf(self, request):
+        return  # intentionally disabled for SPA -> API payment posts
+
+def _amount_cents(d: Decimal) -> int:
+    return int((d * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 def _split_installments_eur(total_cents: int, months: int) -> List[Decimal]:
-    """
-    Return a list of Decimal EUR amounts (2dp) for each month.
-    Last month absorbs remainder; matches your schedule math.
-    """
     base = total_cents // months
     rem = total_cents - base * months
     cents = [base] * months
     if rem:
         cents[-1] += rem
-    return [
-        (Decimal(c) / Decimal(100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        for c in cents
-    ]
-
+    return [d2(Decimal(c) / Decimal(100)) for c in cents]
 
 def _month_dates(anchor_dt, months: int):
-    """Return list of datetimes (tz-aware) month-by-month from anchor_dt."""
     return [anchor_dt + relativedelta(months=i) for i in range(months)]
 
-
-def _amount_cents(d: Decimal) -> int:
-    """Convert Decimal amount in EUR to integer cents."""
-    return int((d * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> str:
-        if user is not None and getattr(user, "is_authenticated", False):
-            prof = getattr(user, "profile", None)
-            # reuse if already known
-            if prof and getattr(prof, "stripe_customer_id", None):
-                return prof.stripe_customer_id
-
-            customer = stripe.Customer.create(
-                email=(getattr(user, "email", None) or email) or None,
-                name=(f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip() or None),
-                metadata={"user_id": str(user.id)},
-            )
-            if prof and hasattr(prof, "stripe_customer_id"):
-                prof.stripe_customer_id = customer.id
-                prof.save(update_fields=["stripe_customer_id"])
-            return customer.id
-    
-        # Guest path (no user)
+    if user is not None and getattr(user, "is_authenticated", False):
+        prof = getattr(user, "profile", None)
+        if prof and getattr(prof, "stripe_customer_id", None):
+            return prof.stripe_customer_id
         customer = stripe.Customer.create(
-            email=email or None,
-            metadata={"guest": "true"},
+            email=(getattr(user, "email", None) or email) or None,
+            name=(getattr(user, "display_name", None) or None),
+            metadata={"user_id": str(user.id)},
         )
+        if prof and hasattr(prof, "stripe_customer_id"):
+            prof.stripe_customer_id = customer.id
+            prof.save(update_fields=["stripe_customer_id"])
         return customer.id
+    customer = stripe.Customer.create(email=email or None, metadata={"guest": "true"})
+    return customer.id
 
 def _extract_email_from_payload(data: dict) -> Optional[str]:
-    """
-    Try a few common places you may be sending an email in your order payload.
-    Adjust to match your serializer/payload.
-    """
     return (
         data.get("email")
-        or (data.get("billing") or {}).get("email")
+        or (data.get("billing_address") or {}).get("email")
         or (data.get("shipping_address") or {}).get("email")
         or None
     )
-  
-
-
-# ============================================================================
-# 1) Unified one-off PaymentIntent (card, sepa_debit, giropay, sofort)
-# ============================================================================
-# WARNING: Only use CsrfExemptSessionAuthentication on endpoints where CSRF protection is intentionally disabled and it is safe to do so.
-class CsrfExemptSessionAuthentication(SessionAuthentication):
-    def enforce_csrf(self, request):
-        # Skip CSRF checks for this endpoint (guest checkout from SPA)
-        return
     
 class StripeCreateIntent(APIView):
-    """
-    Creates a PaymentIntent for one-off payments.
-    Body expects your existing order payload with:
-      payment_method ∈ {"card","sepa_debit","giropay","sofort"}
-    Client must confirm with Stripe.js (Payment Element, confirmCardPayment,
-    confirmSepaDebitPayment, etc).
-    """
     permission_classes = [AllowAny]
     authentication_classes = [CsrfExemptSessionAuthentication, BasicAuthentication]
-    
+
     def post(self, request):
         data = request.data.copy()
-        pm = (data.get("payment_method") or "card").strip().lower()
-        pm_type = PAYMENT_METHOD_MAP.get(pm)
-        if not pm_type:
-            return Response({"detail": f"Unsupported payment_method '{pm}'"}, status=400)
+        pm_canonical = (data.get("payment_method") or "stripe_card").strip().lower()
+        if pm_canonical not in PAYMENT_METHOD_MAP:
+            return Response({"detail": f"Unsupported payment_method '{pm_canonical}'"}, status=400)
+        stripe_pm_type = PAYMENT_METHOD_MAP[pm_canonical]
 
-        # Build order in 'pending'
-        
-        
         try:
             s = OrderCreateSerializer(data=data, context={"request": request})
             s.is_valid(raise_exception=True)
             with transaction.atomic():
                 order = s.save()
-                order.payment_method = pm
-                order.status = "pending"
+                order.payment_method = pm_canonical
+                order.status = "pending_payment"
                 order.save(update_fields=["payment_method", "status"])
         except serializers.ValidationError as ve:
             return Response({"detail": "Order validation failed", "errors": ve.detail}, status=400)
         except Exception as e:
-            # helpful during debugging
             return Response({"detail": "Order creation failed", "error": str(e)}, status=400)
 
-        # Ensure Stripe Customer (guest-safe)
         try:
             if request.user.is_authenticated:
                 customer_id = _get_or_create_stripe_customer(request.user)
             else:
-                # guest: derive from order.guest_email / name (set by serializer)
-                guest_email = order.guest_email or (data.get("email") or None)
-                guest_name  = order.guest_name  or (data.get("name") or None)
+                guest_email = order.email
                 if not guest_email:
                     return Response({"detail": "Email is required for guest checkout."}, status=400)
-                # You can try to re-use by email; simplest is to always create
-                cust = stripe.Customer.create(
-                    email=guest_email,
-                    name=guest_name or None,
-                    metadata={"guest_order_id": str(order.id)},
-                )
+                cust = stripe.Customer.create(email=guest_email, metadata={"guest_order_id": str(order.id)})
                 customer_id = cust.id
-
         except stripe_error.StripeError as e:
-            order.status = "failed"
+            order.status = "payment_failed"
             order.save(update_fields=["status"])
             return Response({"detail": f"Stripe customer error: {str(e)}"}, status=502)
 
-        # Optional: tweak options for specific PMs
-        payment_method_options = {}
-        if pm_type == "sofort":
-            lang = (request.META.get("HTTP_ACCEPT_LANGUAGE", "en").split(",")[0] or "en")[:2]
-            payment_method_options["sofort"] = {"preferred_language": lang}
-
         try:
             intent = stripe.PaymentIntent.create(
-                amount=_amount_cents(order.total_price),
+                amount=_amount_cents(order.total_gross),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                payment_method_types=[pm_type],
+                payment_method_types=[stripe_pm_type],
                 metadata={"order_id": str(order.id)},
                 customer=customer_id,
-                setup_future_usage="off_session" if pm_type == "card" else None,
-                description=f"Order {order.number or order.id} — MindMines",
-                payment_method_options=payment_method_options or None,
+                description=f"Order {order.order_number} — Shop",
                 idempotency_key=f"pi-create-{order.id}",
             )
         except stripe_error.StripeError as e:
-            order.status = "failed"
+            order.status = "payment_failed"
             order.save(update_fields=["status"])
             order.release_stock()
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
         except Exception as e:
-            order.status = "failed"
+            order.status = "payment_failed"
             order.save(update_fields=["status"])
             order.release_stock()
             return Response({"detail": f"Server error: {str(e)}"}, status=500)
@@ -1423,12 +1233,11 @@ class StripeCreateIntent(APIView):
         order.payment_ref = intent.id
         order.save(update_fields=["payment_ref"])
 
-        # (Optional) SEPA pending email
-        if pm_type == "sepa_debit":
+        if stripe_pm_type == "sepa_debit":
             try:
                 locale = (
-                    getattr(getattr(request, "user", None), "profile", None) and
-                    getattr(request.user.profile, "language", None)
+                    getattr(getattr(request, "user", None), "profile", None)
+                    and getattr(request.user.profile, "language", None)
                 ) or (request.META.get("HTTP_ACCEPT_LANGUAGE", "en").split(",")[0] or "en")
                 send_sepa_pending_email(order, user_locale=locale)
             except Exception:
@@ -1441,16 +1250,11 @@ class StripeCreateIntent(APIView):
 # 1b) Save card for later (authenticated)
 # ============================================================================
 class StripeCreateCardSetupIntent(APIView):
-    permission_classes = [AllowAny]
-
+    permission_classes = [IsAuthenticated]
     def post(self, request):
         try:
             customer_id = _get_or_create_stripe_customer(request.user)
-            si = stripe.SetupIntent.create(
-                customer=customer_id,
-                payment_method_types=["card"],
-                usage="off_session",
-            )
+            si = stripe.SetupIntent.create(customer=customer_id, payment_method_types=["card"], usage="off_session")
             return Response({"clientSecret": si.client_secret})
         except stripe_error.CardError as e:
             return Response({"detail": str(e)}, status=400)
@@ -1459,21 +1263,15 @@ class StripeCreateCardSetupIntent(APIView):
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
 
-
 # ============================================================================
 # 2) Save SEPA mandate for installments (authenticated)
 # ============================================================================
 class StripeCreateSepaSetupIntent(APIView):
     permission_classes = [IsAuthenticated]
-
     def post(self, request):
         try:
             customer_id = _get_or_create_stripe_customer(request.user)
-            si = stripe.SetupIntent.create(
-                customer=customer_id,
-                payment_method_types=["sepa_debit"],
-                usage="off_session",
-            )
+            si = stripe.SetupIntent.create(customer=customer_id, payment_method_types=["sepa_debit"], usage="off_session")
             return Response({"clientSecret": si.client_secret})
         except stripe_error.CardError as e:
             return Response({"detail": str(e)}, status=400)
@@ -1489,56 +1287,46 @@ class StripeCreateSepaSetupIntent(APIView):
 class StripeCreateSepaIntent(APIView):
     permission_classes = [AllowAny]
     authentication_classes = [CsrfExemptSessionAuthentication, BasicAuthentication]
-
     def post(self, request):
         s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
-        email = (s.validated_data.get("email") or request.user.email or "").strip()
-        if not email:
-            return Response({"detail": "Email is required for SEPA payments."}, status=400)
-
         with transaction.atomic():
             order = s.save()
-            order.payment_method = "sepa_debit"
-            order.status = "pending"
+            order.payment_method = "stripe_sepa"
+            order.status = "pending_payment"
             order.save(update_fields=["payment_method", "status"])
 
         try:
-            email = _extract_email_from_payload(request.data)
+            email = _extract_email_from_payload(request.data) or order.email
             user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
             customer_id = _get_or_create_stripe_customer(user=user, email=email)
             intent = stripe.PaymentIntent.create(
-                amount=_amount_cents(order.total_price),
+                amount=_amount_cents(order.total_gross),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                 payment_method_types=["sepa_debit"],
-                description=f"Order {order.number or order.id} — MindMines",
+                description=f"Order {order.order_number} — Shop",
                 metadata={"order_id": str(order.id)},
                 customer=customer_id,
                 receipt_email=email,
                 confirm=False,
                 idempotency_key=f"pi-create-{order.id}",
             )
-        except stripe_error.CardError as e:
-            order.status = "failed"
-            order.save(update_fields=["status"])
-            return Response({"detail": str(e)}, status=400)
         except stripe_error.StripeError as e:
-            order.status = "failed"
+            order.status = "payment_failed"
             order.save(update_fields=["status"])
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
-            order.status = "failed"
+            order.status = "payment_failed"
             order.save(update_fields=["status"])
             return Response({"detail": str(e)}, status=500)
 
         order.payment_ref = intent.id
         order.save(update_fields=["payment_ref"])
 
-        # Already imported at top: from .utils.emails import send_sepa_pending_email
         try:
             locale = (
-                getattr(getattr(order, "user", None), "profile", None) and
-                getattr(order.user.profile, "language", None)
+                getattr(getattr(order, "user", None), "profile", None)
+                and getattr(order.user.profile, "language", None)
             ) or "en"
             send_sepa_pending_email(order, user_locale=locale)
         except Exception:
@@ -1547,46 +1335,35 @@ class StripeCreateSepaIntent(APIView):
         return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
 
 
+
 # ============================================================================
 # 4) Installments (authenticated)
 # ============================================================================
 class StripeSepaCreateInstallments(APIView):
     permission_classes = [IsAuthenticated]
-
     def post(self, request):
         months = int(request.data.get("months") or 0)
         if months not in (3, 6, 9):
             return Response({"detail": "Invalid months. Choose 3, 6, or 9."}, status=400)
-   
         country = (request.data.get("country") or "").upper()[:2]
         if country != "DE":
             return Response({"detail": "Installments are available in DE only."}, status=400)
-        method = (request.data.get("method") or "sepa_debit").strip()
-        if method == "sepa_debit" and country != "DE":
-            return Response({"detail": "SEPA installments are available in DE only."}, status=400)
-        
+
         s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
-        email = (s.validated_data.get("email") or request.user.email or "").strip()
-        if not email:
-            return Response({"detail": "Email is required for installments."}, status=400)
         with transaction.atomic():
             order = s.save()
-            order.payment_method = method
+            order.payment_method = "stripe_sepa"
             order.installments_months = months
-            order.status = "pending"
+            order.status = "pending_payment"
             order.save(update_fields=["payment_method", "installments_months", "status"])
 
-        total_cents = _amount_cents(order.total_price)
-        base = total_cents // months
-        remainder = total_cents - base * months
-
+        total_cents = _amount_cents(order.total_gross)
         pm_id = request.data.get("payment_method_id")
         if not pm_id:
             return Response({"detail": "payment_method_id is required"}, status=400)
 
         try:
-            # Ensure the schedule uses the SAME customer as the PM
             pm = stripe.PaymentMethod.retrieve(pm_id)
             pm_customer = pm.get("customer")
             if pm_customer:
@@ -1602,8 +1379,8 @@ class StripeSepaCreateInstallments(APIView):
             stripe.Customer.modify(customer_id, invoice_settings={"default_payment_method": pm_id})
             try:
                 cust = stripe.Customer.retrieve(customer_id)
-                if not cust.get("email") and email:
-                    stripe.Customer.modify(customer_id, email=email)
+                if not cust.get("email") and order.email:
+                    stripe.Customer.modify(customer_id, email=order.email)
             except Exception:
                 pass
 
@@ -1619,7 +1396,9 @@ class StripeSepaCreateInstallments(APIView):
             def ts(dt): return int(dt.timestamp())
 
             phases = []
-            title_base = f"Installments for Order {order.number or order.id}"
+            title_base = f"Installments for Order {order.order_number}"
+            base = total_cents // months
+            remainder = total_cents - base * months
 
             if remainder:
                 if months > 1:
@@ -1650,7 +1429,6 @@ class StripeSepaCreateInstallments(APIView):
             order.status = "processing"
             order.save(update_fields=["payment_ref", "status"])
 
-            # Email plan details (optional)
             try:
                 amounts_eur = _split_installments_eur(total_cents, months)
                 anchor_dt = timezone.now()
@@ -1666,10 +1444,16 @@ class StripeSepaCreateInstallments(APIView):
                 except Exception:
                     pass
                 dates = _month_dates(anchor_dt, months)
-                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                send_installments_started_email(order, months, amounts_eur, dates, user_locale=user_locale)
+                locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+                send_installments_started_email = getattr(
+                    __import__("server.utils.emails", fromlist=["send_installments_started_email"]),
+                    "send_installments_started_email",
+                    None,
+                )
+                if send_installments_started_email:
+                    send_installments_started_email(order, months, amounts_eur, dates, user_locale=locale)
             except Exception:
-                import logging; logging.getLogger(__name__).exception("installments started email failed")
+                logger.exception("installments started email failed")
 
             return Response({"order_id": order.id, "schedule_id": schedule.id}, status=201)
 
@@ -1686,16 +1470,13 @@ class StripeSepaCreateInstallments(APIView):
 # ============================================================================
 @csrf_exempt
 def stripe_webhook(request):
-    import logging
     log = logging.getLogger(__name__)
-
     wh_secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
     sig_header = request.META.get("HTTP_STRIPE_SIGNATURE")
     if not sig_header:
         return JsonResponse({"detail": "Missing Stripe-Signature header"}, status=400)
 
-    payload = request.body  # raw bytes
-
+    payload = request.body
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, wh_secret)
     except stripe_error.SignatureVerificationError:
@@ -1707,7 +1488,6 @@ def stripe_webhook(request):
 
     etype = event.get("type")
     data = event["data"]["object"]
-
     log.info("WEBHOOK %s object=%s", etype, data.get("id"))
 
     def _mark_processing(order: Order):
@@ -1719,26 +1499,17 @@ def stripe_webhook(request):
         changed = False
         if order.status != "paid":
             order.status = "paid"
+            order.paid_at = timezone.now()
             changed = True
-
-        if not getattr(order, "payment_id", ""):
-            ch_id = (data.get("charges", {}).get("data") or [{}])[0].get("id") or data.get("id","")
-            if ch_id:
-                order.payment_id = ch_id
-                changed = True
-
         if changed:
-            order.save(update_fields=["status", "payment_id"])
-
-        order.assign_unique_invoice_number()
+            order.save(update_fields=["status", "paid_at"])
         generate_invoice_pdf(order)
-
-        user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-        log.info("WEBHOOK emailing invoice for order %s", order.id)
         try:
-            send_invoice_email(order, user_locale=user_locale)
+            locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+            send_invoice_email(order, user_locale=locale)
+            send_order_confirmation(order, user_locale=locale)
         except Exception:
-            log.exception("send_invoice_email failed for order %s", order.id)
+            log.exception("post-paid emails failed for order %s", order.id)
 
     if etype == "payment_intent.processing":
         oid = (data.get("metadata") or {}).get("order_id")
@@ -1746,9 +1517,9 @@ def stripe_webhook(request):
             try:
                 order = Order.objects.get(pk=oid)
                 _mark_processing(order)
-                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
                 try:
-                    send_sepa_pending_email(order, user_locale=user_locale)
+                    locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+                    send_sepa_pending_email(order, user_locale=locale)
                 except Exception:
                     log.exception("send_sepa_pending_email failed for order %s", order.id)
             except Order.DoesNotExist:
@@ -1781,22 +1552,19 @@ def stripe_webhook(request):
         if oid:
             try:
                 order = Order.objects.select_for_update().get(pk=oid)
-                # mark failed
-                order.status = "failed"
+                order.status = "payment_failed"
                 order.save(update_fields=["status"])
-                # ✅ release reserved stock if not already released
                 order.release_stock()
             except Order.DoesNotExist:
                 pass
+
     return HttpResponse(status=200)
 
 
 # -------------------- Bank transfer --------------------
 
 class CreateBankTransferOrder(APIView):
-   
     permission_classes = [AllowAny]
-
     def post(self, request):
         data = request.data.copy()
         data.pop("payment_method", None)
@@ -1804,11 +1572,9 @@ class CreateBankTransferOrder(APIView):
         s.is_valid(raise_exception=True)
         with transaction.atomic():
             order = s.save()
-            order.payment_method = "bank_transfer"
-            order.status = "pending"  
+            order.payment_method = "manual_bank"
+            order.status = "awaiting_bank_transfer"
             order.save(update_fields=["payment_method", "status"])
-
-        # ✅ email the customer bank instructions + order summary
         try:
             locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
             send_bank_transfer_instructions(
@@ -1822,28 +1588,24 @@ class CreateBankTransferOrder(APIView):
                 due_hours=settings.BANK_TRANSFER["PAYMENT_DUE_HOURS"],
             )
         except Exception:
-            import logging; logging.getLogger(__name__).exception("Bank transfer email failed")
+            logger.exception("Bank transfer email failed")
 
-        return self._resp(order)
-
-    def _resp(self, order):
         return Response(
             {
                 "ok": True,
                 "order_id": order.id,
-                "order_number": order.number,
-                "amount": f"{order.total_price:.2f}",
+                "order_number": order.order_number,
+                "amount": f"{order.total_gross:.2f}",
                 "currency": "EUR",
                 "iban": settings.BANK_TRANSFER["IBAN"].replace(" ", ""),
                 "bic": settings.BANK_TRANSFER["BIC"],
                 "beneficiary": settings.BANK_TRANSFER["ACCOUNT_NAME"],
-                "reference": order.number,  # use exactly this in the transfer
-                "instructions": f"Please transfer the total amount using the reference above within {settings.BANK_TRANSFER['PAYMENT_DUE_HOURS']} hours.",
+                "reference": order.order_number,
+                "instructions": f"Please transfer using the reference above within {settings.BANK_TRANSFER['PAYMENT_DUE_HOURS']} hours.",
             },
             status=201,
         )
 
-# ✅ Invoice download (user)
 class InvoiceDownloadView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request, pk):
@@ -1852,270 +1614,160 @@ class InvoiceDownloadView(APIView):
             return Response({"detail": "Invoice not available."}, status=404)
         return FileResponse(order.invoice.pdf.open("rb"), as_attachment=True, filename=f"{order.invoice.number}.pdf")
     
+  
 # -------------------- Returns / Cancellations --------------------
 
-def _can_return(order: Order) -> tuple[bool, str]: 
-    """Return only within RETURNS_WINDOW_DAYS after delivery.""" 
-    if order.status != "delivered": 
-        return False, "Returns are only possible after delivery." 
-    if not order.delivered_at: 
-        return False, "Delivery timestamp missing for this order." 
-    
-    now = timezone.now() 
-    age_days = (now - order.delivered_at).days 
-    if age_days > RETURNS_WINDOW_DAYS: 
-        return False, f"Return window ({RETURNS_WINDOW_DAYS} days) has expired." 
+def _can_return(order: Order) -> tuple[bool, Optional[str]]:
+    if order.status != "delivered":
+        return False, "Returns are only possible after delivery."
+    if not order.delivered_at:
+        return False, "Delivery timestamp missing for this order."
+    now = timezone.now()
+    age_days = (now - order.delivered_at).days
+    if age_days > RETURNS_WINDOW_DAYS:
+        return False, f"Return window ({RETURNS_WINDOW_DAYS} days) has expired."
     return True, None
-    return True, None
-
-
-RETURNS_WINDOW_DAYS = getattr(settings, "RETURNS_WINDOW_DAYS", 1)
 
 class OrderRequestReturnAPIView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
-
     @transaction.atomic
     def post(self, request, pk: int, *args, **kwargs):
         order = get_object_or_404(Order.objects.select_related("user"), pk=pk, user=request.user)
-
         allowed, reason = _can_return(order)
         if not allowed:
-            return Response({"detail": reason}, status=status.HTTP_403_FORBIDDEN)
-
+            return Response({"detail": reason}, status=403)
         message = (request.data.get("message") or "").strip()
-
-        rr = ReturnRequest.objects.create(
-            order=order,
-            user=request.user,
-            request_type="return",
-            message=message,
-        )
-
-        # Save attachments (images/videos)
+        rr = ReturnRequest.objects.create(order=order, user=request.user, request_type="return", message=message)
         for f in request.FILES.getlist("files"):
             ReturnAttachment.objects.create(request=rr, file=f)
-
-        # Send emails — SINGLE ARGUMENT
         email_err = None
         try:
             send_return_request_emails(rr)
             email_sent = True
         except Exception as e:
-            # Don’t break the request if email fails; report it in JSON for debugging
             email_sent = False
             email_err = f"{e.__class__.__name__}: {e}"
+        return Response({"ok": True, "request_id": rr.id, "email_sent": email_sent, "error": email_err}, status=201)
 
-        return Response(
-            {"ok": True, "request_id": rr.id, "email_sent": email_sent, "error": email_err},
-            status=status.HTTP_201_CREATED,
-        )
-
-
-    
 class OrderCancelRequestAPIView(APIView):
     permission_classes = [IsAuthenticated]
-
     def post(self, request, pk: int):
         order = get_object_or_404(Order, pk=pk, user=request.user)
-
-        # business rules: cancellable if pending/processing/shipped
-        # or delivered within 15 days
         allowed = False
-        if order.status in ("pending", "processing", "shipped"):
+        if order.status in ("pending_payment", "processing", "shipped"):
             allowed = True
         elif order.status == "delivered" and order.delivered_at:
             CANCELLATION_WINDOW_DAYS = getattr(settings, "CANCELLATION_WINDOW_DAYS", RETURNS_WINDOW_DAYS)
             delta = timezone.now() - order.delivered_at
             allowed = (delta.days <= CANCELLATION_WINDOW_DAYS)
-
         if not allowed:
-            return Response(
-                {"detail": "This order can no longer be cancelled."},
-                status=400,
-            )
+            return Response({"detail": "This order can no longer be cancelled."}, status=400)
 
         msg = (request.data.get("message") or "").strip()
-        rr = ReturnRequest.objects.create(
-            order=order,
-            user=request.user,
-            request_type="cancel",
-            message=msg,
-        )
-
-        # if you decide to allow files on cancel:
+        rr = ReturnRequest.objects.create(order=order, user=request.user, request_type="cancel", message=msg)
         for f in request.FILES.getlist("files"):
             ReturnAttachment.objects.create(request=rr, file=f)
-
-        # send emails
         try:
             send_cancel_request_emails(rr)
         except Exception:
             logger.exception("Failed to send cancel emails for rr=%s", rr.pk)
+        return Response({"id": rr.pk, "status": rr.status, "request_type": rr.request_type}, status=201)
 
-        return Response(
-            {
-                "id": rr.pk,
-                "status": rr.status,
-                "request_type": rr.request_type,
-            },
-            status=201,
-        )
-# --- GUEST CHECKOUT LOGIN ---
+# -------------------- guest login & order lookup --------------------
 
-
-def _get_or_create_guest_user(email: str, full_name: str = ""):
-    """
-    Create or reuse a 'guest' user. Keep is_active=False so it doesn't act as a normal account.
-    Assign an unusable password.
-    """
+def _get_or_create_guest_user(email: str, full_name: str = "") -> User:
     email = (email or "").strip().lower()
-    User = get_user_model()
-
     user = User.objects.filter(email=email).first()
     if user:
-        # If it already exists but is a "guest" (inactive), reuse it
-        if not user.is_active:
-            # update name if newly provided
-            if full_name and hasattr(user, "profile"):
-                user.profile.full_name = full_name
-                user.profile.save(update_fields=["full_name"])
-            return user
-        # Active user with same email is handled earlier in serializer validation
+        if not user.is_active and hasattr(user, "profile") and full_name:
+            user.profile.full_name = full_name
+            user.profile.save(update_fields=["full_name"])
         return user
-
-    # Create a fresh guest account
-    username = f"guest-{uuid4().hex[:12]}"
-    user = User.objects.create(
-        email=email,
-        username=username,
-        is_active=False,  # mark as guest/unverified
-    )
+    user = User.objects.create(email=email, is_active=False)
     user.set_unusable_password()
     user.save()
-
-    # optional: tag profile
-    if hasattr(user, "profile"):
-        if full_name:
-            user.profile.full_name = full_name
-        # You could add a boolean field like `is_guest` in Profile if desired
+    if hasattr(user, "profile") and full_name:
+        user.profile.full_name = full_name
         user.profile.save()
-
     return user
 
 
 class GuestCheckoutLoginView(APIView):
-    """
-    Issue a short-lived JWT for a 'guest' user so existing authenticated-only
-    order/payment endpoints can be reused without schema changes.
-    """
     permission_classes = [AllowAny]
-
     def post(self, request):
         from .serializers import GuestCheckoutIn
         ser = GuestCheckoutIn(data=request.data)
         ser.is_valid(raise_exception=True)
-
         email = ser.validated_data["email"]
         full_name = ser.validated_data.get("full_name", "")
-
-        # If a real account exists with this email, the serializer already blocked it.
         user = _get_or_create_guest_user(email, full_name)
-
-        # Mint tokens reusing your existing JWT serializer
         refresh = RefreshToken.for_user(user)
         return Response({
             "refresh": str(refresh),
             "access": str(refresh.access_token),
-            "user": {"id": user.id, "email": user.email, "username": user.username, "guest": True},
-        }, status=200)
+            "user": {"id": user.id, "email": user.email, "guest": True},
+        })
 
 class GuestLookupThrottle(throttling.SimpleRateThrottle):
     scope = "guest_lookup"
-
     def get_cache_key(self, request, view):
-        # throttle by IP for POSTs
         ident = self.get_ident(request)
         return self.cache_format % {"scope": self.scope, "ident": ident}
 
 class GuestOrderLookupView(APIView):
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [AllowAny]
     throttle_classes = [GuestLookupThrottle]
-
     def post(self, request):
-        inp = GuestOrderLookupInputSerializer(data=request.data)
+        inp = GuestOrderLookupSerializer(data=request.data)
         inp.is_valid(raise_exception=True)
         email = inp.validated_data["email"].strip()
-        number = inp.validated_data["number"].strip()
-
+        order_number = inp.validated_data["order_number"].strip()
         qs = Order.objects.select_related("shipping_address").prefetch_related("items__product")
-        order = qs.filter(number=number).first()
+        order = qs.filter(order_number=order_number).first()
         if not order:
-            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        order_email = (getattr(order, "email", "") or getattr(order, "guest_email", "") or "").strip()
+            return Response({"detail": "Order not found."}, status=404)
+        order_email = (getattr(order, "email", "") or "").strip()
         if order_email.lower() != email.lower():
-            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"detail": "Order not found."}, status=404)
 
-        ser = OrderPublicSerializer(order, context={"request": request})
-        data = ser.data
-
-        # If paid and invoice exists -> add a short-lived, tokenized public download URL
-        has_invoice = bool(data.get("invoice_pdf"))
+        data = OrderReadSerializer(order, context={"request": request}).data
+        has_invoice = bool(getattr(order, "invoice", None) and getattr(order.invoice, "pdf", None))
         if order.status == "paid" and has_invoice:
             token = _make_invoice_token(order)
             url = request.build_absolute_uri(
                 reverse("invoice-public-download", kwargs={"pk": order.id})
             ) + f"?token={token}"
             data["invoice_download_url"] = url
-
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(data)
     
-    # ---------- Public, tokenized invoice download ----------
 class InvoicePublicDownloadView(APIView):
-    """
-    Allow guests to download their invoice PDF using a short-lived signed token.
-    """
     permission_classes = [AllowAny]
-    throttle_classes = [GuestLookupThrottle]  # reuse a conservative rate limit
-
+    throttle_classes = [GuestLookupThrottle]
     def get(self, request, pk):
         order = get_object_or_404(Order, pk=pk)
         token = request.GET.get("token")
         if not token:
             return Response({"detail": "Missing token."}, status=400)
-
         ok, reason = _verify_invoice_token(token, order)
         if not ok:
             return Response({"detail": f"Invalid token ({reason})."}, status=400)
-
-        # Only allow when an invoice file exists
         inv = getattr(order, "invoice", None)
         if not inv or not getattr(inv, "pdf", None):
             return Response({"detail": "Invoice not available."}, status=404)
-
         return FileResponse(inv.pdf.open("rb"),
                             content_type="application/pdf",
                             as_attachment=True,
                             filename=f"{inv.number}.pdf")
 
-
 #-------------------Stock Alert Creation-------------------
 class StockAlertCreateView(generics.CreateAPIView):
-    """
-    POST { product, email }
-    - If product is already in stock, send immediately and do NOT keep an active subscription.
-    - Else, create/activate a subscription to notify on restock.
-    """
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [AllowAny]
     serializer_class = StockAlertCreateSerializer
-
     def perform_create(self, serializer):
         alert = serializer.save()
         product = alert.product
-
-        # If in stock now -> send immediately and deactivate
-        if (getattr(product, "quantity", 0) or 0) > 0:
+        if product.stock > 0:
             unsub = self._unsubscribe_url(alert)
             try:
                 send_stock_alert_email(product, alert.email, unsub)
@@ -2124,34 +1776,25 @@ class StockAlertCreateView(generics.CreateAPIView):
             self._payload = {"ok": True, "sent_now": True}
         else:
             self._payload = {"ok": True, "sent_now": False, "id": alert.id}
-
     def create(self, request, *args, **kwargs):
-        resp = super().create(request, *args, **kwargs)
-        # replace default response with our payload
+        super_resp = super().create(request, *args, **kwargs)
         return Response(getattr(self, "_payload", {"ok": True}), status=201)
-
     def _unsubscribe_url(self, alert: StockAlert) -> str:
         base = getattr(settings, "FRONTEND_URL", "").rstrip("/")
-        # Public API endpoint is on backend; you might also build a FE route that calls it
         api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
         return f"{base}{api_base}/stock-alerts/unsubscribe/{alert.unsubscribe_token}/"
 
 
 class StockAlertUnsubscribeView(generics.DestroyAPIView):
-    """
-    GET or DELETE by token to deactivate an alert.
-    """
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [AllowAny]
     lookup_field = "unsubscribe_token"
     queryset = StockAlert.objects.all()
-
     def get(self, request, *args, **kwargs):
         alert = get_object_or_404(self.get_queryset(), unsubscribe_token=kwargs.get("unsubscribe_token"))
         if alert.is_active:
             alert.is_active = False
             alert.save(update_fields=["is_active"])
-        return Response({"ok": True, "unsubscribed": True}, status=200)
-
+        return Response({"ok": True, "unsubscribed": True})
     def delete(self, request, *args, **kwargs):
         alert = get_object_or_404(self.get_queryset(), unsubscribe_token=kwargs.get("unsubscribe_token"))
         if alert.is_active:

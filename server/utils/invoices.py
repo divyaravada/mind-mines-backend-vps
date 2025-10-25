@@ -1,20 +1,20 @@
 # server/utils/invoices.py
 from io import BytesIO
 from decimal import Decimal
-from django.core.files.base import ContentFile
+
 from django.contrib.staticfiles import finders
+from django.core.files.base import ContentFile
 from django.utils.timezone import localtime
 
-from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
-from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from pdfrw import PdfReader, PdfWriter, PageMerge
 
 from server.models import Invoice
-
 
 def _eur(v) -> str:
     d = Decimal(str(v))
@@ -48,7 +48,7 @@ def _build_invoice_content(order) -> bytes:
         "21640 Horneburg, Germany",
         "Mobile: +49 170 4658 188 <br/>",
         "Email: info@mindmines.eu <br/>"
-        "• www.mindmines.eu",
+        "www.mindmines.eu",
     ]
 
     # Bill-to (prefers new fields, falls back to legacy)
@@ -194,7 +194,13 @@ def generate_invoice_pdf(order):
         return order.invoice
 
     # Ensure invoice number
-    order.assign_unique_invoice_number()
+    if not getattr(order, "invoice_number", None):
+        try:
+            order.assign_unique_invoice_number()
+        except AttributeError:
+            # fallback
+            order.invoice_number = f"INV{order.pk:08d}"
+            order.save(update_fields=["invoice_number"])
     number = order.invoice_number
 
     # Build content

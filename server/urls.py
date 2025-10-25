@@ -3,10 +3,15 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from django.conf import settings
 from django.conf.urls.static import static
+from django.contrib.sitemaps.views import sitemap
+from django.http import HttpResponse
+
+from .sitemaps import ProductSitemap, CategorySitemap, StaticSitemap
+from .feeds import merchant_products_feed
+
 from .views import (
     # Auth / profile
-    RegisterView, UserProfileAPIView, AccountAPIView,
-    AccountDeleteRequestView,
+    RegisterView, UserProfileAPIView, AccountAPIView, AccountDeleteRequestView,
 
     # Addresses
     AddressListCreateAPIView, AddressDetailAPIView, AddressSetDefaultAPIView,
@@ -14,7 +19,7 @@ from .views import (
     # Social login
     GoogleLoginAPIView,
 
-    # Password reset
+    # Password reset & verification
     CustomPasswordResetView, CustomPasswordResetConfirmView,
     verify_email, resend_verification_email,
 
@@ -65,12 +70,12 @@ from .views import (
     # Guest flows
     GuestCheckoutLoginView, GuestOrderLookupView,
 
-    #Stock Alerts
-    StockAlertCreateView, StockAlertUnsubscribeView,)
-from django.contrib.sitemaps.views import sitemap
-from .sitemaps import ProductSitemap, CategorySitemap, StaticSitemap
-from django.http import HttpResponse
-from .feeds import merchant_products_feed
+    # Stock Alerts
+    StockAlertCreateView, StockAlertUnsubscribeView,
+    
+    # Admin birthday coupon send
+    SendBirthdayCouponAPIView
+)
 
 sitemaps = {
     "products": ProductSitemap,
@@ -86,7 +91,7 @@ def robots_txt(request):
     ]
     return HttpResponse("\n".join(lines), content_type="text/plain")
 
-router = DefaultRouter()
+router = DefaultRouter()  # no viewsets registered (ok to keep)
 
 urlpatterns = [
     # -------- Auth / JWT --------
@@ -94,7 +99,7 @@ urlpatterns = [
     path("users/profile/", UserProfileAPIView.as_view(), name="user_profile"),
     path("users/account/", AccountAPIView.as_view(), name="account"),
     path("users/account/delete-request/", AccountDeleteRequestView.as_view(), name="account_delete_request"),
-    
+
     # -------- Social login --------
     path("auth/google/", GoogleLoginAPIView.as_view(), name="google_login"),
 
@@ -144,7 +149,8 @@ urlpatterns = [
     path("orders/<int:pk>/invoice/download/", InvoiceDownloadView.as_view(), name="order_invoice_download"),
 
     # -------- Invoice (public tokenized) --------
-    path("orders/invoice/public", InvoicePublicDownloadView.as_view(), name="invoice_public_download"),
+    # FIX: must include pk and name must match reverse() usage in GuestOrderLookupView
+    path("orders/<int:pk>/invoice/public/", InvoicePublicDownloadView.as_view(), name="invoice-public-download"),
 
     # -------- Orders (admin helpers) --------
     path("admin/orders/<int:pk>/update/", OrderAdminUpdateAPIView.as_view(), name="admin_order_update"),
@@ -181,19 +187,17 @@ urlpatterns = [
     # -------- Guest flows --------
     path("guest/login/", GuestCheckoutLoginView.as_view(), name="guest_login"),
     path("guest/order-lookup/", GuestOrderLookupView.as_view(), name="guest_order_lookup"),
-#------------------------------------------------------------------------------------------------
 
+    # -------- Allauth (optional) --------
     path("accounts/", include("allauth.urls")),
 
-    # Stock alerts
+    # -------- Stock alerts --------
     path("stock-alerts/", StockAlertCreateView.as_view(), name="stock-alerts-create"),
     path("stock-alerts/unsubscribe/<str:unsubscribe_token>/", StockAlertUnsubscribeView.as_view(), name="stock-alerts-unsubscribe"),
 
-
-  
+    # -------- Admin birthday coupon send --------
+    path("admin/send-birthday-coupon/", SendBirthdayCouponAPIView.as_view(), name="admin_send_birthday_coupon"),
 ]
-
-
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
@@ -201,7 +205,7 @@ if settings.DEBUG:
 urlpatterns += [
     path("sitemap.xml", sitemap, {"sitemaps": sitemaps}, name="django.contrib.sitemaps.views.sitemap"),
     path("robots.txt", robots_txt),
-    path("feeds/google-merchant.json", merchant_products_feed)
+    path("feeds/google-merchant.json", merchant_products_feed),
 ]
 
 urlpatterns += router.urls

@@ -1,32 +1,33 @@
 # server/utils/emails.py
-import re
 import logging
-from django.conf import settings
-from django.core.mail import EmailMultiAlternatives
-from django.template.loader import render_to_string
-from django.core.mail import send_mail,EmailMultiAlternatives
-from django.contrib.staticfiles import finders
+import re
+from collections.abc import Iterable
 from email.mime.image import MIMEImage
+
+from django.conf import settings
+from django.contrib.staticfiles import finders
+from django.core.mail import EmailMultiAlternatives, send_mail
 from django.template.loader import render_to_string, TemplateDoesNotExist
-from collections.abc import Iterable, Sequence, Mapping
 
 log = logging.getLogger(__name__)
+
 CURRENCY = "€"
-
-ADMIN_EMAIL = getattr(settings, "SUPPORT_EMAIL", "info@mindmines.eu")
-DEFAULT_FROM = getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com")
-DEFAULT_ADMIN_EMAIL = getattr(settings, "ORDERS_NOTIF_EMAIL", "info@mindmines.eu")
 SITE_NAME = getattr(settings, "SITE_NAME", "MindMines")
-ORDERS_ADMIN_EMAIL = getattr(settings, "ORDERS_ADMIN_EMAIL", "info@mindmines.eu")
 
-# Attach up to ~10 MB per file (adjust as needed)
+ADMIN_EMAIL = getattr(settings, "ADMIN_EMAIL", "info@mindmines.eu")
+ORDERS_ADMIN_EMAIL = getattr(settings, "ORDERS_ADMIN_EMAIL", ADMIN_EMAIL)
+DEFAULT_FROM = getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com")
+
 MAX_ATTACH_BYTES = 14 * 1024 * 1024
 
 
 
-def _fmt(amount): return f"{float(amount):.2f} {CURRENCY}"
+def _fmt(amount) -> str:
+    try:
+        return f"{float(amount):.2f} {CURRENCY}"
+    except Exception:
+        return f"{amount} {CURRENCY}"
 
-FRONTEND_ORDERS_URL = getattr(settings, "FRONTEND_ORDERS_URL", "https://mindmines.eu/account/orders")
 
 def get_order_recipient(order) -> str | None:
     """
@@ -41,8 +42,10 @@ def get_order_recipient(order) -> str | None:
             return cand
     return None
 
+
 def _strip_html(s: str) -> str:
     return re.sub(r"<[^>]+>", "", s or "").strip()
+
 
 def _send_bilingual(subject: str, to_email: str, en_html: str, de_html: str, text_fallback: str | None = None):
     if not to_email:
@@ -62,40 +65,11 @@ def _send_bilingual(subject: str, to_email: str, en_html: str, de_html: str, tex
     msg = EmailMultiAlternatives(
         subject=subject,
         body=text,
-        from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
+        from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
         to=[to_email],
     )
     msg.attach_alternative(html, "text/html")
     msg.send(fail_silently=not settings.DEBUG)
-
-
-def send_sepa_pending_email(order, user_locale: str = "en"):
-    to_email = get_order_recipient(order)
-    if not to_email:
-        return
-
-    ctx = {"order": order}
-    try:
-        html = render_to_string("emails/sepa_pending.html", ctx)
-        EmailMultiAlternatives(
-            subject="SEPA pending / SEPA in Bearbeitung",
-            body=_strip_html(html),
-            from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
-            to=[to_email],
-        ).attach_alternative(html, "text/html").send(fail_silently=not settings.DEBUG)
-        return
-    except TemplateDoesNotExist:
-        pass
-
-    en = (
-        "<p>Your SEPA debit payment has been initiated. Confirmation may take 2–5 business days.</p>"
-        "<p>We’ll email you once it completes.</p>"
-    )
-    de = (
-        "<p>Ihre SEPA-Lastschrift wurde eingeleitet. Die Bestätigung kann 2–5 Werktage dauern.</p>"
-        "<p>Wir informieren Sie, sobald die Zahlung abgeschlossen ist.</p>"
-    )
-    _send_bilingual("SEPA pending / SEPA in Bearbeitung", to_email, en, de)
 
 
 def _attach_inline_logo(email_msg: EmailMultiAlternatives) -> str | None:
@@ -113,13 +87,46 @@ def _attach_inline_logo(email_msg: EmailMultiAlternatives) -> str | None:
             return None
         with open(path, "rb") as f:
             img = MIMEImage(f.read())
-        cid = "brandlogo"  # any stable id
+        cid = "brandlogo"
         img.add_header("Content-ID", f"<{cid}>")
         img.add_header("Content-Disposition", "inline", filename="logo.png")
         email_msg.attach(img)
         return cid
     except Exception:
         return None
+
+# ---------- Status/Flow Emails ----------
+
+def send_sepa_pending_email(order, user_locale: str = "en"):
+    to_email = get_order_recipient(order)
+    if not to_email:
+        return
+
+    ctx = {"order": order}
+    try:
+        html = render_to_string("emails/sepa_pending.html", ctx)
+        msg = EmailMultiAlternatives(
+            subject="SEPA pending / SEPA in Bearbeitung",
+            body=_strip_html(html),
+            from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
+            to=[to_email],
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send(fail_silently=not settings.DEBUG)
+        return
+    except TemplateDoesNotExist:
+        pass
+
+    en = (
+        "<p>Your SEPA debit payment has been initiated. Confirmation may take 2–5 business days.</p>"
+        "<p>We’ll email you once it completes.</p>"
+    )
+    de = (
+        "<p>Ihre SEPA-Lastschrift wurde eingeleitet. Die Bestätigung kann 2–5 Werktage dauern.</p>"
+        "<p>Wir informieren Sie, sobald die Zahlung abgeschlossen ist.</p>"
+    )
+    _send_bilingual("SEPA pending / SEPA in Bearbeitung", to_email, en, de)
+
 
 def send_cancel_request_emails(return_request):
     """
@@ -138,36 +145,25 @@ def send_cancel_request_emails(return_request):
     )
     _send_bilingual("Cancellation request received / Stornierungsanfrage erhalten", customer, en, de)
 
+    # Admin notify
     try:
-        admin_to = getattr(settings, "ADMIN_EMAIL", None) or getattr(settings, "DEFAULT_FROM_EMAIL", None)
+        admin_to = getattr(settings, "ADMIN_EMAIL", None) or DEFAULT_FROM
         if admin_to:
             send_mail(
                 subject=f"[ADMIN] Cancel request {return_request.id} for order {order.number}",
-                message=f"Order: {order.number}\nUser: {getattr(order.user, 'id', '-')}\nEmail: {customer}\n\nMessage:\n{return_request.message}",
-                from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
+                message=(
+                    f"Order: {order.number}\n"
+                    f"User: {getattr(order.user, 'id', '-')}\n"
+                    f"Email: {customer}\n\n"
+                    f"Message:\n{return_request.message}"
+                ),
+                from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
                 recipient_list=[admin_to],
                 fail_silently=not settings.DEBUG,
             )
     except Exception:
-        pass
+        log.exception("Admin cancel email failed")
 
-
-    # ---- Admin/support email ----
-    support = getattr(settings, "SUPPORT_EMAIL", None) or getattr(settings, "DEFAULT_FROM_EMAIL", None)
-    if support:
-        subject = f"[Admin] Cancellation request #{rr.pk} — order {order.number}"
-        text = render_to_string("emails/cancel_request_admin.txt", ctx)
-        to = [support]
-        # also include ADMINS if configured
-        admins = [e for _, e in getattr(settings, "ADMINS", [])]
-        if admins: to.extend(admins)
-
-        msg2 = EmailMultiAlternatives(subject, text, settings.DEFAULT_FROM_EMAIL, to)
-        cid2 = _attach_inline_logo(msg2)
-        if cid2: ctx["logo_cid"] = cid2
-        html2 = render_to_string("emails/cancel_request_admin.html", ctx)
-        msg2.attach_alternative(html2, "text/html")
-        msg2.send(fail_silently=False)
 
 def send_return_request_emails(return_request):
     """
@@ -175,7 +171,7 @@ def send_return_request_emails(return_request):
     """
     order = return_request.order
     customer = get_order_recipient(order)
-    # Customer
+
     en = (
         f"<p>We received your return request for order <b>{order.number}</b>.</p>"
         f"<p>Message:</p><blockquote>{_strip_html(return_request.message)}</blockquote>"
@@ -186,19 +182,23 @@ def send_return_request_emails(return_request):
     )
     _send_bilingual("Return request received / Rücksendeanfrage erhalten", customer, en, de)
 
-    # Admin
     try:
-        admin_to = getattr(settings, "ADMIN_EMAIL", None) or getattr(settings, "DEFAULT_FROM_EMAIL", None)
+        admin_to = getattr(settings, "ADMIN_EMAIL", None) or DEFAULT_FROM
         if admin_to:
             send_mail(
                 subject=f"[ADMIN] Return request {return_request.id} for order {order.number}",
-                message=f"Order: {order.number}\nUser: {getattr(order.user, 'id', '-')}\nEmail: {customer}\n\nMessage:\n{return_request.message}",
-                from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
+                message=(
+                    f"Order: {order.number}\n"
+                    f"User: {getattr(order.user, 'id', '-')}\n"
+                    f"Email: {customer}\n\n"
+                    f"Message:\n{return_request.message}"
+                ),
+                from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
                 recipient_list=[admin_to],
                 fail_silently=not settings.DEBUG,
             )
     except Exception:
-        pass
+        log.exception("Admin return email failed")
 
 
 def send_shipping_update(order, tracking: str | None = None):
@@ -209,12 +209,14 @@ def send_shipping_update(order, tracking: str | None = None):
     ctx = {"order": order, "tracking": tracking}
     try:
         html = render_to_string("emails/shipping_update.html", ctx)
-        EmailMultiAlternatives(
+        msg = EmailMultiAlternatives(
             subject="Your order shipped / Ihre Bestellung wurde versendet",
             body=_strip_html(html),
-            from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
+            from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
             to=[to_email],
-        ).attach_alternative(html, "text/html").send(fail_silently=not settings.DEBUG)
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send(fail_silently=not settings.DEBUG)
         return
     except TemplateDoesNotExist:
         pass
@@ -232,12 +234,14 @@ def send_cancellation_email(order):
     ctx = {"order": order}
     try:
         html = render_to_string("emails/order_cancelled.html", ctx)
-        EmailMultiAlternatives(
+        msg = EmailMultiAlternatives(
             subject="Order cancelled / Bestellung storniert",
             body=_strip_html(html),
-            from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
+            from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
             to=[to_email],
-        ).attach_alternative(html, "text/html").send(fail_silently=not settings.DEBUG)
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send(fail_silently=not settings.DEBUG)
         return
     except TemplateDoesNotExist:
         pass
@@ -247,6 +251,217 @@ def send_cancellation_email(order):
     _send_bilingual("Order cancelled / Bestellung storniert", to_email, en, de)
 
 
+def send_order_confirmation(order, user_locale: str = "en"):
+    to_email = get_order_recipient(order)
+    if not to_email:
+        return
+
+    ctx = {"order": order}
+    try:
+        html = render_to_string("emails/order_confirmation.html", ctx)
+        msg = EmailMultiAlternatives(
+            subject="Order confirmation / Bestellbestätigung",
+            body=_strip_html(html),
+            from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
+            to=[to_email],
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send(fail_silently=not settings.DEBUG)
+        return
+    except TemplateDoesNotExist:
+        pass
+
+    en = (
+        f"<p>We’ve received your order <b>{order.number}</b>. We’ll email you once it ships.</p>"
+        "<p>You can view your order details anytime.</p>"
+    )
+    de = (
+        f"<p>Wir haben Ihre Bestellung <b>{order.number}</b> erhalten. Sobald sie versendet wurde, "
+        "benachrichtigen wir Sie per E-Mail.</p>"
+        "<p>Sie können Ihre Bestelldetails jederzeit einsehen.</p>"
+    )
+    _send_bilingual("Order confirmation / Bestellbestätigung", to_email, en, de)
+
+
+def send_bank_transfer_instructions(order, bank: dict, user_locale: str = "en", due_hours: int = 48):
+    to_email = get_order_recipient(order)
+    if not to_email:
+        return
+
+    ctx = {"order": order, "bank": bank, "due_hours": due_hours}
+    try:
+        html = render_to_string("emails/bank_transfer_instructions.html", ctx)
+        msg = EmailMultiAlternatives(
+            subject="Bank transfer instructions / Überweisungsdetails",
+            body=_strip_html(html),
+            from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
+            to=[to_email],
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send(fail_silently=not settings.DEBUG)
+        return
+    except TemplateDoesNotExist:
+        pass
+
+    en = (
+        f"<p>Thanks for your order <b>{order.number}</b>. Please transfer <b>{order.total_price:.2f} EUR</b> "
+        f"within {due_hours} hours using the reference <b>{order.number}</b>.</p>"
+        f"<p>IBAN: {bank.get('iban','')}<br/>BIC: {bank.get('bic','')}<br/>Beneficiary: {bank.get('account_name','')}</p>"
+    )
+    de = (
+        f"<p>Vielen Dank für Ihre Bestellung <b>{order.number}</b>. Bitte überweisen Sie <b>{order.total_price:.2f} EUR</b> "
+        f"innerhalb von {due_hours} Stunden mit dem Verwendungszweck <b>{order.number}</b>.</p>"
+        f"<p>IBAN: {bank.get('iban','')}<br/>BIC: {bank.get('bic','')}<br/>Empfänger: {bank.get('account_name','')}</p>"
+    )
+    _send_bilingual("Bank transfer instructions / Überweisungsdetails", to_email, en, de)
+
+
+def send_installments_started_email(order, months: int, amounts_eur: Iterable, dates: Iterable, user_locale: str = "en"):
+    to_email = get_order_recipient(order)
+    if not to_email:
+        return
+    en = (
+        f"<p>Your {months}-month installment plan for order <b>{order.number}</b> has started.</p>"
+        "<ul>" +
+        "".join(f"<li>{i+1}. {a:.2f} € on {d.date().isoformat()}</li>" for i, (a, d) in enumerate(zip(amounts_eur, dates))) +
+        "</ul>"
+    )
+    de = (
+        f"<p>Ihr {months}-monatiger Ratenplan für die Bestellung <b>{order.number}</b> wurde gestartet.</p>"
+        "<ul>" +
+        "".join(f"<li>{i+1}. {a:.2f} € am {d.date().isoformat()}</li>" for i, (a, d) in enumerate(zip(amounts_eur, dates))) +
+        "</ul>"
+    )
+    _send_bilingual("Installments started / Ratenzahlung gestartet", to_email, en, de)
+
+
+def send_invoice_email(order, user_locale: str = "en"):
+    """
+    Sends invoice email (bilingual). If you have a template "emails/invoice_email.html",
+    it's used; otherwise a safe fallback is sent.
+    """
+    to_email = get_order_recipient(order)
+    if not to_email:
+        return
+
+    ctx = {"order": order}
+    try:
+        html = render_to_string("emails/invoice_email.html", ctx)
+        msg = EmailMultiAlternatives(
+            subject="Your invoice / Ihre Rechnung",
+            body=_strip_html(html),
+            from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
+            to=[to_email],
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send(fail_silently=not settings.DEBUG)
+        return
+    except TemplateDoesNotExist:
+        pass
+
+    en = (
+        f"<p>Thanks for your purchase! Your invoice for order <b>{order.number}</b> is attached "
+        "or available in your account.</p>"
+        "<p>Need help? Just reply to this email.</p>"
+    )
+    de = (
+        f"<p>Vielen Dank für Ihren Einkauf! Ihre Rechnung für die Bestellung <b>{order.number}</b> "
+        "befindet sich im Anhang oder in Ihrem Konto.</p>"
+        "<p>Brauchen Sie Hilfe? Antworten Sie einfach auf diese E-Mail.</p>"
+    )
+    _send_bilingual("Your invoice / Ihre Rechnung", to_email, en, de)
+
+
+# ---------- Stock Alerts ----------
+
+def send_stock_alert_email(product, to_email: str, unsubscribe_url: str, user_locale: str = "en"):
+    """
+    Sends a bilingual stock notification email to a subscriber.
+    Falls back to plain text if the HTML template is missing.
+    """
+    subject = {
+        "en": f"Back in stock: {getattr(product, 'title_en', str(product))}",
+        "de": f"Wieder verfügbar: {getattr(product, 'title_de', getattr(product, 'title_en', str(product)))}",
+    }
+    subj = f"{subject['en']} / {subject['de']}"
+
+    ctx = {
+        "product": product,
+        "product_url": getattr(settings, "FRONTEND_URL", "").rstrip("/") + f"/product/{product.id}",
+        "unsubscribe_url": unsubscribe_url,
+    }
+
+    text_fallback = (
+        f"EN:\n{subject['en']}\n\nCheck it out: {ctx['product_url']}\n"
+        f"If you no longer want these alerts, unsubscribe: {unsubscribe_url}\n\n"
+        f"— {SITE_NAME}\n\n"
+        f"DE:\n{subject['de']}\n\nHier ansehen: {ctx['product_url']}\n"
+        f"Wenn Sie keine Benachrichtigungen mehr erhalten möchten: {unsubscribe_url}\n\n"
+        f"— {SITE_NAME}\n"
+    )
+
+    msg = EmailMultiAlternatives(
+        subject=subj,
+        body=text_fallback,
+        from_email=DEFAULT_FROM,
+        to=[to_email],
+    )
+
+    try:
+        html_body = render_to_string("emails/stock_alert.html", ctx)
+        msg.attach_alternative(html_body, "text/html")
+    except TemplateDoesNotExist:
+        pass
+
+    msg.send(fail_silently=not settings.DEBUG)
+
+# ---------- Birthday Emails ----------
+def send_birthday_admin_digest(profiles_today):
+    """
+    Email admin a list of users who have a birthday today.
+    Admin can then create/send coupons as desired.
+    """
+    if not profiles_today:
+        return
+    admin_to = getattr(settings, "ADMIN_EMAIL", None) or getattr(settings, "DEFAULT_FROM_EMAIL", None)
+    if not admin_to:
+        return
+
+    lines = []
+    for p in profiles_today:
+        u = p.user
+        lines.append(f"- {u.email} | {p.full_name or (u.username or '')} | DOB: {p.date_of_birth.isoformat()}")
+
+    subject = "🎂 Birthday notification — users with birthdays today"
+    body = "The following users have birthdays today:\n\n" + "\n".join(lines)
+    EmailMultiAlternatives(
+        subject=subject,
+        body=body,
+        from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
+        to=[admin_to],
+    ).send(fail_silently=not settings.DEBUG)
+
+
+def send_birthday_coupon_email(user, coupon_code: str):
+    """
+    Send a friendly bilingual birthday coupon email to a user.
+    """
+    to_email = getattr(user, "email", None)
+    if not to_email:
+        return
+    subj = "Happy Birthday! 🎉 / Alles Gute zum Geburtstag! 🎉"
+    en = (
+        f"<p>Happy Birthday from {SITE_NAME}! Use your coupon code "
+        f"<b>{coupon_code}</b> at checkout to enjoy a special discount.</p>"
+        "<p>We hope you have a wonderful day!</p>"
+    )
+    de = (
+        f"<p>Alles Gute zum Geburtstag von {SITE_NAME}! Verwenden Sie den Gutscheincode "
+        f"<b>{coupon_code}</b> beim Checkout für einen besonderen Rabatt.</p>"
+        "<p>Wir wünschen einen wundervollen Tag!</p>"
+    )
+
+#----------------- Order Context & Invoice Attachment ------------------
 def build_order_context(order):
     # Adjust field names to your models
     items = []
@@ -305,165 +520,7 @@ def attach_invoice_if_available(email: EmailMultiAlternatives, order):
         # Don’t block email if invoice isn’t ready; you can email it separately later
         pass
 
-def send_order_confirmation(order, user_locale: str = "en"):
-    to_email = get_order_recipient(order)
-    if not to_email:
-        return
 
-    ctx = {"order": order}
-    try:
-        html = render_to_string("emails/order_confirmation.html", ctx)
-        EmailMultiAlternatives(
-            subject="Order confirmation / Bestellbestätigung",
-            body=_strip_html(html),
-            from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
-            to=[to_email],
-        ).attach_alternative(html, "text/html").send(fail_silently=not settings.DEBUG)
-        return
-    except TemplateDoesNotExist:
-        pass
-
-    en = (
-        f"<p>We’ve received your order <b>{order.number}</b>. We’ll email you once it ships.</p>"
-        "<p>You can view your order details anytime.</p>"
-    )
-    de = (
-        f"<p>Wir haben Ihre Bestellung <b>{order.number}</b> erhalten. Sobald sie versendet wurde, "
-        "benachrichtigen wir Sie per E-Mail.</p>"
-        "<p>Sie können Ihre Bestelldetails jederzeit einsehen.</p>"
-    )
-    _send_bilingual("Order confirmation / Bestellbestätigung", to_email, en, de)
-
-# ------------------ BANK TRANSFER ------------------
-def send_bank_transfer_instructions(order, bank: dict, user_locale: str = "en", due_hours: int = 48):
-    to_email = get_order_recipient(order)
-    if not to_email:
-        return
-
-    ctx = {"order": order, "bank": bank, "due_hours": due_hours}
-    try:
-        html = render_to_string("emails/bank_transfer_instructions.html", ctx)
-        EmailMultiAlternatives(
-            subject="Bank transfer instructions / Überweisungsdetails",
-            body=_strip_html(html),
-            from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
-            to=[to_email],
-        ).attach_alternative(html, "text/html").send(fail_silently=not settings.DEBUG)
-        return
-    except TemplateDoesNotExist:
-        pass
-
-    en = (
-        f"<p>Thanks for your order <b>{order.number}</b>. Please transfer <b>{order.total_price:.2f} EUR</b> "
-        f"within {due_hours} hours using the reference <b>{order.number}</b>.</p>"
-        f"<p>IBAN: {bank.get('iban','')}<br/>BIC: {bank.get('bic','')}<br/>Beneficiary: {bank.get('account_name','')}</p>"
-    )
-    de = (
-        f"<p>Vielen Dank für Ihre Bestellung <b>{order.number}</b>. Bitte überweisen Sie <b>{order.total_price:.2f} EUR</b> "
-        f"innerhalb von {due_hours} Stunden mit dem Verwendungszweck <b>{order.number}</b>.</p>"
-        f"<p>IBAN: {bank.get('iban','')}<br/>BIC: {bank.get('bic','')}<br/>Empfänger: {bank.get('account_name','')}</p>"
-    )
-    _send_bilingual("Bank transfer instructions / Überweisungsdetails", to_email, en, de)
-
-
-def send_installments_started_email(order, months, amounts_eur: Iterable, dates: Iterable, user_locale: str = "en"):
-    to_email = get_order_recipient(order)
-    if not to_email:
-        return
-    # Minimal bilingual fallback (you can switch to a template later)
-    en = (
-        f"<p>Your {months}-month installment plan for order <b>{order.number}</b> has started.</p>"
-        "<ul>" +
-        "".join(f"<li>{i+1}. {a:.2f} € on {d.date().isoformat()}</li>" for i, (a, d) in enumerate(zip(amounts_eur, dates))) +
-        "</ul>"
-    )
-    de = (
-        f"<p>Ihr {months}-monatiger Ratenplan für die Bestellung <b>{order.number}</b> wurde gestartet.</p>"
-        "<ul>" +
-        "".join(f"<li>{i+1}. {a:.2f} € am {d.date().isoformat()}</li>" for i, (a, d) in enumerate(zip(amounts_eur, dates))) +
-        "</ul>"
-    )
-    _send_bilingual("Installments started / Ratenzahlung gestartet", to_email, en, de)
-
-# ------------------ INVOICE (PAID) ------------------
-def send_invoice_email(order, user_locale: str = "en"):
-    """
-    Sends invoice email (bilingual). If you have a template "emails/invoice_email.html",
-    it's used (can be bilingual already); otherwise a safe fallback is sent.
-    """
-    to_email = get_order_recipient(order)
-    if not to_email:
-        return
-
-    ctx = {"order": order}
-    try:
-        html = render_to_string("emails/invoice_email.html", ctx)
-        EmailMultiAlternatives(
-            subject="Your invoice / Ihre Rechnung",
-            body=_strip_html(html),
-            from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
-            to=[to_email],
-        ).attach_alternative(html, "text/html").send(fail_silently=not settings.DEBUG)
-        return
-    except TemplateDoesNotExist:
-        pass
-
-    en = (
-        f"<p>Thanks for your purchase! Your invoice for order <b>{order.number}</b> is attached "
-        "or available in your account.</p>"
-        "<p>Need help? Just reply to this email.</p>"
-    )
-    de = (
-        f"<p>Vielen Dank für Ihren Einkauf! Ihre Rechnung für die Bestellung <b>{order.number}</b> "
-        "befindet sich im Anhang oder in Ihrem Konto.</p>"
-        "<p>Brauchen Sie Hilfe? Antworten Sie einfach auf diese E-Mail.</p>"
-    )
-    _send_bilingual("Your invoice / Ihre Rechnung", to_email, en, de)
-
-# ------------------ Stock Alert ------------------
-
-def send_stock_alert_email(product, to_email: str, unsubscribe_url: str, user_locale: str = "en"):
-    """
-    Sends a bilingual stock notification email to a subscriber.
-    Falls back to a plain-text body if the HTML template is missing.
-    """
-    subject = {
-        "en": f"Back in stock: {getattr(product, 'title_en', product.__str__())}",
-        "de": f"Wieder verfügbar: {getattr(product, 'title_de', getattr(product, 'title_en', product.__str__()))}",
-    }
-    subj = f"{subject['en']} / {subject['de']}"
-
-    ctx = {
-        "product": product,
-        "product_url": getattr(settings, "FRONTEND_URL", "").rstrip("/") + f"/product/{product.id}",
-        "unsubscribe_url": unsubscribe_url,
-    }
-
-    html_body = None
-    try:
-        html_body = render_to_string("emails/stock_alert.html", ctx)
-    except TemplateDoesNotExist:
-        pass
-
-    text_fallback = (
-        f"EN:\n{subject['en']}\n\nCheck it out: {ctx['product_url']}\n"
-        f"If you no longer want these alerts, unsubscribe: {unsubscribe_url}\n\n"
-        f"— MindMines\n\n"
-        f"DE:\n{subject['de']}\n\nHier ansehen: {ctx['product_url']}\n"
-        f"Wenn Sie keine Benachrichtigungen mehr erhalten möchten: {unsubscribe_url}\n\n"
-        f"— MindMines\n"
-    )
-
-    msg = EmailMultiAlternatives(
-        subject=subj,
-        body=text_fallback,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        to=[to_email],
-    )
-    if html_body:
-        msg.attach_alternative(html_body, "text/html")
-    msg.send(fail_silently=not settings.DEBUG)
-    
 # ------------------ RETURN / CANCELLATION REQUEST ------------------
 
 ADMIN_ORDERS_EMAIL = getattr(settings, "ORDERS_ADMIN_EMAIL", "info@mindmines.eu")

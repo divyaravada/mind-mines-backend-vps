@@ -1,28 +1,35 @@
 # server/signals.py
 from __future__ import annotations
-from django.db.models.signals import post_save, pre_save
-from django.contrib.auth import get_user_model
-from django.dispatch import receiver
+
 from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.db.models.signals import post_save, pre_save
+from django.dispatch import receiver
 from django.utils import timezone
+
 from .models import Order, Product, StockAlert
+from .utils.emails import (
+    send_invoice_email,
+    send_order_confirmation,
+    send_stock_alert_email,
+)
 from .utils.invoices import generate_invoice_pdf
-from .utils.emails import send_invoice_email,send_order_confirmation,send_stock_alert_email
+
+# ---------- User profile hook ----------
 
 def create_or_update_user_profile(sender, instance, created, **kwargs):
-    # Import here to avoid early app-registry import cycles
-    from .models import Profile
+    from .models import Profile  # local import to avoid early app-registry issues
     if created:
         Profile.objects.create(user=instance)
     else:
-        # If profile missing for some reason, ensure it's present
         Profile.objects.get_or_create(user=instance)
+
+# ---------- Order status helpers ----------
 
 def remember_old_status(sender, instance, **kwargs):
     if not instance.pk:
         instance._old_status = None
         return
-    from .models import Order
     try:
         old = Order.objects.get(pk=instance.pk)
         instance._old_status = old.status
@@ -30,13 +37,19 @@ def remember_old_status(sender, instance, **kwargs):
         instance._old_status = None
 
 def on_paid_generate_and_mail(sender, instance, created, **kwargs):
+    """
+    If an Order transitions to `paid`, generate invoice and send emails.
+    Keep this idempotent and light — heavy work happens in views/webhooks/tasks.
+    """
     became_paid = instance.status == "paid" and getattr(instance, "_old_status", None) != "paid"
     if not became_paid:
         return
-    
-    generate_invoice_pdf(instance)
 
-    send_invoice_email(instance)
+    generate_invoice_pdf(instance)
+    try:
+        send_invoice_email(instance)
+    except Exception:
+        pass
     try:
         locale = getattr(getattr(instance.user, "profile", None), "language", "en") or "en"
         send_order_confirmation(instance, user_locale=locale)
@@ -46,14 +59,12 @@ def on_paid_generate_and_mail(sender, instance, created, **kwargs):
 @receiver(post_save, sender=Order)
 def ensure_order_number(sender, instance: Order, created, **kwargs):
     """
-    Ensure an order number is assigned on initial creation.
-    (Avoids re-sending emails here — handled in views/webhooks/tasks.)
+    Ensure an order number exists right after creation.
     """
     if created and not getattr(instance, "number", None):
         try:
-            instance.assign_unique_order_number()  # if your model has this
+            instance.assign_unique_order_number()
         except AttributeError:
-            # fallback simple numbering
             instance.number = f"MM{instance.pk:08d}"
         instance.save(update_fields=["number"])
 
@@ -66,6 +77,8 @@ def stamp_status_times(sender, instance, created, **kwargs):
         updates["cancelled_at"] = timezone.now()
     if updates:
         type(instance).objects.filter(pk=instance.pk).update(**updates)
+
+# ---------- Product restock notifications ----------
 
 @receiver(pre_save, sender=Product)
 def _stash_old_qty(sender, instance: Product, **kwargs):
@@ -84,9 +97,8 @@ def _notify_restock(sender, instance: Product, created, **kwargs):
         old_qty = getattr(instance, "_old_qty", None)
         new_qty = int(getattr(instance, "quantity", 0) or 0)
         if old_qty is None:
-            # new product; only notify if it "was effectively 0" before — skip
+            # New product; skip.
             return
-        # Trigger only if transitioned from <=0 to >0
         if (old_qty <= 0) and (new_qty > 0):
             alerts = StockAlert.objects.filter(product=instance, is_active=True).order_by("created_at")
             for alert in alerts:
@@ -94,12 +106,13 @@ def _notify_restock(sender, instance: Product, created, **kwargs):
                 try:
                     send_stock_alert_email(instance, alert.email, unsub)
                 except Exception:
-                    # don't crash signal; keep active if email failed
+                    # keep active if email failed
                     continue
                 alert.mark_notified()
     except Exception:
-        # never crash request due to email issues
+        # never crash the saving request
         pass
+
 
 def _build_unsub_url(alert: StockAlert) -> str:
     base = getattr(settings, "FRONTEND_URL", "").rstrip("/")
@@ -114,7 +127,6 @@ def connect_signals():
     get_user_model() at import time.
     """
     User = get_user_model()
-    from .models import Order
 
     post_save.connect(
         create_or_update_user_profile, sender=User,
@@ -132,11 +144,13 @@ def connect_signals():
         stamp_status_times, sender=Order,
         dispatch_uid="server_order_stamp_status_times"
     )
+    pre_save.connect(
+        _stash_old_qty, sender=Product,
+        dispatch_uid="server_product_stash_old_qty"
+    )
     post_save.connect(
         _notify_restock, sender=Product,
         dispatch_uid="server_product_notify_restock"
     )
-    post_save.connect(
-        _stash_old_qty, sender=Product,
-        dispatch_uid="server_product_stash_old_qty"
-    )
+connect_signals()
+

@@ -1,16 +1,17 @@
 # server/models.py
-from django.contrib.auth.models import AbstractUser,BaseUserManager
+from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.contrib.postgres.fields import ArrayField
 from django.db import models, transaction
-from decimal import Decimal, ROUND_HALF_UP
-from django.db.models import Q, UniqueConstraint,F
+from django.db.models import Q, UniqueConstraint, F
 from django.db.models.functions import Lower
 from django.core.exceptions import ValidationError
-from datetime import timedelta
-from django.utils import timezone
 from django.core.validators import EmailValidator
-import secrets
+from django.utils import timezone
 from django.conf import settings
+
+from decimal import Decimal, ROUND_HALF_UP
+from datetime import timedelta, date
+import secrets
 import uuid
 
 
@@ -58,49 +59,44 @@ COLOR_CHOICES = [
     ]
 
 VAT_RATE = Decimal("0.19")
-VAT_MULTIPLIER = Decimal("1.19")
 
-def _q2(d):
-    return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+def _q2(d: Decimal) -> Decimal :
+    return Decimal(d or 0).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+# ----------------------------
+# Users
+# ----------------------------
     
 class CustomUserManager(BaseUserManager):
     use_in_migrations = True
-
-    def _create_user(self, email, password, **extra_fields):
-        if not email:
-            raise ValueError("The Email must be set")
+    def _create_user(self, email, password, **extra):
+        if not email: raise ValueError("Email must be set")
         email = self.normalize_email(email)
-        user = self.model(email=email, **extra_fields)
-        user.set_password(password)
-        user.save(using=self._db)
+        user = self.model(email=email, **extra)
+        user.set_password(password); user.save(using=self._db)
         return user
+    def create_user(self, email, password=None, **extra):
+        extra.setdefault("is_staff", False); extra.setdefault("is_superuser", False)
+        return self._create_user(email, password, **extra)
+    def create_superuser(self, email, password=None, **extra):
+        extra.setdefault("is_staff", True); extra.setdefault("is_superuser", True)
+        if extra.get("is_staff") is not True: raise ValueError("Superuser must have is_staff=True.")
+        if extra.get("is_superuser") is not True: raise ValueError("Superuser must have is_superuser=True.")
+        return self._create_user(email, password, **extra)
 
-    def create_user(self, email, password=None, **extra_fields):
-        extra_fields.setdefault("is_staff", False)
-        extra_fields.setdefault("is_superuser", False)
-        return self._create_user(email, password, **extra_fields)
-
-    def create_superuser(self, email, password=None, **extra_fields):
-        extra_fields.setdefault("is_staff", True)
-        extra_fields.setdefault("is_superuser", True)
-        if extra_fields.get("is_staff") is not True:
-            raise ValueError("Superuser must have is_staff=True.")
-        if extra_fields.get("is_superuser") is not True:
-            raise ValueError("Superuser must have is_superuser=True.")
-        return self._create_user(email, password, **extra_fields)
 
 class User(AbstractUser):
     # keep an optional username field so admin can fill it if desired
+    username = None  # <-- IMPORTANT
     email = models.EmailField(unique=True)
-    username = models.CharField(max_length=100, blank=True, null=True)
+    # optional display handle if you want:
+    display_name = models.CharField(max_length=100, blank=True, null=True)
 
     USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = []  # createsuperuser will only ask for email + password
-
-    objects = CustomUserManager()  # <-- IMPORTANT
-
-    def __str__(self):
-        return self.email
+    REQUIRED_FIELDS = []
+    objects = CustomUserManager()
+    def __str__(self): return self.email
 
 class Profile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
@@ -109,96 +105,67 @@ class Profile(models.Model):
     image = models.ImageField(upload_to="profile_pics/", blank=True, null=True)
     verified = models.BooleanField(default=False)
     stripe_customer_id = models.CharField(max_length=64, blank=True, null=True)
+    date_of_birth = models.DateField(blank=True, null=True) 
 
     def __str__(self):
         return f"{self.user.email} profile"
 
-class Address(models.Model):
-    user = models.ForeignKey("server.User", on_delete=models.CASCADE, related_name='addresses', null=True, blank=True)
 
+class Address(models.Model):
+    user = models.ForeignKey("server.User", on_delete=models.CASCADE, related_name="addresses", null=True, blank=True)
     # UI-first fields
     first_name = models.CharField(max_length=100, blank=True)
     last_name  = models.CharField(max_length=100, blank=True)
-    address_line1 = models.CharField(max_length=255, blank=True)  # “Address”
-    apartment = models.CharField(max_length=100, blank=True)      # “Address supplement”
+    address_line1 = models.CharField(max_length=255, blank=True)
+    apartment = models.CharField(max_length=100, blank=True)
     postal_code = models.CharField(max_length=20, blank=True)
     city = models.CharField(max_length=100, blank=True)
     country = models.CharField(max_length=100, blank=True)
     phone = models.CharField(max_length=20, blank=True)
-
-    # Legacy (kept for compatibility)
+    # Legacy (kept)
     full_name = models.CharField(max_length=255, blank=True)
     house_number = models.CharField(max_length=50, blank=True)
     street_name = models.CharField(max_length=255, blank=True)
     state = models.CharField(max_length=100, blank=True)
     pincode = models.CharField(max_length=20, blank=True)
-
     # UX
     is_default = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
     class Meta:
         constraints = [
-            UniqueConstraint(
-                fields=["user"],
-                condition=Q(is_default=True),
-                name="one_default_address_per_user",
-            ),
+            UniqueConstraint(fields=["user"], condition=Q(is_default=True), name="one_default_address_per_user"),
         ]
-
     def set_default_for_user(self):
         Address.objects.filter(user=self.user, is_default=True).exclude(pk=self.pk).update(is_default=False)
         if not self.is_default:
-            self.is_default = True
-            self.save(update_fields=["is_default"])
-
+            self.is_default = True; self.save(update_fields=["is_default"])
     def __str__(self):
         user_email = getattr(self.user, "email", "Guest")
         name = " ".join(filter(None, [self.first_name, self.last_name])) or self.full_name or user_email
         line1 = self.address_line1 or " ".join([self.street_name, self.house_number]).strip() or "Address"
         return f"{name} — {line1}"
     
-    
+# ----------------------------
+# Stones / Content
+# ----------------------------    
 class NaturalStone(models.Model):
     type = models.CharField(max_length=30, choices=STONE_TYPES, unique=True)
-
-    description_en = models.TextField()
-    description_de = models.TextField()
-
-    interest_en = models.TextField()
-    interest_de = models.TextField()
-
-    key_features_en = models.TextField()
-    key_features_de = models.TextField()
-
-    usage_en = models.TextField()
-    usage_de = models.TextField()
-
-    image = models.ImageField(
-        upload_to="natural-stone/images/",
-        blank=True,
-        null=True,
-        help_text="Primary display image for the stone",
-    )
-
-    def __str__(self):
-        return self.type
+    description_en = models.TextField(); description_de = models.TextField()
+    interest_en = models.TextField(); interest_de = models.TextField()
+    key_features_en = models.TextField(); key_features_de = models.TextField()
+    usage_en = models.TextField(); usage_de = models.TextField()
+    image = models.ImageField(upload_to="natural-stone/images/", blank=True, null=True)
+    def __str__(self): return self.type
 
 class NaturalStoneImage(models.Model):
     stone = models.ForeignKey(NaturalStone, on_delete=models.CASCADE, related_name="images")
     image = models.ImageField(upload_to="natural-stone/images/")
-
-    def save(self, *args, **kwargs):
-        # ✅ hard limit to 10 per stone
-        if self.pk is None:
-            current = NaturalStoneImage.objects.filter(stone=self.stone).count()
-            if current >= 10:
-                raise ValidationError("A stone can have at most 10 gallery images.")
-        return super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"Image for {self.stone.type}"
+    def save(self, *a, **kw):
+        if self.pk is None and NaturalStoneImage.objects.filter(stone=self.stone).count() >= 10:
+            raise ValidationError("A stone can have at most 10 gallery images.")
+        return super().save(*a, **kw)
+    def __str__(self): return f"Image for {self.stone.type}"
 
 class StoneEnquiry(models.Model):
     stone_type = models.CharField(max_length=30)
@@ -206,117 +173,74 @@ class StoneEnquiry(models.Model):
     email = models.EmailField()
     message = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
+    def __str__(self): return f"{self.name} - {self.stone_type}"
 
-    def __str__(self):
-        return f"{self.name} - {self.stone_type}"
-
-    
+# ----------------------------
+# Catalog
+# ----------------------------
+     
 class Product(models.Model):
-    title_en = models.CharField(max_length=255, default="Default Title")
-    title_de = models.CharField(max_length=255, default="Default Title")
-
-
+    # EN/DE content
+    title_en = models.CharField(max_length=255)
+    title_de = models.CharField(max_length=255)
     short_description1_en = models.CharField(max_length=255, blank=True)
     short_description1_de = models.CharField(max_length=255, blank=True)
     short_description2_en = models.CharField(max_length=255, blank=True)
     short_description2_de = models.CharField(max_length=255, blank=True)
     short_description3_en = models.CharField(max_length=255, blank=True)
     short_description3_de = models.CharField(max_length=255, blank=True)
-
-    descriptionpara1_en = models.TextField(blank=True)
-    descriptionpara1_de = models.TextField(blank=True)
-    descriptionpara2_en = models.TextField(blank=True)
-    descriptionpara2_de = models.TextField(blank=True)
-    descriptionpara3_en = models.TextField(blank=True)
-    descriptionpara3_de = models.TextField(blank=True)
-
-    carepara_en = models.TextField(blank=True)
-    carepara_de = models.TextField(blank=True)
-    delivery_en = models.TextField(blank=True)
-    delivery_de = models.TextField(blank=True)
-    returnspara1_en = models.TextField(blank=True)
-    returnspara1_de = models.TextField(blank=True)
-    returnspara2_en = models.TextField(blank=True)
-    returnspara2_de = models.TextField(blank=True)
-    returnspara3_en = models.TextField(blank=True)
-    returnspara3_de = models.TextField(blank=True)
+    descriptionpara1_en = models.TextField(blank=True); descriptionpara1_de = models.TextField(blank=True)
+    descriptionpara2_en = models.TextField(blank=True); descriptionpara2_de = models.TextField(blank=True)
+    descriptionpara3_en = models.TextField(blank=True); descriptionpara3_de = models.TextField(blank=True)
+    carepara_en = models.TextField(blank=True); carepara_de = models.TextField(blank=True)
+    delivery_en = models.TextField(blank=True); delivery_de = models.TextField(blank=True)
+    returnspara1_en = models.TextField(blank=True); returnspara1_de = models.TextField(blank=True)
+    returnspara2_en = models.TextField(blank=True); returnspara2_de = models.TextField(blank=True)
+    returnspara3_en = models.TextField(blank=True); returnspara3_de = models.TextField(blank=True)
 
     type_of_stone = models.CharField(max_length=50, choices=STONE_TYPES)
     material = models.CharField(max_length=20, choices=MATERIAL_CHOICES, default="marble")
     color = models.CharField(max_length=20, choices=COLOR_CHOICES, default="white")
-
     stone_color_image = models.ImageField(upload_to="decor-products/colors/", null=True, blank=True)
 
-    quantity = models.PositiveIntegerField(default=0)
-
+    # Physicals
     dimensions = models.CharField(max_length=255, blank=True)
     weight = models.CharField(max_length=100, blank=True)
 
     category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default="home_decor")
-    price = models.DecimalField(max_digits=8, decimal_places=2)
-    sale_price = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    discount_percent = models.PositiveIntegerField(blank=True, null=True)  # e.g. 10 = 10%
-    stock = models.PositiveIntegerField(default=0)
+
+    # ✅ store GROSS prices (incl. VAT 19%) to match storefront labels
+    price_gross = models.DecimalField(max_digits=10, decimal_places=2)              # was price
+    discount_gross = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))  # optional absolute discount
+    sale_price_gross = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))  # computed on save
+    vat_rate = models.DecimalField(max_digits=4, decimal_places=2, default=VAT_RATE)
+
+    # Stock
+    stock = models.PositiveIntegerField(default=0)   # unified; removed quantity
     key = models.CharField(max_length=20, unique=True, null=True, blank=True)
 
     image = models.ImageField(upload_to="decor-products/", null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)  # if missing, add & migrate
-    class Meta:
-        ordering = ["-created_at"]  # or just ["-id"]
+    created_at = models.DateTimeField(auto_now_add=True)
+    class Meta: ordering = ["-created_at"]
 
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
+        # product key like HOME01 etc.
         if not self.key:
             cat_prefix = CATEGORY_CODES.get(self.category, "MIND")
             self.key = f"{cat_prefix}{str(self.id).zfill(2)}"
             super().save(update_fields=["key"])
+        # compute sale price
+        new_sale = max(self.price_gross - self.discount_gross, Decimal("0.00"))
+        if self.sale_price_gross != new_sale:
+            self.sale_price_gross = _q2(new_sale)
+            super().save(update_fields=["sale_price_gross"])
 
-    def vat_included_price(self):
-        return _q2(Decimal(self.price) * VAT_MULTIPLIER)
-        
-    def stock_message(self):
-        if self.quantity == 0:
-            return "Out of stock"
-        elif self.quantity < 5:
-            return "Hurry up! Only a few left"
-        return "In stock"
     @property
     def is_discounted(self):
-        gross = self.vat_included_price()
-        if self.sale_price is not None and Decimal(self.sale_price) < gross:
-            return True
-        if self.discount_percent and self.discount_percent > 0:
-            return True
-        return False
+        return self.discount_gross > 0 and self.sale_price_gross < self.price_gross
 
-    @property
-    def final_price(self):
-        gross = self.vat_included_price()
-        if self.sale_price is not None:
-            return _q2(Decimal(self.sale_price))
-        if self.discount_percent:
-            dp = Decimal(self.discount_percent) / Decimal(100)
-            return _q2(gross * (Decimal(1) - dp))
-        return gross
-
-    @property
-    def low_stock(self):
-        return 0 < int(self.quantity or 0) < 5
-
-    @property
-    def out_of_stock(self):
-        return int(self.quantity or 0) <= 0
-
-    def stock_message(self):
-        q = int(self.quantity or 0)
-        if q <= 0:
-            return "Out of stock — new batch arriving soon"
-        if q < 5:
-            return "Hurry — almost gone!"
-        return "In stock"
-
-    def __str__(self):
-        return self.title_en
+    def __str__(self): return self.title_en
 
 class ProductMedia(models.Model):
     MEDIA_TYPE_CHOICES = [("image", "Image"), ("video", "Video")]
@@ -327,248 +251,172 @@ class ProductMedia(models.Model):
     order = models.PositiveIntegerField(default=0)
     media_type = models.CharField(max_length=10, choices=MEDIA_TYPE_CHOICES, default="image")
 
+    def clean(self):
+        # exactly one of (image, video)
+        if bool(self.image) == bool(self.video):
+            raise ValidationError("Provide exactly one of image or video.")
+        # enforce per-product caps
+        if self.pk is None:
+            if self.media_type == "image":
+                n = ProductMedia.objects.filter(product=self.product, media_type="image").count()
+                if n >= 10: raise ValidationError("A product can have at most 10 images.")
+            else:
+                n = ProductMedia.objects.filter(product=self.product, media_type="video").count()
+                if n >= 10: raise ValidationError("A product can have at most 10 videos.")
+
     def __str__(self):
         return f"{self.media_type.capitalize()} for {self.product}"
 
    
+# ---------- extras ----------
 class StockAlert(models.Model):
-    """
-    A simple "notify me when back in stock" subscription.
-    One email per product. Deactivated after notification is sent.
-    """
     product = models.ForeignKey("Product", related_name="stock_alerts", on_delete=models.CASCADE)
     email = models.EmailField(validators=[EmailValidator()], db_index=True)
     is_active = models.BooleanField(default=True, db_index=True)
     unsubscribe_token = models.CharField(max_length=64, unique=True, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     notified_at = models.DateTimeField(null=True, blank=True)
-
     class Meta:
         unique_together = ("product", "email")
-        indexes = [
-            models.Index(fields=["product", "is_active"]),
-            models.Index(fields=["email"]),
-        ]
-
-    def save(self, *args, **kwargs):
-        if not self.unsubscribe_token:
-            self.unsubscribe_token = secrets.token_urlsafe(32)
-        # normalize email
-        if self.email:
-            self.email = self.email.strip().lower()
-        super().save(*args, **kwargs)
-
+        indexes = [models.Index(fields=["product","is_active"]), models.Index(fields=["email"])]
+    def save(self, *a, **k):
+        if not self.unsubscribe_token: self.unsubscribe_token = secrets.token_urlsafe(32)
+        if self.email: self.email = self.email.strip().lower()
+        super().save(*a, **k)
     def mark_notified(self):
-        self.is_active = False
-        self.notified_at = timezone.now()
-        self.save(update_fields=["is_active", "notified_at"])
-
+        self.is_active = False; self.notified_at = timezone.now()
+        self.save(update_fields=["is_active","notified_at"])
 
 class Wishlist(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
-    created_at = models.DateTimeField(auto_now_add=True)  # optional
+    created_at = models.DateTimeField(auto_now_add=True)
     class Meta:
         ordering = ["-id"]
-        unique_together = ("user", "product")
-
+        unique_together = ("user","product")
 
 class ContactMessage(models.Model):
     name = models.CharField(max_length=200)
     email = models.EmailField()
     message = models.TextField()
     sent_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"{self.name} - {self.email}"
-
+    def __str__(self): return f"{self.name} - {self.email}"
 
 class NewsletterSubscriber(models.Model):
     email = models.EmailField(unique=True)
     subscribed_at = models.DateTimeField(auto_now_add=True)
-
     class Meta:
-        constraints = [
-            UniqueConstraint(Lower("email"), name="uniq_newsletter_email_ci")
-        ]
+        constraints = [UniqueConstraint(Lower("email"), name="uniq_newsletter_email_ci")]
+    def __str__(self): return self.email
 
-    def __str__(self):
-        return self.email
 
 
 ORDER_STATUS = [
-    ("pending", "Pending"),
-    ("processing", "Processing"),
-    ("paid", "Paid"),
-    ("shipped", "Shipped"),
-    ("delivered", "Delivered"),
-    ("cancelled", "Cancelled"),
-    ("failed", "Failed"),
+    ("pending_payment", "pending_payment"),
+    ("paid", "paid"),
+    ("processing", "processing"),
+    ("shipped", "shipped"),
+    ("delivered", "delivered"),
+    ("completed", "completed"),
+    ("payment_failed", "payment_failed"),
+    ("awaiting_bank_transfer", "awaiting_bank_transfer"),
+    ("canceled", "canceled"),
+    ("refunded", "refunded"),
 ]
 
 class Order(models.Model):
     PAYMENT_METHODS = [
-        ("card", "Card"),
-        ("sepa_debit", "SEPA Direct Debit"),
+        ("stripe_card", "Stripe Card"),
+        ("stripe_sepa", "Stripe SEPA Direct Debit"),
         ("paypal", "PayPal"),
-        ("bank_transfer", "Bank Transfer"),
+        ("manual_bank", "Manual Bank Transfer"),
     ]
-    user = models.ForeignKey("server.User", on_delete=models.CASCADE, related_name='orders',null=True, blank=True)
-    email = models.EmailField()
-    guest_email = models.EmailField(blank=True, null=True)
+    user = models.ForeignKey("server.User", on_delete=models.SET_NULL, related_name="orders", null=True, blank=True)
+    email = models.EmailField()  # always set (for users, copy from account; for guests, their email)
     guest_name  = models.CharField(max_length=200, blank=True, null=True)
 
-
-    # legacy (optional)
-    product = models.ForeignKey("server.Product", on_delete=models.SET_NULL, null=True, blank=True)
-    quantity = models.PositiveIntegerField(null=True, blank=True)
-
-    payment_method = models.CharField(
-        max_length=32,
-        choices=PAYMENT_METHODS, default="card"
-    )
-    status = models.CharField(
-        max_length=32,
-        choices=ORDER_STATUS,
-        default="pending",
-    )
-    payment_ref = models.CharField(max_length=128, blank=True, default="")
-    payment_id = models.CharField(max_length=128, blank=True, default="")
-    tracking_number = models.CharField(max_length=64, blank=True, default="")  # ← keep just once
-
-    invoice_number = models.CharField(max_length=32, blank=True, null=True, default=None)
-    invoice_pdf = models.FileField(upload_to="invoices/", blank=True, null=True)
-
-    coupon = models.ForeignKey("server.Coupon", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders")
-    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
-
-    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
-    shipping_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
-    total_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
-    installments_months = models.PositiveIntegerField(null=True, blank=True)  
+    # 🔒 snapshot addresses (keep FKs if you want, but snapshots are source of truth)
     shipping_address = models.ForeignKey('server.Address', on_delete=models.SET_NULL, null=True, blank=True)
-    number = models.CharField(max_length=32, unique=True, null=True, blank=True, default=None) 
+    shipping_address_json = models.JSONField(default=dict)   # <- snapshot
+    billing_address_json = models.JSONField(default=dict)    # <- snapshot
+
+    # numbers & currency
+    order_number = models.CharField(max_length=20, unique=True)  # e.g., MM00000001
+    currency = models.CharField(max_length=3, default="eur")
+
+    # totals (gross-based)
+    subtotal_gross = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    vat_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    shipping_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    total_gross = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+
+    # status & payments
+    payment_method = models.CharField(max_length=32, choices=PAYMENT_METHODS, default="stripe_card")
+    status = models.CharField(max_length=32, choices=ORDER_STATUS, default="pending_payment")
+    remarks = models.TextField(blank=True, default="")
+    installments_months = models.PositiveIntegerField(null=True, blank=True)
+
+    stripe_payment_intent = models.CharField(max_length=128, blank=True, default="")
+    stripe_customer = models.CharField(max_length=128, blank=True, default="")
+    sepa_mandate_id = models.CharField(max_length=128, blank=True, default="")
+
+    tracking_number = models.CharField(max_length=64, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
-    stripe_pi = models.CharField(max_length=255, blank=True, null=True)  
-    stripe_si = models.CharField(max_length=255, blank=True, null=True)
     updated_at = models.DateTimeField(auto_now=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
-    cancelled_at = models.DateTimeField(null=True, blank=True)
-    stock_locked = models.BooleanField(default=False)    
+    canceled_at = models.DateTimeField(null=True, blank=True)
+
+    # stock management flags
+    stock_locked = models.BooleanField(default=False)
     stock_released = models.BooleanField(default=False)
+
+    # guest access
     lookup_token = models.CharField(max_length=36, blank=True, default="")
 
     class Meta:
-        constraints = [
-            UniqueConstraint(
-                fields=["invoice_number"],
-                condition=Q(invoice_number__isnull=False) & ~Q(invoice_number=""),
-                name="uniq_invoice_number_nonempty",
-            ),
-        ]
+        indexes = [models.Index(fields=["order_number"]), models.Index(fields=["status","created_at"])]
 
-    def __str__(self):
-        return f"Order #{self.pk}"
-    
-    def _iter_items(self):
-        manager = getattr(self, "items", None)
-        if manager is not None:
-            found = False
-            for it in manager.all().select_related("product"):
-                found = True
-                yield it
-            if found:
-                return
-        has_lines = False
-        
-        for it in OrderItem.objects.filter(order=self).select_related("product"):
-            yield it
-            
-        if self.product_id and self.quantity:
-            yield OrderItem(
-                product=self.product,
-                quantity=self.quantity,
-                unit_price=getattr(self.product, "price", 0),
-            )
-            
-    # Human invoice number base (unique per order pk/month)
-    @property
-    def ordered_at(self):
-        return self.created_at
-    
-    def generate_invoice_number(self):
-        from datetime import datetime
-        return f"MM-{datetime.now():%m-%Y}-{self.pk:06d}"
-
-    def assign_unique_invoice_number(self):
-        """Set a unique invoice_number if empty or duplicated (adds -2, -3, … if needed)."""
-        if not self.invoice_number:
-            base = self.generate_invoice_number()
-        else:
-            base = self.invoice_number
-        candidate = base
-        i = 1
-        from server.models import Order as O  # safe self-import
-        while O.objects.filter(invoice_number=candidate).exclude(pk=self.pk).exists():
-            i += 1
-            candidate = f"{base}-{i}"
-        if candidate != self.invoice_number:
-            self.invoice_number = candidate
-            self.save(update_fields=["invoice_number"])
-
-    def ensure_number(self):
-        if not self.number:
-            self.number = f"ORD-{self.created_at:%Y%m%d}-{self.pk:06d}"
-            super().save(update_fields=["number"])
+    def __str__(self): return f"Order {self.order_number}"
 
     def save(self, *args, **kwargs):
         creating = self.pk is None
         super().save(*args, **kwargs)
-        if creating and not self.lookup_token:
-            # Assign order number once we have a PK
-            self.lookup_token = str(uuid.uuid4())
-            super().save(update_fields=["lookup_token"])
+        if creating:
+            # ensure a unique, human order number after PK exists
+            if not self.order_number:
+                self.order_number = f"MM{self.pk:08d}"
+                super().save(update_fields=["order_number"])
+            if not self.lookup_token:
+                self.lookup_token = str(uuid.uuid4())
+                super().save(update_fields=["lookup_token"])
 
-    @property
-    def payment_method_label(self):
-        return self.get_payment_method_display()
-    
     @property
     def return_deadline(self):
-        if not self.delivered_at:
-            return None
-        return self.delivered_at + timedelta(days=1)
+        if not self.delivered_at: return None
+        return self.delivered_at + timedelta(days=15)  # ← 15 days window
 
-    @property
-    def is_returnable(self) -> bool:
-        if self.status != "delivered" or not self.delivered_at:
-            return False
-        return timezone.now() <= (self.delivered_at + timedelta(days=1))
-    
     @transaction.atomic
     def reserve_stock(self):
-        """Decrease stock for all items after payment succeeds."""
-        if self.stock_locked:
-            return
-        for it in self._iter_items():
-            p = Product.objects.select_for_update().get(pk=it.product_id)
-            if p.quantity < it.quantity:
-                raise ValueError(f"Insufficient stock for {p} (have {p.quantity}, need {it.quantity})")
-            p.quantity = F("quantity") - it.quantity
-            p.save(update_fields=["quantity"])
+        """Reserve (decrease) stock at order creation or payment success."""
+        if self.stock_locked: return
+        for it in self.items.select_related("product").select_for_update():
+            p = it.product
+            if p.stock < it.quantity:
+                raise ValueError(f"Insufficient stock for {p} (have {p.stock}, need {it.quantity})")
+            p.stock = F("stock") - it.quantity
+            p.save(update_fields=["stock"])
         self.stock_locked = True
         self.save(update_fields=["stock_locked"])
 
     @transaction.atomic
     def release_stock(self):
-        """Add back Product.quantity for all items if not already released."""
-        if not self.stock_locked or self.stock_released:
-            return
-        from server.models import Product
-        for it in self._iter_items():
-            p = Product.objects.select_for_update().get(pk=it.product_id)
-            p.quantity = F("quantity") + it.quantity
-            p.save(update_fields=["quantity"])
+        """Release (increase) stock if order canceled/failed and not already released."""
+        if not self.stock_locked or self.stock_released: return
+        for it in self.items.select_related("product").select_for_update():
+            p = it.product
+            p.stock = F("stock") + it.quantity
+            p.save(update_fields=["stock"])
         self.stock_released = True
         self.save(update_fields=["stock_released"])
 
@@ -576,21 +424,14 @@ class OrderItem(models.Model):
     order = models.ForeignKey(Order, related_name="items", on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="order_items")
     quantity = models.PositiveIntegerField()
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
-
-    def line_total(self):
-        return (self.unit_price * self.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
+    unit_price_gross = models.DecimalField(max_digits=10, decimal_places=2)  # snapshot gross
+    vat_rate = models.DecimalField(max_digits=4, decimal_places=2, default=VAT_RATE)
+    def line_total_gross(self): return _q2(self.unit_price_gross * self.quantity)
     @property
     def product_name(self):
-        # defensive: works even if the product title field differs
-        try:
-            return getattr(self.product, "title_en", None) or getattr(self.product, "title", None) or str(self.product)
-        except Exception:
-            return "Product"
-
-    def __str__(self):
-        return f"{self.product_name} x {self.quantity}"
+        try: return getattr(self.product, "title_en", None) or str(self.product)
+        except Exception: return "Product"
+    def __str__(self): return f"{self.product_name} x {self.quantity}"
     
 #--------------Coupon code------------
 
@@ -599,30 +440,19 @@ DISCOUNT_TYPES = [("percent", "Percent"), ("fixed", "Fixed amount")]
 class Coupon(models.Model):
     code = models.CharField(max_length=32, unique=True, db_index=True)
     kind = models.CharField(max_length=10, choices=DISCOUNT_TYPES, default="percent")
-    value = models.DecimalField(max_digits=10, decimal_places=2)  # percent (e.g. 10) or fixed EUR
+    value = models.DecimalField(max_digits=10, decimal_places=2)
     active = models.BooleanField(default=True)
-
     starts_at = models.DateTimeField(null=True, blank=True)
     ends_at   = models.DateTimeField(null=True, blank=True)
-
     min_subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
-    max_uses = models.PositiveIntegerField(null=True, blank=True)          # across everyone
+    max_uses = models.PositiveIntegerField(null=True, blank=True)
     max_uses_per_user = models.PositiveIntegerField(null=True, blank=True)
-
-    # target filters (leave both empty = applies to all)
     products = models.ManyToManyField("Product", blank=True, related_name="coupons")
-    categories = ArrayField(models.CharField(max_length=30), default=list, blank=True)  # store category keys like "kitchen", "office"
-    # optional cap for percent coupons
+    categories = ArrayField(models.CharField(max_length=30), default=list, blank=True)
     max_discount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["-created_at", "code"]
-
-    def __str__(self):
-        return self.code.upper()
+    created_at = models.DateTimeField(auto_now_add=True); updated_at = models.DateTimeField(auto_now=True)
+    class Meta: ordering = ["-created_at","code"]
+    def __str__(self): return self.code.upper()
 
     # ---- helpers
     def is_time_ok(self, now=None):
@@ -720,54 +550,34 @@ class Coupon(models.Model):
 
 class CouponRedemption(models.Model):
     coupon = models.ForeignKey(Coupon, on_delete=models.CASCADE, related_name="redemptions")
-    user   = models.ForeignKey(User, on_delete=models.CASCADE, related_name="coupon_redemptions")
+    user   = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="coupon_redemptions")  # ← allow guest
     order  = models.OneToOneField("Order", on_delete=models.CASCADE, related_name="coupon_redemption")
     created_at = models.DateTimeField(auto_now_add=True)
-
     class Meta:
-        unique_together = (("coupon", "order"),)
-        indexes = [models.Index(fields=["coupon", "user"])]
+        unique_together = (("coupon","order"),)
+        indexes = [models.Index(fields=["coupon","user"])]
 
 #------------------------------Promotion----------------
 
 class Promotion(models.Model):
-    name = models.CharField(max_length=64)  # "Easter 2025", "Summer Sale", ...
-    coupon = models.ForeignKey("Coupon", null=True, blank=True,
-                               on_delete=models.SET_NULL, related_name="promotions")
-    code = models.CharField(max_length=32, blank=True, help_text="Optional manual code (used if coupon FK empty)")
-
-    headline = models.CharField(max_length=120)      # e.g. “Easter Sale”
-    subheadline = models.CharField(max_length=180, blank=True)  # “10% off everything”
+    name = models.CharField(max_length=64)
+    coupon = models.ForeignKey("Coupon", null=True, blank=True, on_delete=models.SET_NULL, related_name="promotions")
+    code = models.CharField(max_length=32, blank=True)
+    headline = models.CharField(max_length=120)
+    subheadline = models.CharField(max_length=180, blank=True)
     start_at = models.DateTimeField()
     end_at   = models.DateTimeField()
     is_enabled = models.BooleanField(default=True)
-
-    # Styling / placement
-    bg_color = models.CharField(max_length=16, default="#111827")   # hex
+    bg_color = models.CharField(max_length=16, default="#111827")
     text_color = models.CharField(max_length=16, default="#ffffff")
-    link_url = models.URLField(blank=True)                          # optional “Shop Now” link
+    link_url = models.URLField(blank=True)
     image = models.ImageField(upload_to="promos/", null=True, blank=True)
-
-    # Target markets (empty = all)
     country_whitelist = ArrayField(models.CharField(max_length=2), default=list, blank=True)
-    priority = models.IntegerField(default=0)  # higher wins when overlapping
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["-priority", "-updated_at"]
-
-    def __str__(self):
-        return self.name
-
-    def current_code(self) -> str:
-        return (self.coupon.code if self.coupon_id else (self.code or "")).upper()
-
-    def active_now(self, now=None) -> bool:
-        now = now or timezone.now()
-        return self.is_enabled and self.start_at <= now <= self.end_at
-
+    priority = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True); updated_at = models.DateTimeField(auto_now=True)
+    class Meta: ordering = ["-priority","-updated_at"]
+    def __str__(self): return self.name
+    
 # ----------Order Returns ----------
 class ReturnRequest(models.Model):
     REQUEST_TYPES = (("cancel","Cancel"), ("return","Return"))
@@ -792,27 +602,22 @@ class ReturnAttachment(models.Model):
 
 
 
-# ✅ NEW: Invoice model to store PDF path
+# ---------- invoices ----------
 class Invoice(models.Model):
     order = models.OneToOneField("Order", on_delete=models.CASCADE, related_name="invoice")
     number = models.CharField(max_length=32, unique=True)
     pdf = models.FileField(upload_to="invoices/")
     created_at = models.DateTimeField(auto_now_add=True)
+    def __str__(self): return self.number
 
-    def __str__(self):
-        return self.number
-
+# ---------- reviews ----------
 class Review(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="reviews")
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="reviews")  # <- ensure this
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="reviews")
     rating = models.PositiveIntegerField()
     message = models.TextField()
     image = models.ImageField(upload_to="review_images/", blank=True, null=True)
-    # NEW (admin can override author display)
     author_name = models.CharField(max_length=100, blank=True, default="")
     author_avatar = models.ImageField(upload_to="review_avatars/", blank=True, null=True)
-
     created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"{self.user} on {self.product} ({self.rating})"
+    def __str__(self): return f"{self.user} on {self.product} ({self.rating})"

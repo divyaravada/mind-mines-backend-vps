@@ -1,50 +1,94 @@
 # server/admin.py
 from django.contrib import admin
-from django.utils.html import format_html_join, format_html
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
+from django.utils.html import format_html, format_html_join
+from django.conf import settings
+
 from .models import (
-    Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage,
-    StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber,Coupon,StockAlert,
-    Address, Order, Review,OrderItem, Invoice,ReturnRequest,ReturnAttachment,Promotion
+    Address,
+    ContactMessage,
+    Coupon,
+    Invoice,
+    NaturalStone,
+    NaturalStoneImage,
+    Order,
+    OrderItem,
+    Product,
+    ProductMedia,
+    Profile,
+    Promotion,
+    ReturnAttachment,
+    ReturnRequest,
+    Review,
+    StockAlert,
+    StoneEnquiry,
+    User,
+    Wishlist,
+    NewsletterSubscriber
 )
-from .utils.invoices import generate_invoice_pdf 
+from .utils.invoices import generate_invoice_pdf
 from .utils.emails import (
-    send_invoice_email, send_shipping_update, send_cancellation_email
+    send_cancellation_email,
+    send_invoice_email,
+    send_shipping_update,
 )
 from .utils.background import fire_and_forget
-from .tasks import post_payment_pipeline
+from .tasks import post_payment_pipeline, send_user_birthday_coupon
 
- # ----- bulk actions -----
-def mark_paid(self, request, queryset):
-        n = 0
-        for order in queryset:
-            if order.status != "paid":
-                order.status = "paid"
-                order.save(update_fields=["status"])
-                fire_and_forget(post_payment_pipeline, order.id)
-                # ensure invoice then email
-                if not hasattr(order, "invoice") or not order.invoice.pdf:
-                    generate_invoice_pdf(order)
-                send_invoice_email(order)
-                n += 1
-        self.message_user(request, f"Marked {n} order(s) as paid and sent invoice.")
-mark_paid.short_description = "Mark selected orders as PAID (+ send invoice)"
 
-def mark_shipped(self, request, queryset):
-        n = queryset.update(status="shipped")
-        for order in queryset:
-            send_shipping_update(order)
-        self.message_user(request, f"Marked {n} order(s) as shipped and sent shipping email.")
-mark_shipped.short_description = "Mark selected orders as SHIPPED (+ send email)"
+# ---------- Admin actions ----------
+@admin.action(description="Mark selected orders as PAID (+ send invoice)")
+def mark_paid(modeladmin, request, queryset):
+    n = 0
+    for order in queryset:
+        if order.status != "paid":
+            order.status = "paid"
+            order.save(update_fields=["status"])
+            fire_and_forget(post_payment_pipeline, order.id)
+            if not getattr(order, "invoice", None) or not getattr(order.invoice, "pdf", None):
+                generate_invoice_pdf(order)
+            send_invoice_email(order)
+            n += 1
+    modeladmin.message_user(request, f"Marked {n} order(s) as paid and sent invoice.")
 
-def mark_cancelled(self, request, queryset):
+
+@admin.action(description="Mark selected orders as SHIPPED (+ email)")
+def mark_shipped(modeladmin, request, queryset):
+    n = queryset.update(status="shipped")
+    for order in queryset:
+        send_shipping_update(order, tracking=getattr(order, "tracking_number", ""))
+    modeladmin.message_user(request, f"Marked {n} order(s) as shipped and sent shipping email.")
+
+
+@admin.action(description="Cancel selected orders (+ notify customer)")
+def mark_cancelled(modeladmin, request, queryset):
     n = queryset.update(status="cancelled")
     for order in queryset:
         send_cancellation_email(order)
-    self.message_user(request, f"Cancelled {n} order(s) and notified customers.")
-mark_cancelled.short_description = "Cancel selected orders (+ notify customer)"
+    modeladmin.message_user(request, f"Cancelled {n} order(s) and notified customers.")
+
 
 # ---------- User & Profile ----------
+@admin.register(Profile)
+class ProfileAdmin(admin.ModelAdmin):
+    list_display = ["user", "full_name", "date_of_birth"]  
+    list_filter = ["date_of_birth"]
+# --- UserAdmin: add action to send birthday coupon ---
+def admin_send_birthday_coupon(modeladmin, request, queryset):
+    """
+    Sends a coupon email to selected users (uses a fixed code).
+    """
+    coupon_code = getattr(settings, "BIRTHDAY_COUPON_CODE", "").strip()
+    if not coupon_code:
+        modeladmin.message_user(request, "No BIRTHDAY_COUPON_CODE set in settings.", level="error")
+        return
+    n = 0
+    for user in queryset:
+        send_user_birthday_coupon(user.id, coupon_code)
+        n += 1
+    modeladmin.message_user(request, f"Sent birthday coupon to {n} user(s).")
+
+admin_send_birthday_coupon.short_description = "Send birthday coupon to selected users"
 
 @admin.register(User)
 class CustomUserAdmin(DjangoUserAdmin):
@@ -63,39 +107,21 @@ class CustomUserAdmin(DjangoUserAdmin):
         }),
     )
     search_fields = ("email", "username")
-
-@admin.register(Profile)
-class ProfileAdmin(admin.ModelAdmin):
-    list_display = ["user", "full_name"]
+    actions = [admin_send_birthday_coupon]
 
 # ---------- Invoice ----------
+
 @admin.register(Invoice)
 class InvoiceAdmin(admin.ModelAdmin):
     list_display = ("number", "order", "created_at")
     search_fields = ("number", "order__number", "order__user__email")
 
-@admin.action(description="Mark selected orders as paid and generate invoice")
-def mark_paid_and_invoice(modeladmin, request, queryset):
-    for order in queryset:
-        if order.status != "paid":
-            order.status = "paid"
-            order.save(update_fields=["status"])
-            inv = generate_invoice_pdf(order)
-            send_invoice_email(order)
-
-@admin.action(description="Set DHL tracking and email invoice")
-def set_tracking_and_send(modeladmin, request, queryset):
-    for order in queryset:
-        if not order.tracking_number:
-            # set tracking manually in the change view or here
-            continue
-        inv = generate_invoice_pdf(order)
-        send_invoice_email(order)
-        
+# ---------- Coupons & Promotions ----------  
+#      
 @admin.register(Coupon)
 class CouponAdmin(admin.ModelAdmin):
-    list_display = ("code","kind","value","active","starts_at","ends_at","min_subtotal")
-    list_filter  = ("active","kind")
+    list_display = ("code", "kind", "value", "active", "starts_at", "ends_at", "min_subtotal")
+    list_filter = ("active", "kind")
     search_fields = ("code",)
     filter_horizontal = ("products",)
 
@@ -114,7 +140,7 @@ class PromotionAdmin(admin.ModelAdmin):
 class OrderItemInline(admin.TabularInline):
     """Show OrderItem rows (FK to Order)."""
     model = OrderItem
-    fk_name = "order"          # clarify the FK field
+    fk_name = "order"
     extra = 0
     can_delete = False
     readonly_fields = ("item_name", "quantity", "unit_price_fmt", "line_total_fmt")
@@ -125,7 +151,6 @@ class OrderItemInline(admin.TabularInline):
     def has_add_permission(self, request, obj=None):
         return False
 
-    # Readonly display helpers
     def item_name(self, obj):
         return obj.product_name
     item_name.short_description = "Item"
@@ -147,7 +172,7 @@ class OrderAdmin(admin.ModelAdmin):
     list_display = ("number", "user", "status", "total_price", "created_at")
     list_filter = ("status", "created_at")
     search_fields = ("number", "user__email")
-    actions = [mark_paid_and_invoice]
+    actions = [mark_paid, mark_shipped, mark_cancelled]
     readonly_fields = (
         "number", "subtotal", "shipping_fee", "total_price",
         "payment_ref", "payment_id", "created_at", "updated_at",
@@ -170,9 +195,10 @@ class OrderAdmin(admin.ModelAdmin):
             for oi in obj.items.all()
         ]
         return format_html(
-            "<table style='width:100%'><tr><th align='left'>Item</th>"
+            "<table style='width:100%'>"
+            "<tr><th align='left'>Item</th>"
             "<th align='right'>Unit</th><th align='right'>Total</th></tr>{}</table>",
-            format_html_join("", "<tr><td>{}</td><td align='right'>{}</td><td align='right'>{}</td></tr>", rows)
+            format_html_join("", "<tr><td>{}</td><td align='right'>{}</td><td align='right'>{}</td></tr>", rows),
         )
     items_readonly.short_description = "Items"
 
@@ -197,11 +223,8 @@ class ReturnRequestAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
     inlines = [ReturnAttachmentInline]
 
-class ReturnRequestAdmin(admin.ModelAdmin):
-    list_display = ("id", "order", "user", "kind", "status", "created_at")  # ok now
-    list_filter  = ("request_type", "status", "created_at")
+# ---------- Catalog ----------
 
-# ---------- Product & Media ----------
 class NaturalStoneImageInline(admin.TabularInline):
     model = NaturalStoneImage
     extra = 1
@@ -210,20 +233,27 @@ class NaturalStoneImageInline(admin.TabularInline):
     verbose_name = "Additional Image"
     verbose_name_plural = "Upload up to 10 images"
 
+
 class ProductMediaInline(admin.TabularInline):
     model = ProductMedia
     extra = 1
     fields = ["image", "video", "caption", "order", "media_type"]
 
+
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
     inlines = [ProductMediaInline]
     list_display = ["title_en", "category", "price", "quantity"]
+    search_fields = ("title_en", "title_de")
+
 
 @admin.register(NaturalStone)
 class NaturalStoneAdmin(admin.ModelAdmin):
     list_display = ["type"]
     inlines = [NaturalStoneImageInline]
+
+
+# ---------- Misc ----------
 
 @admin.register(Address)
 class AddressAdmin(admin.ModelAdmin):
@@ -236,18 +266,20 @@ class AddressAdmin(admin.ModelAdmin):
         "user__email", "first_name", "last_name", "full_name",
         "address_line1", "street_name", "postal_code", "city",
     )
-    actions = ["make_default"]
 
+    @admin.action(description="Set selected as default")
     def make_default(self, request, queryset):
         for addr in queryset:
             addr.set_default_for_user()
         self.message_user(request, f"Set {queryset.count()} address(es) as default.")
-        
+
+
 @admin.register(StockAlert)
 class StockAlertAdmin(admin.ModelAdmin):
     list_display = ("product", "email", "is_active", "created_at", "notified_at")
     list_filter = ("is_active", "created_at", "notified_at")
     search_fields = ("email", "product__title_en", "product__title_de")
+
 
 admin.site.register(NaturalStoneImage)
 admin.site.register(ContactMessage)
