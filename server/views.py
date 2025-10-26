@@ -27,6 +27,9 @@ from google.auth.transport.requests import Request as GoogleRequest
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
+from django.utils.dateparse import parse_date
+from django.utils.timezone import make_aware
+from datetime import timedelta
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -43,7 +46,7 @@ from .serializers import (
     StoneEnquirySerializer, AccountSerializer, OrderCreateSerializer, OrderReadSerializer,
 )
 from .models import (
-    User, Product, ContactMessage, NewsletterSubscriber, Promotion, StockAlert,
+    User, Product, ContactMessage, NewsletterSubscriber, Promotion, StockAlert, Coupon,
     Address, Order, Review, Wishlist, NaturalStone, NaturalStoneImage, ReturnRequest, ReturnAttachment
 )
 from .utils.invoices import generate_invoice_pdf
@@ -52,7 +55,7 @@ from .tasks import post_payment_pipeline
 from .utils.emails import (
     send_stock_alert_email, send_installments_started_email, send_return_request_emails,
     send_cancel_request_emails, send_order_confirmation, send_bank_transfer_instructions,
-    send_invoice_email, send_sepa_pending_email
+    send_invoice_email, send_sepa_pending_email,_send_bilingual
 )
 
 import logging
@@ -1784,3 +1787,170 @@ class StockAlertUnsubscribeView(generics.DestroyAPIView):
             alert.is_active = False
             alert.save(update_fields=["is_active"])
         return Response(status=204)
+    
+#------------Birthday coupon
+class SendBirthdayCouponAPIView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        # --- Parse inputs ---
+        in_date = request.data.get("date")
+        dry_run = str(request.data.get("dry_run", "false")).lower() in ("1", "true", "yes")
+        percent = int(request.data.get("percent") or getattr(settings, "BIRTHDAY_COUPON_PERCENT", 10))
+        valid_days = int(request.data.get("valid_days") or getattr(settings, "BIRTHDAY_COUPON_VALID_DAYS", 14))
+
+        # Determine target date (server timezone)
+        if in_date:
+            d = parse_date(in_date)
+            if not d:
+                return Response({"detail": "Invalid date format. Use YYYY-MM-DD."}, status=400)
+            # make an aware datetime at midnight to format code MMDD consistently
+            run_dt = make_aware(datetime(d.year, d.month, d.day))
+        else:
+            run_dt = timezone.now()
+
+        mmdd = run_dt.strftime("%m%d")
+        starts_at = run_dt
+        ends_at = run_dt + timedelta(days=valid_days)
+
+        # --- Find matching users ---
+        User = get_user_model()
+        candidates = []
+        # Load profiles and try multiple common birthday field names
+        profile_field_names = ["birth_date", "birthday", "dob"]
+
+        # We’ll query broadly then filter in Python so we support any field name that exists
+        # and gracefully ignore those that don't.
+        # If you know the exact field name, you can optimize with ORM filters.
+        qs = User.objects.select_related("profile").filter(is_active=True)
+
+        for u in qs:
+            email = (getattr(u, "email", "") or "").strip()
+            prof = getattr(u, "profile", None)
+            if not (email and prof):
+                continue
+            bday = None
+            for fname in profile_field_names:
+                if hasattr(prof, fname):
+                    bday = getattr(prof, fname)
+                    break
+            # bday must be a date/datetime-like with month/day
+            try:
+                if bday and getattr(bday, "month", None) and getattr(bday, "day", None):
+                    if bday.month == run_dt.month and bday.day == run_dt.day:
+                        candidates.append(u)
+            except Exception:
+                continue
+
+        # Nothing to do?
+        if not candidates:
+            return Response({"ok": True, "count": 0, "recipients": [], "dry_run": dry_run})
+
+        # --- Build/Send ---
+        created = 0
+        reused = 0
+        emailed = 0
+        errors = []
+
+        recipients = [{"id": u.id, "email": u.email} for u in candidates]
+
+        if dry_run:
+            return Response({
+                "ok": True,
+                "dry_run": True,
+                "count": len(recipients),
+                "recipients": recipients,
+                "defaults": {"percent": percent, "valid_days": valid_days, "window": [starts_at.isoformat(), ends_at.isoformat()]},
+            })
+
+        # Helper: create or reuse the per-user coupon code
+        def ensure_coupon_for_user(user):
+            """
+            Create or reuse a unique coupon code for this user.
+            Returns (coupon_obj, created_bool)
+            """
+            code = f"BD{mmdd}-{user.id}"
+            coup = Coupon.objects.filter(code=code).first()
+            if coup:
+                return coup, False
+            coup = Coupon.objects.create(
+                code=code,
+                kind="percent",      # assumes your Coupon model supports this; change to "fixed" if needed
+                value=percent,
+                active=True,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                min_subtotal=None,
+            )
+            return coup, True
+
+        # Helper: email user (bilingual). Try template; fall back to inline bilingual.
+        def email_user(user, coupon):
+            to = (user.email or "").strip()
+            if not to:
+                return False
+
+            # Try a custom template if you add one later:
+            # templates/emails/birthday_coupon.html / .txt
+            ctx = {
+                "user": user,
+                "coupon_code": coupon.code,
+                "percent": percent,
+                "valid_until": ends_at.date().isoformat(),
+                "shop_url": getattr(settings, "FRONTEND_URL", "https://mindmines.eu"),
+            }
+
+            # Prefer a single bilingual subject line
+            subj = f"Happy Birthday! {percent}% off / Alles Gute! {percent}% Rabatt"
+
+            try:
+                html = render_to_string("emails/birthday_coupon.html", ctx)
+                text = render_to_string("emails/birthday_coupon.txt", ctx)
+                msg = EmailMultiAlternatives(
+                    subject=subj,
+                    body=text,
+                    from_email=getattr(settings, "EMAIL_HOST_USER", settings.DEFAULT_FROM_EMAIL),
+                    to=[to],
+                )
+                msg.attach_alternative(html, "text/html")
+                msg.send(fail_silently=not settings.DEBUG)
+                return True
+            except TemplateDoesNotExist:
+                # Fallback bilingual body
+                en = (
+                    f"<p>🎉 Happy Birthday! Use code <b>{coupon.code}</b> for <b>{percent}% off</b>.</p>"
+                    f"<p>Valid until <b>{ends_at.date().isoformat()}</b>. Enjoy shopping!</p>"
+                )
+                de = (
+                    f"<p>🎉 Alles Gute zum Geburtstag! Verwenden Sie den Code <b>{coupon.code}</b> "
+                    f"für <b>{percent}% Rabatt</b>.</p>"
+                    f"<p>Gültig bis <b>{ends_at.date().isoformat()}</b>. Viel Spaß beim Einkaufen!</p>"
+                )
+                _send_bilingual(subj, to, en, de)
+                return True
+            except Exception as e:
+                errors.append({"user": user.id, "email": to, "error": str(e)})
+                return False
+
+        # Execute
+        for u in candidates:
+            try:
+                coup, was_created = ensure_coupon_for_user(u)
+                created += 1 if was_created else 0
+                reused += 0 if was_created else 1
+                if email_user(u, coup):
+                    emailed += 1
+            except Exception as e:
+                errors.append({"user": u.id, "email": u.email, "error": str(e)})
+
+        return Response({
+            "ok": True,
+            "count": len(candidates),
+            "created": created,
+            "reused": reused,
+            "emailed": emailed,
+            "errors": errors,
+            "window": {"starts_at": starts_at.isoformat(), "ends_at": ends_at.isoformat()},
+            "percent": percent,
+            "valid_days": valid_days,
+        }, status=200)
