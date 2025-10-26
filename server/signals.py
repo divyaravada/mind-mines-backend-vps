@@ -101,8 +101,7 @@ def _notify_restock(sender, instance: Product, created, **kwargs):
 
 def _build_unsub_url(alert: StockAlert) -> str:
     base = getattr(settings, "FRONTEND_URL", "").rstrip("/")
-    api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
-    return f"{base}{api_base}/stock-alerts/unsubscribe/{alert.unsubscribe_token}/"
+    return f"{base}/unsubscribe/{alert.unsubscribe_token}/"
 
 def connect_signals():
     """
@@ -136,3 +135,6 @@ def connect_signals():
         _notify_restock, sender=Product,
         dispatch_uid="server_product_notify_restock"
     )
+    
+
+
