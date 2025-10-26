@@ -1,0 +1,74 @@
+<!DOCTYPE html><meta charset="utf-8" />
+<div
+  style="
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    max-width: 640px;
+    margin: auto;
+    padding: 16px;
+  "
+>
+  <h2 style="margin: 0 0 8px">
+    Danke für deine Bestellung {{ order.number }}!
+  </h2>
+  <p style="margin: 0 0 16px">
+    Wir bereiten deine Artikel vor. Hier ist deine Übersicht:
+  </p>
+
+  <table
+    width="100%"
+    cellpadding="0"
+    cellspacing="0"
+    style="border-collapse: collapse; margin: 12px 0"
+  >
+    <thead>
+      <tr>
+        <th align="left" style="border-bottom: 1px solid #eee; padding: 8px 0">
+          Artikel
+        </th>
+        <th align="right" style="border-bottom: 1px solid #eee; padding: 8px 0">
+          Menge
+        </th>
+        <th align="right" style="border-bottom: 1px solid #eee; padding: 8px 0">
+          Summe
+        </th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for it in items %}
+      <tr>
+        <td style="padding: 8px 0">{{ it.name }}</td>
+        <td align="right" style="padding: 8px 0">{{ it.qty }}</td>
+        <td align="right" style="padding: 8px 0">{{ it.total_display }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <table width="100%" style="margin: 8px 0 16px">
+    <tr>
+      <td>Zwischensumme</td>
+      <td align="right">{{ totals.subtotal_display }}</td>
+    </tr>
+    <tr>
+      <td>Versand</td>
+      <td align="right">{{ totals.shipping_display }}</td>
+    </tr>
+    <tr>
+      <td><strong>Summe</strong></td>
+      <td align="right"><strong>{{ totals.total_display }}</strong></td>
+    </tr>
+  </table>
+
+  <h3 style="margin: 16px 0 8px">Rechnungs- / Lieferadresse</h3>
+  <p style="margin: 0 0 16px">
+    {{ address.full_name }}<br />
+    {{ address.street_name }} {{ address.house_number }} {{ address.apartment
+    }}<br />
+    {{ address.postal_code }} {{ address.city }}, {{ address.country }}<br />
+    {{ address.phone }}
+  </p>
+
+  <p style="color: #666; font-size: 13px">
+    Deine Rechnung im PDF-Format ist an diese E-Mail angehängt.
+  </p>
+</div>

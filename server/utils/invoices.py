@@ -1,16 +1,15 @@
 # server/utils/invoices.py
 from io import BytesIO
 from decimal import Decimal
-
-from django.contrib.staticfiles import finders
 from django.core.files.base import ContentFile
+from django.contrib.staticfiles import finders
 from django.utils.timezone import localtime
 
-from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
 from reportlab.lib.units import mm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet
 
 from pdfrw import PdfReader, PdfWriter, PageMerge
 
@@ -190,17 +189,12 @@ def generate_invoice_pdf(order):
     static/pdf/Mindmines template.pdf when available.
     """
     # Reuse if already generated
-    if hasattr(order, "invoice") and order.invoice and order.invoice.pdf:
-        return order.invoice
+    inv = getattr(order, "invoice", None)
+    if inv and inv.pdf:
+        return inv
 
     # Ensure invoice number
-    if not getattr(order, "invoice_number", None):
-        try:
-            order.assign_unique_invoice_number()
-        except AttributeError:
-            # fallback
-            order.invoice_number = f"INV{order.pk:08d}"
-            order.save(update_fields=["invoice_number"])
+    order.assign_unique_invoice_number()
     number = order.invoice_number
 
     # Build content
@@ -213,8 +207,6 @@ def generate_invoice_pdf(order):
         try:
             tpl = PdfReader(template_path)
             overlay_reader = PdfReader(BytesIO(content_bytes))
-
-            # Merge first page (single-page invoice)
             base_page = tpl.pages[0]
             overlay_page = overlay_reader.pages[0]
             PageMerge(base_page).add(overlay_page).render()
@@ -225,16 +217,14 @@ def generate_invoice_pdf(order):
             writer.write(out)
             pdf_bytes = out.getvalue()
         except Exception:
-            # If anything goes wrong, fall back to plain content
             pdf_bytes = content_bytes
 
     # Save to FileField via Invoice model
-    invoice = getattr(order, "invoice", None) or Invoice(order=order, number=number)
+    invoice = inv or Invoice(order=order, number=number)
     invoice.pdf.save(f"{number}.pdf", ContentFile(pdf_bytes), save=True)
 
     # Mirror number on order if needed
     if order.invoice_number != number:
-        order.invoice_number = number
-        order.save(update_fields=["invoice_number"])
+        type(order).objects.filter(pk=order.pk).update(invoice_number=number)
 
     return invoice

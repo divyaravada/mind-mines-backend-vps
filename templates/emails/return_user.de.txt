@@ -1,0 +1,11 @@
+Wir haben deine Rücksendeanfrage für Bestellung {{ order.number }} erhalten.
+
+Eingereicht: {{ created_at_display }}
+Bestelldatum: {{ order_created_at_display }}
+Gesamt: {{ order_total_display }}
+
+Deine Nachricht:
+{{ message|default:"(keine Nachricht)" }}
+
+Du kannst die Anfrage in deinem Konto verfolgen:
+{{ orders_url }}

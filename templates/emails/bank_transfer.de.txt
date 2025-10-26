@@ -1,0 +1,13 @@
+Vielen Dank für deine Bestellung {{ order.number }}
+
+Betrag: {{ amount_display }}
+Verwendungszweck: {{ reference }}
+IBAN: {{ iban }}
+BIC: {{ bic }}
+Empfänger: {{ bank.account_name }}
+
+Artikel:
+{{ items_text }}
+
+Wir senden deine Rechnung automatisch, sobald die Zahlung eingegangen ist.
+Bestellungen ansehen: {{ orders_url }}

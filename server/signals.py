@@ -1,31 +1,26 @@
 # server/signals.py
 from __future__ import annotations
-
-from django.conf import settings
-from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save, pre_save
+from django.contrib.auth import get_user_model
 from django.dispatch import receiver
+from django.conf import settings
 from django.utils import timezone
 
-from .models import Order, Product, StockAlert
-from .utils.emails import (
-    send_invoice_email,
-    send_order_confirmation,
-    send_stock_alert_email,
-)
+from .models import Order, Product, StockAlert, Profile
 from .utils.invoices import generate_invoice_pdf
+from .utils.emails import (
+    send_invoice_email, send_order_confirmation, send_stock_alert_email
+)
 
-# ---------- User profile hook ----------
 
+# -------- User Profile --------
 def create_or_update_user_profile(sender, instance, created, **kwargs):
-    from .models import Profile  # local import to avoid early app-registry issues
     if created:
         Profile.objects.create(user=instance)
     else:
         Profile.objects.get_or_create(user=instance)
 
-# ---------- Order status helpers ----------
-
+# -------- Order lifecycle helpers --------
 def remember_old_status(sender, instance, **kwargs):
     if not instance.pk:
         instance._old_status = None
@@ -37,14 +32,11 @@ def remember_old_status(sender, instance, **kwargs):
         instance._old_status = None
 
 def on_paid_generate_and_mail(sender, instance, created, **kwargs):
-    """
-    If an Order transitions to `paid`, generate invoice and send emails.
-    Keep this idempotent and light — heavy work happens in views/webhooks/tasks.
-    """
     became_paid = instance.status == "paid" and getattr(instance, "_old_status", None) != "paid"
     if not became_paid:
         return
 
+    # Invoice + emails
     generate_invoice_pdf(instance)
     try:
         send_invoice_email(instance)
@@ -59,27 +51,28 @@ def on_paid_generate_and_mail(sender, instance, created, **kwargs):
 @receiver(post_save, sender=Order)
 def ensure_order_number(sender, instance: Order, created, **kwargs):
     """
-    Ensure an order number exists right after creation.
+    Ensure an order number exists upon creation.
     """
-    if created and not getattr(instance, "number", None):
+    if created:
         try:
-            instance.assign_unique_order_number()
-        except AttributeError:
-            instance.number = f"MM{instance.pk:08d}"
-        instance.save(update_fields=["number"])
+            # Your model uses ensure_number(); call it
+            instance.ensure_number()
+        except Exception:
+            if not instance.number:
+                instance.number = f"MM{instance.pk:08d}"
+                instance.save(update_fields=["number"])
 
 def stamp_status_times(sender, instance, created, **kwargs):
     old = getattr(instance, "_old_status", None)
     updates = {}
-    if hasattr(instance, "delivered_at") and instance.status == "delivered" and old != "delivered" and not getattr(instance, "delivered_at", None):
+    if instance.status == "delivered" and old != "delivered" and not getattr(instance, "delivered_at", None):
         updates["delivered_at"] = timezone.now()
-    if hasattr(instance, "cancelled_at") and instance.status == "cancelled" and old != "cancelled" and not getattr(instance, "cancelled_at", None):
+    if instance.status == "cancelled" and old != "cancelled" and not getattr(instance, "cancelled_at", None):
         updates["cancelled_at"] = timezone.now()
     if updates:
         type(instance).objects.filter(pk=instance.pk).update(**updates)
 
-# ---------- Product restock notifications ----------
-
+# -------- Product stock alerts --------
 @receiver(pre_save, sender=Product)
 def _stash_old_qty(sender, instance: Product, **kwargs):
     if instance.pk:
@@ -97,8 +90,7 @@ def _notify_restock(sender, instance: Product, created, **kwargs):
         old_qty = getattr(instance, "_old_qty", None)
         new_qty = int(getattr(instance, "quantity", 0) or 0)
         if old_qty is None:
-            # New product; skip.
-            return
+            return  # fresh product; skip initial notification
         if (old_qty <= 0) and (new_qty > 0):
             alerts = StockAlert.objects.filter(product=instance, is_active=True).order_by("created_at")
             for alert in alerts:
@@ -106,19 +98,16 @@ def _notify_restock(sender, instance: Product, created, **kwargs):
                 try:
                     send_stock_alert_email(instance, alert.email, unsub)
                 except Exception:
-                    # keep active if email failed
                     continue
                 alert.mark_notified()
     except Exception:
-        # never crash the saving request
+        # never crash request due to email issues
         pass
-
 
 def _build_unsub_url(alert: StockAlert) -> str:
     base = getattr(settings, "FRONTEND_URL", "").rstrip("/")
     api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
     return f"{base}{api_base}/stock-alerts/unsubscribe/{alert.unsubscribe_token}/"
-
 
 def connect_signals():
     """
@@ -152,5 +141,3 @@ def connect_signals():
         _notify_restock, sender=Product,
         dispatch_uid="server_product_notify_restock"
     )
-connect_signals()
-

@@ -1,0 +1,139 @@
+{% load tz %}
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="color-scheme" content="light only" />
+    <meta name="supported-color-schemes" content="light only" />
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Deine Rechnung</title>
+  </head>
+  <body style="margin: 0; padding: 0; background: #f6f7fb">
+    <table
+      role="presentation"
+      width="100%"
+      cellspacing="0"
+      cellpadding="0"
+      style="background: #f6f7fb"
+    >
+      <tr>
+        <td align="center" style="padding: 28px 12px">
+          <table
+            role="presentation"
+            width="600"
+            cellspacing="0"
+            cellpadding="0"
+            style="
+              width: 600px;
+              background: #fff;
+              border-radius: 12px;
+              overflow: hidden;
+              box-shadow: 0 6px 18px rgba(20, 20, 20, 0.06);
+            "
+          >
+            <tr>
+              <td style="background: #16150f; padding: 18px 24px">
+                {% if logo_cid %}
+                <img
+                  src="cid:{{ logo_cid }}"
+                  width="80"
+                  alt="MindMines"
+                  style="display: block"
+                />
+                {% endif %}
+              </td>
+            </tr>
+
+            <tr>
+              <td style="font-family: Inter, Arial; padding: 28px">
+                <h1 style="margin: 0 0 6px; font-size: 22px">
+                  Zahlung eingegangen — vielen Dank!
+                </h1>
+                <p
+                  style="
+                    margin: 0 0 14px;
+                    color: #444;
+                    font-size: 14px;
+                    line-height: 1.6;
+                  "
+                >
+                  Deine Rechnung <strong>{{ order.invoice.number }}</strong> zur
+                  Bestellung <strong>{{ order.number }}</strong> befindet sich
+                  im Anhang.
+                </p>
+
+                <table
+                  role="presentation"
+                  cellspacing="0"
+                  cellpadding="0"
+                  style="
+                    border: 1px solid #eee;
+                    border-radius: 10px;
+                    width: 100%;
+                    margin: 8px 0 16px;
+                  "
+                >
+                  <tr>
+                    <td
+                      style="
+                        padding: 12px 16px;
+                        font-family: Inter, Arial;
+                        font-size: 14px;
+                      "
+                    >
+                      <div><strong>Gezahlt:</strong> {{ total_display }}</div>
+                      <div>
+                        <strong>Datum:</strong> {{ created_at_display }}
+                      </div>
+                      <div>
+                        <strong>Zahlungsmethode:</strong> {{
+                        payment_method_display }}
+                      </div>
+                    </td>
+                  </tr>
+                </table>
+
+                <p style="margin: 0 0 18px; color: #666; font-size: 13px">
+                  Du kannst die Rechnung jederzeit in deinem Konto
+                  herunterladen.
+                </p>
+
+                <p style="margin: 0">
+                  <a
+                    href="{{ orders_url }}"
+                    target="_blank"
+                    style="
+                      background: #0b0b0b;
+                      color: #fff;
+                      text-decoration: none;
+                      padding: 12px 20px;
+                      border-radius: 8px;
+                      display: inline-block;
+                      font-weight: 600;
+                      font-size: 14px;
+                    "
+                  >
+                    Zu deinen Bestellungen
+                  </a>
+                </p>
+              </td>
+            </tr>
+
+            <tr>
+              <td
+                align="center"
+                style="
+                  padding: 0 0 26px;
+                  font-family: Inter, Arial;
+                  color: #9aa;
+                  font-size: 12px;
+                "
+              >
+                © {% now "Y" %} MindMines — Alle Rechte vorbehalten
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

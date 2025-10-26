@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+  <body style="font-family: Arial, sans-serif">
+    <div
+      style="
+        max-width: 600px;
+        margin: auto;
+        background: #fff;
+        border: 1px solid #eee;
+        border-radius: 10px;
+        overflow: hidden;
+      "
+    >
+      <div style="background: #16150f; padding: 16px">
+        {% if logo_cid %}<img
+          src="cid:{{ logo_cid }}"
+          alt="Logo"
+          width="80"
+          style="display: block"
+        />{% endif %}
+      </div>
+      <div style="padding: 24px">
+        <h2 style="margin: 0 0 10px">
+          Wir haben deine Rücksendeanfrage erhalten
+        </h2>
+        <p style="margin: 0 0 12px">
+          Bestellung <strong>{{ order.number }}</strong>
+        </p>
+        <p style="margin: 0 0 12px">
+          Eingereicht: {{ created_at_display }}<br />
+          Bestelldatum: {{ order_created_at_display }}<br />
+          Gesamt: {{ order_total_display }}
+        </p>
+        <p style="margin: 0 0 6px"><strong>Deine Nachricht</strong></p>
+        <p style="white-space: pre-wrap; margin: 0 0 16px">
+          {{ message|default:"(keine Nachricht)" }}
+        </p>
+        <p>
+          <a
+            href="{{ orders_url }}"
+            target="_blank"
+            style="
+              background: #000;
+              color: #fff;
+              text-decoration: none;
+              padding: 10px 16px;
+              border-radius: 6px;
+              display: inline-block;
+            "
+          >
+            Bestellungen ansehen
+          </a>
+        </p>
+      </div>
+      <div
+        style="text-align: center; color: #9aa; padding: 12px; font-size: 12px"
+      >
+        © {{ now|date:"Y" }} {{ SITE_NAME|default:"MindMines" }}
+      </div>
+    </div>
+  </body>
+</html>

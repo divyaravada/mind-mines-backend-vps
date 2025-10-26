@@ -1,0 +1,8 @@
+Wir haben deine Stornierungsanfrage erhalten
+
+Bestellung: {{ order.number }}
+Aufgegeben am: {{ created_at_display }}
+Gesamt: {{ total_display }}
+Begründung: {{ message|default:"—" }}
+
+Du kannst den Fortschritt hier verfolgen: {{ orders_url }}

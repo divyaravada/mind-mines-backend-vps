@@ -1,0 +1,4 @@
+Zahlung eingegangen — vielen Dank!
+
+Deine Rechnung {{ order.invoice.number }} zur Bestellung {{ order.number }} befindet sich im Anhang.
+Du kannst sie auch jederzeit in deinem Konto herunterladen: {{ orders_url }}

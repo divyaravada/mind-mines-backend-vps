@@ -1,0 +1,18 @@
+Danke für deine Bestellung {{ order.number }}!
+
+Bestellübersicht:
+{% for it in items %}
+- {{ it.name }} × {{ it.qty }} — {{ it.total_display }}
+{% endfor %}
+
+Zwischensumme: {{ totals.subtotal_display }}
+Versand: {{ totals.shipping_display }}
+Summe: {{ totals.total_display }}
+
+Rechnungs- / Lieferadresse:
+{{ address.full_name }}
+{{ address.street_name }} {{ address.house_number }} {{ address.apartment }}
+{{ address.postal_code }} {{ address.city }}, {{ address.country }}
+{{ address.phone }}
+
+Deine Rechnung ist als PDF angehängt.
