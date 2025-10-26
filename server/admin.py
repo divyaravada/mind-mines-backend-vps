@@ -196,10 +196,72 @@ class ProductMediaInline(admin.TabularInline):
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
     inlines = [ProductMediaInline]
-    list_display = ["title_en", "category", "price", "quantity", "stock"]
-    search_fields = ["title_en", "title_de", "key"]
-    list_filter = ["category", "material", "color"]
 
+    list_display = [
+        "title_display",
+        "category_display",
+        "price_display",   # was 'price'
+        "stock_display",   # was 'stock' or 'quantity'
+        "is_active_display",
+    ]
+    search_fields = ["title_en", "title_de"]
+    list_filter = ["category"]
+
+    # ---- Display helpers ----
+    def title_display(self, obj):
+        return getattr(obj, "title_en", None) or getattr(obj, "title", None) or str(obj)
+    title_display.short_description = "Title"
+
+    def category_display(self, obj):
+        # Adjust if you use FK with __str__ or a CharField
+        return getattr(obj, "category", "") or "-"
+    category_display.short_description = "Category"
+
+    def price_display(self, obj):
+        """
+        Try common price field names; fall back to a @property or method if present.
+        """
+        for attr in ("price", "price_gross", "price_net", "unit_price", "base_price"):
+            val = getattr(obj, attr, None)
+            if val is not None:
+                try:
+                    return f"{val:.2f} €"
+                except Exception:
+                    return str(val)
+        # Try a callable like vat_included_price()
+        vip = getattr(Product, "vat_included_price", None)
+        if callable(vip):
+            try:
+                val = vip(obj)
+                return f"{val:.2f} €"
+            except Exception:
+                pass
+        return "-"
+    price_display.short_description = "Price"
+
+    def stock_display(self, obj):
+        """
+        Try common inventory field names.
+        """
+        for attr in ("quantity", "stock", "inventory", "stock_count", "qty"):
+            val = getattr(obj, attr, None)
+            if val is not None:
+                return val
+        return 0
+    stock_display.short_description = "Stock"
+
+    def is_active_display(self, obj):
+        """
+        If you have 'is_active' or 'active' or publish flags, show one.
+        """
+        for attr in ("is_active", "active", "published", "is_published"):
+            val = getattr(obj, attr, None)
+            if isinstance(val, bool):
+                return val
+        return True
+    is_active_display.boolean = True
+    is_active_display.short_description = "Active"
+    
 @admin.register(NaturalStone)
 class NaturalStoneAdmin(admin.ModelAdmin):
     list_display = ["type"]
