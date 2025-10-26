@@ -45,6 +45,19 @@ def mark_cancelled(modeladmin, request, queryset):
         send_cancellation_email(order)
     modeladmin.message_user(request, f"Cancelled {n} order(s) and notified customers.")
 
+@admin.action(description="Assign numbers to selected orders (if missing)")
+def assign_numbers(modeladmin, request, queryset):
+    updated = 0
+    for o in queryset:
+        if not getattr(o, "number", None):
+            if hasattr(o, "assign_unique_order_number"):
+                o.assign_unique_order_number()
+            else:
+                o.number = f"MM{o.pk:08d}"
+            o.save(update_fields=["number"])
+            updated += 1
+    modeladmin.message_user(request, f"Assigned numbers to {updated} order(s).")
+
 # ---------- User & Profile ----------
 @admin.register(User)
 class CustomUserAdmin(DjangoUserAdmin):
