@@ -65,8 +65,7 @@ INSTALLED_APPS = [
     'social_django',
     'djoser',
     'django_filters',
-
-	 "server.apps.ServerConfig",
+   'server.apps.ServerConfig',
 ]
 SITE_ID = 1
 
