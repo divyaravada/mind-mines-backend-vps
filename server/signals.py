@@ -50,17 +50,12 @@ def on_paid_generate_and_mail(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=Order)
 def ensure_order_number(sender, instance: Order, created, **kwargs):
-    """
-    Ensure an order number exists upon creation.
-    """
-    if created:
+    if created and not getattr(instance, "number", None):
         try:
-            # Your model uses ensure_number(); call it
-            instance.ensure_number()
-        except Exception:
-            if not instance.number:
-                instance.number = f"MM{instance.pk:08d}"
-                instance.save(update_fields=["number"])
+            instance.assign_unique_order_number()  # if your model has this
+        except AttributeError:
+            instance.number = f"MM{instance.pk:08d}"
+        instance.save(update_fields=["number"])
 
 def stamp_status_times(sender, instance, created, **kwargs):
     old = getattr(instance, "_old_status", None)
