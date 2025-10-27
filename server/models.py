@@ -266,6 +266,19 @@ class Product(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+    def _q2(x: Decimal) -> Decimal:
+        return (Decimal(x).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if x is not None else Decimal("0.00"))
+
+    def clean(self):
+        # sale price cannot exceed base gross
+        if self.sale_price_gross is not None and self.price_gross is not None:
+            if Decimal(self.sale_price_gross) >= Decimal(self.price_gross):
+                raise ValidationError({"sale_price_gross": "Sale price must be lower than base gross price."})
+        # discount percent in 0..99 (100% would make price zero)
+        if self.discount_percent is not None:
+            if not (0 <= int(self.discount_percent) <= 99):
+                raise ValidationError({"discount_percent": "Discount percent must be between 0 and 99."})
 
     def save(self, *args, **kwargs):
         creating = self.pk is None
