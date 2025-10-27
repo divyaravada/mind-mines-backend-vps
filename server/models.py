@@ -6,10 +6,11 @@ from django.db.models import Q, UniqueConstraint, F
 from django.db.models.functions import Lower
 from django.core.exceptions import ValidationError
 from django.core.validators import EmailValidator
+from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 from django.conf import settings
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import timedelta
 import secrets
 import uuid
@@ -207,6 +208,9 @@ class StoneEnquiry(models.Model):
 
  # ----------------- Products & Media -----------------
 
+def _q2(x: Decimal) -> Decimal:
+    return Decimal(x).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
 class Product(models.Model):
     # Titles
     title_en = models.CharField(max_length=255, default="Default Title")
@@ -255,6 +259,12 @@ class Product(models.Model):
     category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default="home_decor")
 
     # pricing (GROSS / incl. 19% VAT)
+    price_net = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    vat_rate = models.DecimalField(
+        max_digits=4, decimal_places=4, default=Decimal("0.19"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("1.00"))],
+        help_text="VAT as a fraction (0.19 = 19%)."
+    )
     price_gross = models.DecimalField(max_digits=10, decimal_places=2)  # <-- always incl. VAT
     sale_price_gross = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     discount_percent = models.PositiveIntegerField(blank=True, null=True)  # e.g. 10 = 10%
@@ -266,24 +276,51 @@ class Product(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
-    def _q2(x: Decimal) -> Decimal:
-        return (Decimal(x).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            if x is not None else Decimal("0.00"))
 
     def clean(self):
-        # sale price cannot exceed base gross
+        if self.sale_price_gross is not None:
+            try:
+                sale = Decimal(self.sale_price_gross)
+                if sale <= 0:
+                    self.sale_price_gross = None
+            except (InvalidOperation, TypeError):
+                self.sale_price_gross = None
+
+        # Sale must be strictly lower than base gross (if provided)
         if self.sale_price_gross is not None and self.price_gross is not None:
             if Decimal(self.sale_price_gross) >= Decimal(self.price_gross):
                 raise ValidationError({"sale_price_gross": "Sale price must be lower than base gross price."})
-        # discount percent in 0..99 (100% would make price zero)
+
+        # Discount 0..99 (avoid 100%)
         if self.discount_percent is not None:
             if not (0 <= int(self.discount_percent) <= 99):
                 raise ValidationError({"discount_percent": "Discount percent must be between 0 and 99."})
 
+        # Guard VAT range
+        if self.vat_rate is None:
+            self.vat_rate = Decimal("0.19")
+        else:
+            vr = Decimal(self.vat_rate)
+            if vr < 0 or vr > 1:
+                raise ValidationError({"vat_rate": "VAT must be between 0 and 1 (e.g., 0.19 for 19%)."})
+
     def save(self, *args, **kwargs):
+        self.clean()
+        if self.price_net is not None:
+            net = Decimal(self.price_net)
+            self.price_gross = _q2(net * (Decimal(1) + Decimal(self.vat_rate)))
+
+        # If only gross present, back-calc net (nice UX)
+        elif self.price_gross is not None and self.price_net is None:
+            gross = Decimal(self.price_gross)
+            denom = (Decimal(1) + Decimal(self.vat_rate))
+            if denom > 0:
+                self.price_net = _q2(gross / denom)
+
         creating = self.pk is None
         super().save(*args, **kwargs)
-        # assign human-like key once we have an ID
+
+        # your existing key assignment logic unchanged...
         if (creating or not self.key) and self.pk:
             cat_prefix = CATEGORY_CODES.get(self.category, "MIND")
             new_key = f"{cat_prefix}{str(self.id).zfill(2)}"
@@ -309,18 +346,21 @@ class Product(models.Model):
 
     @property
     def is_discounted(self) -> bool:
-        if self.sale_price_gross is not None and self.sale_price_gross < self.price_gross:
-            return True
+        if self.sale_price_gross is not None and self.price_gross is not None:
+            return Decimal(self.sale_price_gross) < Decimal(self.price_gross)
         return bool(self.discount_percent and self.discount_percent > 0)
+
 
     @property
     def final_price_gross(self) -> Decimal:
-        if self.sale_price_gross is not None:
-            return _q2(Decimal(self.sale_price_gross))
+        base = Decimal(self.price_gross or 0)
+        sale = Decimal(self.sale_price_gross or 0) if self.sale_price_gross is not None else None
+        if sale is not None and sale > 0 and sale < base:
+            return _q2(sale)
         if self.discount_percent:
             dp = Decimal(self.discount_percent) / Decimal(100)
-            return _q2(Decimal(self.price_gross) * (Decimal(1) - dp))
-        return _q2(Decimal(self.price_gross))
+            return _q2(base * (Decimal(1) - dp))
+        return _q2(base)
 
     def __str__(self):
         return self.title_en

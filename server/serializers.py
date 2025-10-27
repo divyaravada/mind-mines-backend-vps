@@ -315,6 +315,8 @@ class ProductSerializer(serializers.ModelSerializer):
     stock = serializers.SerializerMethodField()
     reviews_count = serializers.SerializerMethodField()
     average_rating = serializers.SerializerMethodField()
+    price_net = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+    vat_rate = serializers.DecimalField(max_digits=4, decimal_places=4)
 
     class Meta:
         model = Product
@@ -335,6 +337,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "stone_color_image_url",
             "quantity", "dimensions", "weight", "category",
             # pricing (gross)
+            "price_net", "vat_rate",
             "price_gross", "sale_price_gross", "discount_percent",
             "final_price_gross", "is_discounted",
             # misc
