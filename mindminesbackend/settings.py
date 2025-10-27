@@ -185,7 +185,6 @@ EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD")
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
 # Optional: users who reply should go here
-ORDER_EMAIL_REPLY_TO = ["support@mindmines.eu"]
 ADMIN_EMAIL =EMAIL_HOST_USER
 
 ADMINS = [("Errors", "info@mindmines.eu")] 

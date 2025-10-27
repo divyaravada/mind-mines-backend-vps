@@ -623,6 +623,8 @@ class OrderCreateSerializer(serializers.Serializer):
         return mapped
 
     def validate(self, attrs):
+        
+
         pm = attrs.get("payment_method")
         if not pm and attrs.get("method"):
             pm = attrs["method"]
@@ -646,9 +648,12 @@ class OrderCreateSerializer(serializers.Serializer):
             if months is not None:
                 # ignore months when not using card installments
                 attrs["months"] = None
-
+  
         req = self.context.get("request")
-        if not (req and req.user and req.user.is_authenticated):
+        user = getattr(req, "user", None)
+
+        guest_mode = not (user and user.is_authenticated and getattr(user, "is_active", False))
+        if guest_mode:
             if not (attrs.get("email") or "").strip():
                 raise serializers.ValidationError({"email": "Email is required."})
 
@@ -712,9 +717,12 @@ class OrderCreateSerializer(serializers.Serializer):
         return coup, disc, None
 
     def create(self, validated):
-        user = self.context["request"].user
+        req = self.context["request"]
+        user = getattr(req, "user", None)
+        is_active_auth = bool(user and user.is_authenticated and getattr(user, "is_active", False))
         items_in = validated["items"]
         addr = self._resolve_address(user, validated)
+        guest_mode = not is_active_auth
 
         products = {}
         subtotal = Decimal("0.00")
@@ -743,18 +751,17 @@ class OrderCreateSerializer(serializers.Serializer):
         if total < 0:
             total = Decimal("0.00")
 
-        order_email = (
-            user.email if getattr(user, "is_authenticated", False) and user.email
-            else (validated.get("email") or "")
-        )
+        order_email = (validated.get("email") or "").strip().lower()
+        if not guest_mode:
+            order_email = (getattr(user, "email", "") or order_email).strip().lower()
         if not order_email:
             raise serializers.ValidationError({"email": "This field is required."})
 
         with transaction.atomic():
             order = Order.objects.create(
-                user=user if getattr(user, "is_authenticated", False) else None,
+                user=user if is_active_auth else None,
                 email=order_email,
-                guest_email=None if getattr(user, "is_authenticated", False) else order_email,
+                guest_email=order_email if guest_mode else None,
                 guest_name=" ".join(filter(None, [validated.get("first_name",""), validated.get("last_name","")])),
                 status="pending",
                 payment_method=validated.get("payment_method") or "card",
