@@ -460,9 +460,14 @@ def send_cancellation_email(order):
     _send_bilingual("Order cancelled / Bestellung storniert", to_email, en, de)
 
 # ------------- Order confirmation -------------
+
 def send_order_confirmation(order, user_locale: str = "en", to: Optional[str] = None) -> bool:
-    to_email = to or order_recipient_email(order)
+    to = to or order.email
     num = getattr(order, "number", None) or f"#{order.id}"
+
+    # keep idempotency: if already sent, don’t send again
+    if getattr(order, "confirmation_sent_at", None):
+        return False
 
     subject_en = _tr("en", "subject_order_confirm", num=num)
     subject_de = _tr("de", "subject_order_confirm", num=num)
@@ -484,8 +489,13 @@ def send_order_confirmation(order, user_locale: str = "en", to: Optional[str] = 
     """
 
     mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
-    return _send_email(mail.subject, mail.text, mail.html, to_email)
+    ok = _send_email(mail.subject, mail.text, mail.html, to)
 
+    if ok:
+        type(order).objects.filter(pk=order.pk).update(confirmation_sent_at=timezone.now())
+        setattr(order, "confirmation_sent_at", timezone.now())
+
+    return ok
 
 # ------------- Bank transfer -------------
 def send_bank_transfer_instructions(

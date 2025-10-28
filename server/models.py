@@ -153,7 +153,37 @@ class Address(models.Model):
             ),
         ]
 
+    def save(self, *args, **kwargs):
+        # If adding a new default address, create it as non-default, then flip.
+        if self._state.adding and self.is_default:
+            make_default = True
+            self.is_default = False
+            super().save(*args, **kwargs)
+            # now safely flip with DB lock and clearing others
+            self.set_default_for_user()
+            return
+
+        # Updates: if turning an existing address into default, clear others first
+        if self.user_id and self.is_default and not self._state.adding:
+            with transaction.atomic():
+                (Address.objects
+                 .select_for_update()
+                 .filter(user_id=self.user_id, is_default=True)
+                 .exclude(pk=self.pk)
+                 .update(is_default=False))
+        super().save(*args, **kwargs)
+
     def set_default_for_user(self):
+        with transaction.atomic():
+            (Address.objects
+             .select_for_update()
+             .filter(user=self.user, is_default=True)
+             .exclude(pk=self.pk)
+             .update(is_default=False))
+            if not self.is_default:
+                self.is_default = True
+                super().save(update_fields=["is_default"])
+                
         Address.objects.filter(user=self.user, is_default=True).exclude(pk=self.pk).update(is_default=False)
         if not self.is_default:
             self.is_default = True
@@ -516,6 +546,7 @@ class Order(models.Model):
     stock_locked = models.BooleanField(default=False)
     stock_released = models.BooleanField(default=False)
     lookup_token = models.CharField(max_length=36, blank=True, default="")
+    confirmation_sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [

@@ -138,6 +138,8 @@ class AddressSerializer(serializers.ModelSerializer):
             if synth:
                 validated_data["address_line1"] = synth
 
+        # ✅ Always insert as non-default, then flip
+        validated_data["is_default"] = False
         addr = Address.objects.create(user=user, **validated_data)
 
         is_first = not Address.objects.filter(user=user).exclude(pk=addr.pk).exists()
@@ -149,9 +151,9 @@ class AddressSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         make_default = bool(validated_data.pop("is_default", False))
-
         for k, v in validated_data.items():
             setattr(instance, k, v)
+        # ✅ Save without toggling default first
         instance.save()
 
         if make_default:
@@ -159,7 +161,6 @@ class AddressSerializer(serializers.ModelSerializer):
 
         self._sync_full_name(instance)
         return instance
-
 # ----------------- Wishlist -----------------
 
 class WishlistSerializer(serializers.ModelSerializer):

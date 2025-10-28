@@ -490,11 +490,13 @@ class ProductListCreate(ProductFilterMixin, generics.ListCreateAPIView):
 class ProductListView(ProductFilterMixin, generics.ListAPIView):
     serializer_class = ProductSerializer
     permission_classes = [AllowAny]
-    filter_backends = [filters.SearchFilter]
-    search_fields = ['title_en', 'title_de']
-    def get_queryset(self):
-        return self.filtered_products_qs()
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ["title_en", "title_de"]
+    ordering_fields = ("created_at", "price", "id", "title_en", "title_de")
+    ordering = ("-created_at", "id")  # stable & deterministic
 
+    def get_queryset(self):
+        return Product.objects.all()
 class ProductDetailView(generics.RetrieveAPIView):
     serializer_class = ProductSerializer
     permission_classes = [AllowAny]

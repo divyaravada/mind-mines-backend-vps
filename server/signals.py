@@ -13,6 +13,19 @@ from .utils.emails import (
 )
 
 
+@receiver(pre_save, sender=Order)
+def _capture_prev_status(sender, instance, **kwargs):
+    if instance.pk:
+        try:
+            prev = Order.objects.only("status").get(pk=instance.pk)
+            instance._prev_status = prev.status
+        except Order.DoesNotExist:
+            instance._prev_status = None
+    else:
+        instance._prev_status = None
+
+
+
 # -------- User Profile --------
 def create_or_update_user_profile(sender, instance, created, **kwargs):
     if created:
@@ -32,10 +45,12 @@ def remember_old_status(sender, instance, **kwargs):
         instance._old_status = None
 
 def on_paid_generate_and_mail(sender, instance, created, **kwargs):
+    if created:
+        return
+
     became_paid = instance.status == "paid" and getattr(instance, "_old_status", None) != "paid"
     if not became_paid:
         return
-
     # Invoice + emails
     generate_invoice_pdf(instance)
     try:
@@ -135,6 +150,7 @@ def connect_signals():
         _notify_restock, sender=Product,
         dispatch_uid="server_product_notify_restock"
     )
-    
-
-
+    pre_save.connect(
+        _capture_prev_status, sender=Order,
+        dispatch_uid="server_capture_prev_status"
+    )
