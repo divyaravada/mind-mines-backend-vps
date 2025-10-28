@@ -717,8 +717,7 @@ class OrderCreateSerializer(serializers.Serializer):
         return coup, disc, None
 
     def create(self, validated):
-        req = self.context["request"]
-        user = getattr(req, "user", None)
+        user = self.context["request"].user
         is_active_auth = bool(user and user.is_authenticated and getattr(user, "is_active", False))
         items_in = validated["items"]
         addr = self._resolve_address(user, validated)
@@ -751,7 +750,11 @@ class OrderCreateSerializer(serializers.Serializer):
         if total < 0:
             total = Decimal("0.00")
 
-        order_email = (validated.get("email") or "").strip().lower()
+        order_email = (
+            user.email if getattr(user, "is_authenticated", False) and user.email
+            else (validated.get("email") or "")
+        )
+
         if not guest_mode:
             order_email = (getattr(user, "email", "") or order_email).strip().lower()
         if not order_email:
