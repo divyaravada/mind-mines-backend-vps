@@ -71,6 +71,7 @@ def _safe(func, *args, **kwargs):
 
 SIGNER_SALT = "invoice-public-download-v1"
 INVOICE_TOKEN_MAX_AGE = 60 * 60 * 2  # 2 hours default
+PUBLIC_AUTH_CLASSES: list = []
 
 signer = TimestampSigner(salt=SIGNER_SALT)
 
@@ -729,12 +730,12 @@ class OrderAdminUpdateAPIView(APIView):
             inv = generate_invoice_pdf(order)
             try:
                 user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                send_invoice_email(order, user_locale=user_locale)
+                send_invoice_email(order, user_locale=user_locale, to=_order_to(order))
             except Exception:
                 pass
             try:
                 locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                send_order_confirmation(order, user_locale=locale)
+                send_order_confirmation(order, user_locale=locale, to=_order_to(order))
             except Exception:
                 pass
         if prev_status != "cancelled" and order.status == "cancelled":
@@ -953,6 +954,7 @@ class PaypalBase(APIView):
 
 class PaypalCreateOrder(PaypalBase):
     permission_classes = [AllowAny]
+    authentication_classes = PUBLIC_AUTH_CLASSES
     def post(self, request):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
@@ -1004,6 +1006,7 @@ class PaypalCreateOrder(PaypalBase):
 
 class PaypalCaptureOrder(PaypalBase):
     permission_classes = [AllowAny]
+    authentication_classes = PUBLIC_AUTH_CLASSES
     def post(self, request, order_id):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
@@ -1057,10 +1060,10 @@ class PaypalCaptureOrder(PaypalBase):
             ord_obj.status = "paid"
             ord_obj.save(update_fields=["status"])
             _safe(generate_invoice_pdf, ord_obj)
-            _safe(send_invoice_email, ord_obj)
+            _safe(send_invoice_email, ord_obj,  to=_order_to(ord_obj))
             _safe(fire_and_forget, post_payment_pipeline, ord_obj.id)
             locale = getattr(getattr(ord_obj.user, "profile", None), "language", "en") or "en"
-            _safe(send_order_confirmation, ord_obj, user_locale=locale)
+            _safe(send_order_confirmation, ord_obj, user_locale=locale, to=_order_to(ord_obj))
         return Response({"status": "COMPLETED"}, status=200)
 
     
@@ -1078,9 +1081,11 @@ PAYMENT_METHOD_MAP = {
     "sepa_debit": "sepa_debit"
 }
 
-class CsrfExemptSessionAuthentication(SessionAuthentication):
-    def enforce_csrf(self, request):
-        return
+def _order_to(order):
+    # prefer guest email, then order.email, then user's email
+    return (getattr(order, "guest_email", None)
+            or getattr(order, "email", None)
+            or getattr(getattr(order, "user", None), "email", None))
 
 def _split_installments_eur(total_cents: int, months: int) -> List[Decimal]:
     base = total_cents // months
@@ -1124,12 +1129,10 @@ def _extract_email_from_payload(data: dict) -> Optional[str]:
 # ============================================================================
 # 1) Unified one-off PaymentIntent (card, sepa_debit, giropay, sofort)
 # ============================================================================
-# WARNING: Only use CsrfExemptSessionAuthentication on endpoints where CSRF protection is intentionally disabled and it is safe to do so.
 
-    
 class StripeCreateIntent(APIView):
     permission_classes = [AllowAny]
-    authentication_classes = [CsrfExemptSessionAuthentication, BasicAuthentication]
+    authentication_classes = PUBLIC_AUTH_CLASSES
     def post(self, request):
         data = request.data.copy()
         pm = (data.get("payment_method") or "card").strip().lower()
@@ -1201,7 +1204,7 @@ class StripeCreateIntent(APIView):
                     getattr(getattr(request, "user", None), "profile", None) and
                     getattr(request.user.profile, "language", None)
                 ) or (request.META.get("HTTP_ACCEPT_LANGUAGE", "en").split(",")[0] or "en")
-                send_sepa_pending_email(order, user_locale=locale)
+                send_sepa_pending_email(order, user_locale=locale, to=_order_to(order))
             except Exception:
                 pass
 
@@ -1255,7 +1258,7 @@ class StripeCreateSepaSetupIntent(APIView):
 # ============================================================================
 class StripeCreateSepaIntent(APIView):
     permission_classes = [AllowAny]
-    authentication_classes = [CsrfExemptSessionAuthentication, BasicAuthentication]
+    authentication_classes = PUBLIC_AUTH_CLASSES 
     def post(self, request):
         s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
@@ -1299,7 +1302,7 @@ class StripeCreateSepaIntent(APIView):
         order.save(update_fields=["payment_ref"])
         try:
             locale = (getattr(getattr(order, "user", None), "profile", None) and getattr(order.user.profile, "language", None)) or "en"
-            send_sepa_pending_email(order, user_locale=locale)
+            send_sepa_pending_email(order, user_locale=locale, to=_order_to(order))
         except Exception:
             pass
         return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
@@ -1418,7 +1421,7 @@ class StripeSepaCreateInstallments(APIView):
                     pass
                 dates = _month_dates(anchor_dt, months)
                 user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                send_installments_started_email(order, months, amounts_eur, dates, user_locale=user_locale)
+                send_installments_started_email(order, months, amounts_eur, dates, user_locale=user_locale, to=_order_to(order))
             except Exception:
                 logger.exception("installments started email failed")
 
@@ -1476,7 +1479,7 @@ def stripe_webhook(request):
         generate_invoice_pdf(order)
         user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
         try:
-            send_invoice_email(order, user_locale=user_locale)
+            send_invoice_email(order, user_locale=user_locale, to=_order_to(order))
         except Exception:
             log.exception("send_invoice_email failed for order %s", order.id)
 
@@ -1488,7 +1491,7 @@ def stripe_webhook(request):
                 _mark_processing(order)
                 user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
                 try:
-                    send_sepa_pending_email(order, user_locale=user_locale)
+                    send_sepa_pending_email(order, user_locale=user_locale, to=_order_to(order))
                 except Exception:
                     log.exception("send_sepa_pending_email failed for order %s", order.id)
             except Order.DoesNotExist:
@@ -1532,6 +1535,7 @@ def stripe_webhook(request):
 # -------------------- Bank transfer --------------------
 class CreateBankTransferOrder(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = PUBLIC_AUTH_CLASSES
     def post(self, request):
         data = request.data.copy()
         data.pop("payment_method", None)
@@ -1553,6 +1557,7 @@ class CreateBankTransferOrder(APIView):
                 },
                 user_locale=locale,
                 due_hours=settings.BANK_TRANSFER["PAYMENT_DUE_HOURS"],
+                to=_order_to(order),
             )
         except Exception:
             logger.exception("Bank transfer email failed")

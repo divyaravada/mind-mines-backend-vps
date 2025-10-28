@@ -721,7 +721,6 @@ class OrderCreateSerializer(serializers.Serializer):
         is_active_auth = bool(user and user.is_authenticated and getattr(user, "is_active", False))
         items_in = validated["items"]
         addr = self._resolve_address(user, validated)
-        guest_mode = not is_active_auth
 
         products = {}
         subtotal = Decimal("0.00")
@@ -737,34 +736,39 @@ class OrderCreateSerializer(serializers.Serializer):
                 except Product.DoesNotExist:
                     raise serializers.ValidationError({"items": f"Product {pid} not found"})
             p = products[pid]
-            unit = Decimal(p.final_price_gross)  # <-- gross per your model
+            unit = Decimal(p.final_price_gross)
             clean_items.append((p, qty, unit))
             subtotal += (unit * qty)
 
         coupon_code = (validated.get("coupon_code") or "").strip()
         coupon_obj, discount, _ = self._apply_coupon(
-            user if user.is_authenticated else None, items_in, subtotal, coupon_code
+            user if getattr(user, "is_authenticated", False) else None, items_in, subtotal, coupon_code
         )
         shipping_fee = Decimal("0.00")
         total = (subtotal - discount + shipping_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         if total < 0:
             total = Decimal("0.00")
 
-        order_email = (
-            user.email if getattr(user, "is_authenticated", False) and user.email
-            else (validated.get("email") or "")
-        )
+        # ---------- identity & email logic (fix) ----------
+        provided_email = (validated.get("email") or "").strip().lower()
+        auth_email = ((getattr(user, "email", "") or "").strip().lower()) if is_active_auth else ""
 
-        if not guest_mode:
-            order_email = (getattr(user, "email", "") or order_email).strip().lower()
+        # If a different email was typed at checkout, treat this order as a guest order
+        force_guest = bool(is_active_auth and provided_email and provided_email != auth_email)
+
+        order_user = None if (force_guest or not is_active_auth) else user
+        order_email = provided_email or auth_email
+        guest_email = provided_email if (not is_active_auth or force_guest) else None
+
         if not order_email:
             raise serializers.ValidationError({"email": "This field is required."})
+        # ---------------------------------------------------
 
         with transaction.atomic():
             order = Order.objects.create(
-                user=user if is_active_auth else None,
+                user=order_user,
                 email=order_email,
-                guest_email=order_email if guest_mode else None,
+                guest_email=guest_email,
                 guest_name=" ".join(filter(None, [validated.get("first_name",""), validated.get("last_name","")])),
                 status="pending",
                 payment_method=validated.get("payment_method") or "card",
