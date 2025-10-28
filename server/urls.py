@@ -174,10 +174,6 @@ urlpatterns = [
     path("orders/<int:pk>/request-return/", OrderRequestReturnAPIView.as_view(), name="order_request_return"),
     path("orders/<int:pk>/cancel-request/", OrderCancelRequestAPIView.as_view(), name="order_cancel_request"),
 
-    # ✅ alias expected by tests
-    #path("orders/<int:pk>/return/", OrderRequestReturnAPIView.as_view(), name="order_return"),
-    #path("orders/<int:pk>/cancel/", OrderCancelRequestAPIView.as_view(), name="order_cancel_request"),
-
     # -------- Allauth (optional) --------
     path("accounts/", include("allauth.urls")),
 
