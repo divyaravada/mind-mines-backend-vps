@@ -22,11 +22,10 @@ MAX_ATTACH_BYTES = 14 * 1024 * 1024
 
 def order_recipient_email(order) -> Optional[str]:
     """
-    Prefer guest email, then order.email, then user's email (if any).
-    Ensures guest checkouts never leak to an authenticated admin email.
+    Recipient for order emails in authenticated-only flow.
+    Priority: explicit order.email, then order.user.email.
     """
-    return (getattr(order, "guest_email", None)
-            or getattr(order, "email", None)
+    return (getattr(order, "email", None)
             or getattr(getattr(order, "user", None), "email", None))
 
 
@@ -274,11 +273,10 @@ def _strip_html(s: str) -> str:
 
 def get_order_recipient(order) -> str | None:
     """
-    Priority: explicit order.email -> guest_email -> order.user.email.
+    Authenticated-only priority: explicit order.email -> order.user.email.
     """
     for cand in [
         getattr(order, "email", None),
-        getattr(order, "guest_email", None),
         getattr(getattr(order, "user", None), "email", None),
     ]:
         if cand:
@@ -544,7 +542,6 @@ def send_bank_transfer_instructions(
 
 
 
-
 # ------------- Installments -------------
 def send_installments_started_email(
     order,
@@ -641,7 +638,6 @@ def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None)
         return False
 
 
-
 # ------------- Stock Alert -------------
 def send_stock_alert_email(product, to_email: str, unsubscribe_url: str, user_locale: str = "en"):
     subject_en = f"Back in stock: {getattr(product, 'title_en', str(product))}"
@@ -678,4 +674,3 @@ def send_stock_alert_email(product, to_email: str, unsubscribe_url: str, user_lo
     if html_body:
         msg.attach_alternative(html_body, "text/html")
     msg.send(fail_silently=not settings.DEBUG)
-

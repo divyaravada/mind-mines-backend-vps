@@ -624,7 +624,10 @@ class OrderCreateSerializer(serializers.Serializer):
         return mapped
 
     def validate(self, attrs):
-        
+        req = self.context.get("request")
+        user = getattr(req, "user", None)
+        if not (user and user.is_authenticated and getattr(user, "is_active", True)):
+            raise serializers.ValidationError({"detail": "Authentication required."})        
 
         pm = attrs.get("payment_method")
         if not pm and attrs.get("method"):
@@ -649,40 +652,34 @@ class OrderCreateSerializer(serializers.Serializer):
             if months is not None:
                 # ignore months when not using card installments
                 attrs["months"] = None
-  
-        req = self.context.get("request")
-        user = getattr(req, "user", None)
-
-        guest_mode = not (user and user.is_authenticated and getattr(user, "is_active", False))
-        if guest_mode:
-            if not (attrs.get("email") or "").strip():
-                raise serializers.ValidationError({"email": "Email is required."})
 
         return attrs
 
     def _resolve_address(self, user, validated):
-        user_obj = user if (getattr(user, "is_authenticated", False) and getattr(user, "is_active", False)) else None
+        # 🔒 only for real users
+        if not (user and user.is_authenticated and getattr(user, "is_active", True)):
+            raise serializers.ValidationError({"detail": "Authentication required."})
 
         aid = validated.get("address_id")
-        if aid and user_obj:
-            a = Address.objects.filter(user=user_obj, id=aid).first()
+        if aid:
+            a = Address.objects.filter(user=user, id=aid).first()
             if a:
                 return a
 
         sig = _addr_signature_dict(validated)
-        if user_obj and any(sig):
-            for a in Address.objects.filter(user=user_obj):
+        if any(sig):
+            for a in Address.objects.filter(user=user):
                 if _addr_signature_model(a) == sig:
                     return a
-
+                
         mostly_empty = not any([
             validated.get("address_line1"),
             validated.get("street_name"),
             validated.get("postal_code"),
             validated.get("city"),
         ])
-        if mostly_empty and user_obj:
-            default = Address.objects.filter(user=user_obj, is_default=True).first()
+        if mostly_empty:
+            default = Address.objects.filter(user=user, is_default=True).first()
             if default:
                 return default
 
@@ -690,9 +687,9 @@ class OrderCreateSerializer(serializers.Serializer):
             validated.get("street_name",""), validated.get("house_number","")
         ])).strip()
 
-    # ✅ create Address with user=None for guests; FK allows null
+   
         addr = Address.objects.create(
-            user=user_obj,
+            user=user,
             first_name=validated.get("first_name",""),
             last_name=validated.get("last_name",""),
             address_line1=line1,
@@ -704,7 +701,7 @@ class OrderCreateSerializer(serializers.Serializer):
             street_name=validated.get("street_name",""),
             house_number=validated.get("house_number",""),
         )
-        if user_obj and not Address.objects.filter(user=user_obj).exclude(pk=addr.pk).exists():
+        if not Address.objects.filter(user=user).exclude(pk=addr.pk).exists():
             addr.set_default_for_user()
         return addr
 
@@ -722,8 +719,6 @@ class OrderCreateSerializer(serializers.Serializer):
 
     def create(self, validated):
         req_user = self.context["request"].user
-        is_auth = bool(getattr(req_user, "is_authenticated", False) and getattr(req_user, "is_active", False))
-
         items_in = validated["items"]
         addr = self._resolve_address(req_user, validated)
 
@@ -746,36 +741,21 @@ class OrderCreateSerializer(serializers.Serializer):
             subtotal += (unit * qty)
 
         coupon_code = (validated.get("coupon_code") or "").strip()
-        coupon_obj, discount, _ = self._apply_coupon(
-            req_user if is_auth else None, items_in, subtotal, coupon_code
-        )
+        coupon_obj, discount, _ = self._apply_coupon(req_user, items_in, subtotal, coupon_code)
         shipping_fee = Decimal("0.00")
         total = (subtotal - discount + shipping_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         if total < 0:
             total = Decimal("0.00")
 
-    # ---------- identity & email (fix) ----------
-        provided_email = (validated.get("email") or "").strip().lower()
-        auth_email = ((getattr(req_user, "email", "") or "").strip().lower()) if is_auth else ""
-
-    # If a different email is typed at checkout, treat as guest order
-        force_guest = bool(is_auth and provided_email and provided_email != auth_email)
-
-        order_user = None if (force_guest or not is_auth) else req_user
-        order_email = provided_email or auth_email
-        guest_email = provided_email if (not is_auth or force_guest) else None
-
-
+        
+        order_email = (getattr(req_user, "email", "") or "").strip().lower()
         if not order_email:
-            raise serializers.ValidationError({"email": "This field is required."})
-        # ---------------------------------------------------
+            raise serializers.ValidationError({"email": "Account email missing on user."})
 
         with transaction.atomic():
             order = Order.objects.create(
-                user=order_user,
+                user=req_user,
                 email=order_email,
-                guest_email=guest_email,
-                guest_name=" ".join(filter(None, [validated.get("first_name",""), validated.get("last_name","")])),
                 status="pending",
                 payment_method=validated.get("payment_method") or "card",
                 subtotal=subtotal.quantize(Decimal("0.01")),
@@ -918,95 +898,7 @@ class ReviewWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Rating must be between 1 and 5.")
         return v
 
- # ----------------- Guest / public -----------------
-
-class GuestCheckoutIn(serializers.Serializer):
-    email = serializers.EmailField()
-    full_name = serializers.CharField(required=False, allow_blank=True)
-
-    def validate_email(self, v):
-        v = v.strip().lower()
-        UserModel = get_user_model()
-        if UserModel.objects.filter(email=v, is_active=True).exists():
-            raise serializers.ValidationError("An account already exists with this email. Please sign in.")
-        return v
-
-class GuestOrderLookupInputSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-    number = serializers.CharField(max_length=64)
-
-
-class OrderItemPublicSerializer(serializers.Serializer):
-    id = serializers.IntegerField()
-    quantity = serializers.IntegerField()
-    unit_price = serializers.DecimalField(max_digits=10, decimal_places=2)
-    product = serializers.SerializerMethodField()
-
-    def get_product(self, obj):
-        p = getattr(obj, "product", None)
-        if not p:
-            return None
-        return {
-            "id": p.id,
-            "title_en": getattr(p, "title_en", "") or getattr(p, "title", ""),
-            "title_de": getattr(p, "title_de", ""),
-            "image": getattr(p, "image", None) or getattr(p, "image_url", None),
-        }
-
-class OrderPublicSerializer(serializers.Serializer):
-    id = serializers.IntegerField()
-    number = serializers.CharField()
-    status = serializers.CharField()
-    created_at = serializers.DateTimeField()
-    delivered_at = serializers.DateTimeField(allow_null=True, required=False)
-    subtotal = serializers.DecimalField(max_digits=10, decimal_places=2)
-    shipping_fee = serializers.DecimalField(max_digits=10, decimal_places=2)
-    total_price = serializers.DecimalField(max_digits=10, decimal_places=2)
-    invoice_pdf = serializers.SerializerMethodField()
-    tracking_number = serializers.CharField(allow_blank=True, required=False)
-    items = OrderItemPublicSerializer(many=True)
-    shipping_address = serializers.SerializerMethodField()
-
-    def _abs(self, request, url):
-        if not url:
-            return url
-        if request and not str(url).startswith(("http://", "https://")):
-            return request.build_absolute_uri(url)
-        return url
-
-    def get_invoice_pdf(self, obj):
-        request = self.context.get("request")
-        try:
-            inv = getattr(obj, "invoice", None)
-            f = getattr(inv, "pdf", None)
-            if f and getattr(f, "url", None):
-                return self._abs(request, f.url)
-        except Exception:
-            pass
-        try:
-            f = getattr(obj, "invoice_pdf", None)
-            if f and getattr(f, "url", None):
-                return self._abs(request, f.url)
-        except Exception:
-            pass
-        return None
-
-    def get_shipping_address(self, obj):
-        a = getattr(obj, "shipping_address", None)
-        if not a:
-            return None
-        return {
-            "first_name": getattr(a, "first_name", ""),
-            "last_name": getattr(a, "last_name", ""),
-            "address_line1": getattr(a, "address_line1", ""),
-            "address_line2": getattr(a, "address_line2", ""),
-            "postal_code": getattr(a, "postal_code", ""),
-            "city": getattr(a, "city", ""),
-            "country": getattr(a, "country", "") or getattr(a, "state", ""),
-            "phone": getattr(a, "phone", ""),
-        }
-
-
+ 
  # ----------------- Stock Alert -----------------
 
 class StockAlertCreateSerializer(serializers.Serializer):

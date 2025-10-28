@@ -142,7 +142,7 @@ class OrderAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
     list_display = ("number", "user", "email", "status", "total_price", "created_at")
     list_filter = ("status", "created_at")
-    search_fields = ("number", "user__email", "email", "guest_email")
+    search_fields = ("number", "user__email", "email")
     actions = [mark_paid, mark_shipped, mark_cancelled]
     readonly_fields = (
         "number", "subtotal", "discount_amount", "shipping_fee", "total_price",
@@ -150,7 +150,7 @@ class OrderAdmin(admin.ModelAdmin):
         "items_readonly", "delivered_at", "cancelled_at",
     )
     fields = (
-        ("number", "user", "email", "guest_email", "created_at", "delivered_at", "cancelled_at"),
+        ("number", "user", "email",  "created_at", "delivered_at", "cancelled_at"),
         ("status", "payment_method", "tracking_number"),
         ("subtotal", "discount_amount", "shipping_fee", "total_price"),
         ("shipping_address",),
@@ -274,7 +274,7 @@ class ProductAdmin(admin.ModelAdmin):
         return True
     is_active_display.boolean = True
     is_active_display.short_description = "Active"
-    
+
 @admin.register(NaturalStone)
 class NaturalStoneAdmin(admin.ModelAdmin):
     list_display = ["type"]

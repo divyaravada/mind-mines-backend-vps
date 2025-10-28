@@ -160,7 +160,7 @@ class Address(models.Model):
             self.save(update_fields=["is_default"])
 
     def __str__(self):
-        user_email = getattr(self.user, "email", "Guest")
+        user_email = getattr(self.user, "email")
         name = " ".join(filter(None, [self.first_name, self.last_name])) or self.full_name or user_email
         line1 = self.address_line1 or " ".join([self.street_name, self.house_number]).strip() or "Address"
         return f"{name} — {line1}"
@@ -479,8 +479,6 @@ class Order(models.Model):
 
     user = models.ForeignKey("server.User", on_delete=models.CASCADE, related_name='orders', null=True, blank=True)
     email = models.EmailField()  # billing/contact email
-    guest_email = models.EmailField(blank=True, null=True)
-    guest_name  = models.CharField(max_length=200, blank=True, null=True)
 
     # legacy (optional single-line)
     product = models.ForeignKey("server.Product", on_delete=models.SET_NULL, null=True, blank=True)

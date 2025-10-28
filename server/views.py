@@ -5,8 +5,7 @@ import json, re
 import requests as http
 from typing import Optional, List
 from django.db.models.functions import Lower
-from rest_framework import permissions, generics, status, filters, throttling, serializers
-from rest_framework.authentication import SessionAuthentication, BasicAuthentication
+from rest_framework import permissions, generics, status, filters,  serializers
 from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
@@ -21,7 +20,6 @@ from django.db import transaction
 from django.utils import timezone
 from datetime import datetime
 from django.db.models import Avg, Count, Q
-from uuid import uuid4
 from google.oauth2 import id_token
 from google.auth.transport.requests import Request as GoogleRequest
 from rest_framework.decorators import api_view, permission_classes
@@ -34,15 +32,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
-from django.core.signing import TimestampSigner, BadSignature, SignatureExpired
-from django.urls import reverse
+from django.core.signing import TimestampSigner
 
 from .pagination import StandardResultsSetPagination
 from .serializers import (
     ProfileSerializer, RegisterSerializer, MyTokenObtainPairSerializer, StockAlertCreateSerializer,
     ProductSerializer, ProductMiniSerializer, ContactMessageSerializer, ReviewWriteSerializer,
-    NewsletterSubscriberSerializer, AddressSerializer, PromotionSerializer, GuestOrderLookupInputSerializer,
-    OrderPublicSerializer, ReviewSerializer, WishlistSerializer, NaturalStoneSerializer, CouponPreviewIn,
+    NewsletterSubscriberSerializer, AddressSerializer, PromotionSerializer, 
+    ReviewSerializer, WishlistSerializer, NaturalStoneSerializer, CouponPreviewIn,
     StoneEnquirySerializer, AccountSerializer, OrderCreateSerializer, OrderReadSerializer,
 )
 from .models import (
@@ -75,19 +72,11 @@ PUBLIC_AUTH_CLASSES: list = []
 
 signer = TimestampSigner(salt=SIGNER_SALT)
 
-def _make_invoice_token(order):
-    payload = f"{order.id}:{order.number}"
-    return signer.sign(payload)
+def _order_to(order):
+    # always authenticated user path now
+    return (getattr(order, "email", None)
+            or getattr(getattr(order, "user", None), "email", None))
 
-def _verify_invoice_token(token, order):
-    payload = f"{order.id}:{order.number}"
-    try:
-        data = signer.unsign(token, max_age=INVOICE_TOKEN_MAX_AGE)
-    except SignatureExpired:
-        return False, "expired"
-    except BadSignature:
-        return False, "bad_signature"
-    return data == payload, None
 
 # ---- Return window default -> 15 days ----
 RETURNS_WINDOW_DAYS = getattr(settings, "RETURNS_WINDOW_DAYS", 15)
@@ -954,7 +943,6 @@ class PaypalBase(APIView):
 
 class PaypalCreateOrder(PaypalBase):
     permission_classes = [AllowAny]
-    authentication_classes = PUBLIC_AUTH_CLASSES
     def post(self, request):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
@@ -1006,7 +994,6 @@ class PaypalCreateOrder(PaypalBase):
 
 class PaypalCaptureOrder(PaypalBase):
     permission_classes = [AllowAny]
-    authentication_classes = PUBLIC_AUTH_CLASSES
     def post(self, request, order_id):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
@@ -1081,12 +1068,6 @@ PAYMENT_METHOD_MAP = {
     "sepa_debit": "sepa_debit"
 }
 
-def _order_to(order):
-    # prefer guest email, then order.email, then user's email
-    return (getattr(order, "guest_email", None)
-            or getattr(order, "email", None)
-            or getattr(getattr(order, "user", None), "email", None))
-
 def _split_installments_eur(total_cents: int, months: int) -> List[Decimal]:
     base = total_cents // months
     rem = total_cents - base * months
@@ -1102,6 +1083,7 @@ def _amount_cents(d: Decimal) -> int:
     return int((d * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> str:
+    # simplified: only authenticated users create/own customers
     if user is not None and getattr(user, "is_authenticated", False):
         prof = getattr(user, "profile", None)
         if prof and getattr(prof, "stripe_customer_id", None):
@@ -1115,16 +1097,9 @@ def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> st
             prof.stripe_customer_id = customer.id
             prof.save(update_fields=["stripe_customer_id"])
         return customer.id
-    customer = stripe.Customer.create(email=email or None, metadata={"guest": "true"})
-    return customer.id
+    # should not be hit in order flows now
+    raise stripe_error.StripeError("Authenticated user required to create customer")
 
-def _extract_email_from_payload(data: dict) -> Optional[str]:
-    return (
-        data.get("email")
-        or (data.get("billing") or {}).get("email")
-        or (data.get("shipping_address") or {}).get("email")
-        or None
-    )
 
 # ============================================================================
 # 1) Unified one-off PaymentIntent (card, sepa_debit, giropay, sofort)
@@ -1132,7 +1107,6 @@ def _extract_email_from_payload(data: dict) -> Optional[str]:
 
 class StripeCreateIntent(APIView):
     permission_classes = [AllowAny]
-    authentication_classes = PUBLIC_AUTH_CLASSES
     def post(self, request):
         data = request.data.copy()
         pm = (data.get("payment_method") or "card").strip().lower()
@@ -1153,19 +1127,7 @@ class StripeCreateIntent(APIView):
             return Response({"detail": "Order creation failed", "error": str(e)}, status=400)
 
         try:
-            if request.user.is_authenticated:
-                customer_id = _get_or_create_stripe_customer(request.user)
-            else:
-                guest_email = order.guest_email or (data.get("email") or None)
-                guest_name  = order.guest_name  or (data.get("name") or None)
-                if not guest_email:
-                    return Response({"detail": "Email is required for guest checkout."}, status=400)
-                cust = stripe.Customer.create(
-                    email=guest_email,
-                    name=guest_name or None,
-                    metadata={"guest_order_id": str(order.id)},
-                )
-                customer_id = cust.id
+            customer_id = _get_or_create_stripe_customer(request.user)
         except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
@@ -1200,10 +1162,7 @@ class StripeCreateIntent(APIView):
 
         if pm_type == "sepa_debit":
             try:
-                locale = (
-                    getattr(getattr(request, "user", None), "profile", None) and
-                    getattr(request.user.profile, "language", None)
-                ) or (request.META.get("HTTP_ACCEPT_LANGUAGE", "en").split(",")[0] or "en")
+                locale = getattr(getattr(request.user, "profile", None), "language", None) or (request.META.get("HTTP_ACCEPT_LANGUAGE", "en").split(",")[0] or "en")
                 send_sepa_pending_email(order, user_locale=locale, to=_order_to(order))
             except Exception:
                 pass
@@ -1232,6 +1191,7 @@ class StripeCreateCardSetupIntent(APIView):
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
+        
 # ============================================================================
 # 2) Save SEPA mandate for installments (authenticated)
 # ============================================================================
@@ -1254,11 +1214,10 @@ class StripeCreateSepaSetupIntent(APIView):
             return Response({"detail": str(e)}, status=500)
 
 # ============================================================================
-# 3) Legacy SEPA one-off (keep; now guest-friendly too)
+# 3) Legacy SEPA one-off (keep; )
 # ============================================================================
 class StripeCreateSepaIntent(APIView):
-    permission_classes = [AllowAny]
-    authentication_classes = PUBLIC_AUTH_CLASSES 
+    permission_classes = [AllowAny] 
     def post(self, request):
         s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
@@ -1271,9 +1230,7 @@ class StripeCreateSepaIntent(APIView):
             order.status = "pending"
             order.save(update_fields=["payment_method", "status"])
         try:
-            email = _extract_email_from_payload(request.data) or email
-            user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
-            customer_id = _get_or_create_stripe_customer(user=user, email=email)
+            customer_id = _get_or_create_stripe_customer(user=request.user, email=email)
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
@@ -1535,7 +1492,6 @@ def stripe_webhook(request):
 # -------------------- Bank transfer --------------------
 class CreateBankTransferOrder(APIView):
     permission_classes = [AllowAny]
-    authentication_classes = PUBLIC_AUTH_CLASSES
     def post(self, request):
         data = request.data.copy()
         data.pop("payment_method", None)
@@ -1657,100 +1613,6 @@ class OrderCancelRequestAPIView(APIView):
             logger.exception("Failed to send cancel emails for rr=%s", rr.pk)
         return Response({"id": rr.pk, "status": rr.status, "request_type": rr.request_type}, status=201)
 
-# --- GUEST CHECKOUT LOGIN ---
-def _get_or_create_guest_user(email: str, full_name: str = ""):
-    email = (email or "").strip().lower()
-    UserModel = get_user_model()
-    user = UserModel.objects.filter(email=email).first()
-    if user:
-        if not user.is_active:
-            if full_name and hasattr(user, "profile"):
-                user.profile.full_name = full_name
-                user.profile.save(update_fields=["full_name"])
-            return user
-        return user
-    username = f"guest-{uuid4().hex[:12]}"
-    user = UserModel.objects.create(
-        email=email,
-        username=username,
-        is_active=False,
-    )
-    user.set_unusable_password()
-    user.save()
-    if hasattr(user, "profile"):
-        if full_name:
-            user.profile.full_name = full_name
-        user.profile.save()
-    return user
-
-class GuestCheckoutLoginView(APIView):
-    permission_classes = [AllowAny]
-    def post(self, request):
-        from .serializers import GuestCheckoutIn
-        ser = GuestCheckoutIn(data=request.data)
-        ser.is_valid(raise_exception=True)
-        email = ser.validated_data["email"]
-        full_name = ser.validated_data.get("full_name", "")
-        user = _get_or_create_guest_user(email, full_name)
-        refresh = RefreshToken.for_user(user)
-        return Response({
-            "refresh": str(refresh),
-            "access": str(refresh.access_token),
-            "user": {"id": user.id, "email": user.email, "username": user.username, "guest": True},
-        }, status=200)
-
-class GuestLookupThrottle(throttling.SimpleRateThrottle):
-    scope = "guest_lookup"
-    def get_cache_key(self, request, view):
-        ident = self.get_ident(request)
-        return self.cache_format % {"scope": self.scope, "ident": ident}
-
-class GuestOrderLookupView(APIView):
-    permission_classes = [permissions.AllowAny]
-    throttle_classes = [GuestLookupThrottle]
-    def post(self, request):
-        inp = GuestOrderLookupInputSerializer(data=request.data)
-        inp.is_valid(raise_exception=True)
-        email = inp.validated_data["email"].strip()
-        number = inp.validated_data["number"].strip()
-
-        qs = Order.objects.select_related("shipping_address").prefetch_related("items__product")
-        order = qs.filter(number=number).first()
-        if not order:
-            return Response({"detail": "Order not found."}, status=404)
-        order_email = (getattr(order, "email", "") or getattr(order, "guest_email", "") or "").strip()
-        if order_email.lower() != email.lower():
-            return Response({"detail": "Order not found."}, status=404)
-        ser = OrderPublicSerializer(order, context={"request": request})
-        data = ser.data
-        has_invoice = bool(data.get("invoice_pdf"))
-        if order.status == "paid" and has_invoice:
-            token = _make_invoice_token(order)
-            url = request.build_absolute_uri(
-                reverse("invoice-public-download", kwargs={"pk": order.id})
-            ) + f"?token={token}"
-            data["invoice_download_url"] = url
-        return Response(data, status=200)
-    
-    # ---------- Public, tokenized invoice download ----------
-class InvoicePublicDownloadView(APIView):
-    permission_classes = [AllowAny]
-    throttle_classes = [GuestLookupThrottle]
-    def get(self, request, pk):
-        order = get_object_or_404(Order, pk=pk)
-        token = request.GET.get("token")
-        if not token:
-            return Response({"detail": "Missing token."}, status=400)
-        ok, reason = _verify_invoice_token(token, order)
-        if not ok:
-            return Response({"detail": f"Invalid token ({reason})."}, status=400)
-        inv = getattr(order, "invoice", None)
-        if not inv or not getattr(inv, "pdf", None):
-            return Response({"detail": "Invoice not available."}, status=404)
-        return FileResponse(inv.pdf.open("rb"),
-                            content_type="application/pdf",
-                            as_attachment=True,
-                            filename=f"{inv.number}.pdf")
 
 #-------------------Stock Alert Creation-------------------
 class StockAlertCreateView(generics.CreateAPIView):

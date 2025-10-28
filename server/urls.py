@@ -42,9 +42,6 @@ from .views import (
     OrderListAPIView, OrderCreateView, OrderDetailAPIView,
     OrderInvoiceAPIView, InvoiceDownloadView,
 
-    # Invoice (public tokenized)
-    InvoicePublicDownloadView,
-
     # Orders (admin helpers)
     OrderAdminUpdateAPIView, SetTrackingAPIView,
 
@@ -66,9 +63,6 @@ from .views import (
 
     # Returns / Cancellations
     OrderRequestReturnAPIView, OrderCancelRequestAPIView,
-
-    # Guest flows
-    GuestCheckoutLoginView, GuestOrderLookupView,
 
     # Stock Alerts
     StockAlertCreateView, StockAlertUnsubscribeView,
@@ -148,10 +142,7 @@ urlpatterns = [
     path("orders/<int:pk>/invoice/", OrderInvoiceAPIView.as_view(), name="order_invoice"),
     path("orders/<int:pk>/invoice/download/", InvoiceDownloadView.as_view(), name="order_invoice_download"),
 
-    # -------- Invoice (public tokenized) --------
-    # FIX: must include pk and name must match reverse() usage in GuestOrderLookupView
-    path("orders/<int:pk>/invoice/public/", InvoicePublicDownloadView.as_view(), name="invoice-public-download"),
-
+   
     # -------- Orders (admin helpers) --------
     path("admin/orders/<int:pk>/update/", OrderAdminUpdateAPIView.as_view(), name="admin_order_update"),
     path("admin/orders/<int:pk>/set-tracking/", SetTrackingAPIView.as_view(), name="admin_set_tracking"),
@@ -183,9 +174,7 @@ urlpatterns = [
     path("orders/<int:pk>/request-return/", OrderRequestReturnAPIView.as_view(), name="order_request_return"),
     path("orders/<int:pk>/cancel-request/", OrderCancelRequestAPIView.as_view(), name="order_cancel_request"),
 
-    # -------- Guest flows --------
-    path("guest/login/", GuestCheckoutLoginView.as_view(), name="guest_login"),
-    path("guest/order-lookup/", GuestOrderLookupView.as_view(), name="guest_order_lookup"),
+
 
     # -------- Allauth (optional) --------
     path("accounts/", include("allauth.urls")),
