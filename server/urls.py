@@ -169,7 +169,7 @@ urlpatterns = [
     path("paypal/capture/<str:order_id>/", PaypalCaptureOrder.as_view(), name="paypal_capture_order"),
 
     # -------- Stripe --------
-    path("stripe/create-intent/", StripeCreateIntent.as_view(), name="stripe_create_intent"),
+    path("stripe/create-intent/card", StripeCreateIntent.as_view(), name="stripe_create_intent"),
     path("stripe/setup-intent/card/", StripeCreateCardSetupIntent.as_view(), name="stripe_setup_card"),
     path("stripe/setup-intent/sepa/", StripeCreateSepaSetupIntent.as_view(), name="stripe_setup_sepa"),
     path("stripe/create-intent/sepa/", StripeCreateSepaIntent.as_view(), name="stripe_create_sepa_intent"),
