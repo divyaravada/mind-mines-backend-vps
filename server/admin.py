@@ -122,16 +122,34 @@ class OrderItemInline(admin.TabularInline):
         return False
 
     def item_name(self, obj):
-        return obj.product_name
+        for attr in ("product_name", "name",):
+            val = getattr(obj, attr, None)
+            if val:
+                return val
+        # Fallback: use product.__str__ if present
+        prod = getattr(obj, "product", None)
+        return str(prod) if prod else "-"
     item_name.short_description = "Item"
 
     def unit_price_fmt(self, obj):
-        return f"{obj.unit_price:.2f} €"
+        val = getattr(obj, "unit_price", None)
+        try:
+            return f"{val:.2f} €" if val is not None else "-"
+        except Exception:
+            return str(val) if val is not None else "-"
     unit_price_fmt.short_description = "Unit price"
 
     def line_total_fmt(self, obj):
+        if hasattr(obj, "line_total") and callable(getattr(obj, "line_total")):
+            try:
+                return f"{obj.line_total():.2f} €"
+            except Exception:
+                pass
+        # Fallback compute
+        qty = getattr(obj, "quantity", 0) or 0
+        unit = getattr(obj, "unit_price", 0) or 0
         try:
-            return f"{obj.line_total():.2f} €"
+            return f"{(qty * unit):.2f} €"
         except Exception:
             return "-"
     line_total_fmt.short_description = "Line total"
@@ -159,11 +177,141 @@ class OrderAdmin(admin.ModelAdmin):
     )
     inlines = [OrderItemInline]
 
+    def customer_email(self, obj):
+        # Prefer explicit order email if your model supports guest checkout
+        val = getattr(obj, "email", None) or getattr(getattr(obj, "user", None), "email", None)
+        return val or "-"
+    customer_email.short_description = "Email"
+
+    def total_price_display(self, obj):
+        val = getattr(obj, "total_price", None)
+        if val is None:
+            # Try common alternates
+            for alt in ("total", "grand_total", "amount_total"):
+                v = getattr(obj, alt, None)
+                if v is not None:
+                    val = v
+                    break
+        try:
+            return f"{val:.2f} €" if val is not None else "-"
+        except Exception:
+            return str(val) if val is not None else "-"
+    total_price_display.short_description = "Total"
+
+    # ---- readonly_fields helpers (names here match readonly_fields) ----
+    def subtotal(self, obj):
+        if hasattr(obj, "subtotal"):
+            return obj.subtotal
+        # Fallback: sum items
+        rel = getattr(obj, "items", None) or getattr(obj, "orderitem_set", None)
+        total = 0
+        if rel is not None:
+            for it in rel.all():
+                qty = getattr(it, "quantity", 0) or 0
+                price = getattr(it, "unit_price", 0) or 0
+                total += qty * price
+        return f"{total:.2f} €"
+
+    def discount_amount(self, obj):
+        for name in ("discount_amount", "discount", "coupon_discount"):
+            val = getattr(obj, name, None)
+            if val is not None:
+                try:
+                    return f"{val:.2f} €"
+                except Exception:
+                    return str(val)
+        return "0.00 €"
+
+    def shipping_fee(self, obj):
+        for name in ("shipping_fee", "shipping_cost", "shipping_price", "delivery_fee"):
+            val = getattr(obj, name, None)
+            if val is not None:
+                try:
+                    return f"{val:.2f} €"
+                except Exception:
+                    return str(val)
+        return "0.00 €"
+
+    def total_price(self, obj):
+        val = getattr(obj, "total_price", None)
+        if val is None:
+            # Compute from subtotals as a fallback
+            try:
+                # reuse helpers
+                sub = self.subtotal(obj)
+                ship = self.shipping_fee(obj)
+                disc = self.discount_amount(obj)
+                # strip " €" if present
+                def to_dec(s):
+                    return float(str(s).replace(" €", ""))
+                val = to_dec(sub) + to_dec(ship) - to_dec(disc)
+            except Exception:
+                return "-"
+        try:
+            return f"{val:.2f} €"
+        except Exception:
+            return str(val)
+
+    def payment_ref(self, obj):
+        # Safe getter for a reference string
+        for name in ("payment_ref", "payment_reference", "provider_ref"):
+            val = getattr(obj, name, None)
+            if val:
+                return val
+        return "-"
+
+    def payment_id(self, obj):
+        for name in ("payment_id", "provider_payment_id", "transaction_id"):
+            val = getattr(obj, name, None)
+            if val:
+                return val
+        return "-"
+
+    def delivered_at(self, obj):
+        for name in ("delivered_at", "delivered_on", "shipped_at"):
+            val = getattr(obj, name, None)
+            if val:
+                return val
+        return None
+
+    def cancelled_at(self, obj):
+        for name in ("cancelled_at", "canceled_at", "voided_at"):
+            val = getattr(obj, name, None)
+            if val:
+                return val
+        return None
+    
     def items_readonly(self, obj):
-        rows = [
-            (f"{oi.product_name} × {oi.quantity}", f"{oi.unit_price:.2f} €", f"{oi.line_total():.2f} €")
-            for oi in obj.items.all()
-        ]
+        rel = getattr(obj, "items", None) or getattr(obj, "orderitem_set", None)
+        if rel is None:
+            return "-"
+        rows = []
+        for it in rel.all():
+            # item name
+            name = getattr(it, "product_name", None)
+            if not name:
+                prod = getattr(it, "product", None)
+                name = str(prod) if prod else getattr(it, "name", "-")
+            # unit price
+            unit = getattr(it, "unit_price", 0) or 0
+            try:
+                unit_fmt = f"{unit:.2f} €"
+            except Exception:
+                unit_fmt = str(unit)
+            # line total
+            if hasattr(it, "line_total") and callable(getattr(it, "line_total")):
+                try:
+                    total_fmt = f"{it.line_total():.2f} €"
+                except Exception:
+                    total_fmt = "-"
+            else:
+                qty = getattr(it, "quantity", 0) or 0
+                try:
+                    total_fmt = f"{(qty * unit):.2f} €"
+                except Exception:
+                    total_fmt = "-"
+            rows.append((f"{name} × {getattr(it,'quantity',0)}", unit_fmt, total_fmt))
+
         if not rows:
             return "-"
         return format_html(

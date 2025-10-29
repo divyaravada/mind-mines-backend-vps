@@ -12,7 +12,6 @@ from server.views import MyTokenObtainPairView
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("server.urls")),
-    #path("", include("server.urls")), # test aliases
     path('api/token/', MyTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
 ]
