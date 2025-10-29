@@ -13,60 +13,72 @@ from django.contrib import messages
 # --------------------------------------------------------------------------------------
 # Optional utilities (safe fallbacks if utils are missing)
 # --------------------------------------------------------------------------------------
-try:
-    from .utils.invoices import generate_invoice_pdf  # noqa
-except (ImportError, ModuleNotFoundError, AttributeError):
-    def generate_invoice_pdf(*args, **kwargs):
-        return None  # graceful no-op
+
+def generate_invoice_pdf(*args, **kwargs):
+    return None  # default no-op
+
+def send_invoice_email(*args, **kwargs):
+    return None  # default no-op
+
+def send_shipping_update(*args, **kwargs):
+    return None  # default no-op
+
+def send_cancellation_email(*args, **kwargs):
+    return None
 
 try:
-    from .utils.emails import (  # noqa
-        send_invoice_email,
-        send_shipping_update,
-        send_cancellation_email,
-    )
+    from .utils.invoices import generate_invoice_pdf as _gen_inv_pdf
+    generate_invoice_pdf = _gen_inv_pdf  
 except (ImportError, ModuleNotFoundError, AttributeError):
-    def send_invoice_email(*args, **kwargs):  # no-op
-        return None
-    def send_shipping_update(*args, **kwargs):  # no-op
-        return None
-    def send_cancellation_email(*args, **kwargs):  # no-op
-        return None
+    pass
+
+try:
+    from .utils.emails import (  
+        send_invoice_email as _send_invoice_email,
+        send_shipping_update as _send_shipping_update,
+        send_cancellation_email as _send_cancellation_email,
+    )
+    send_invoice_email = _send_invoice_email     
+    send_shipping_update = _send_shipping_update  
+    send_cancellation_email = _send_cancellation_email 
+except (ImportError, ModuleNotFoundError, AttributeError):
+    pass
 
 # --------------------------------------------------------------------------------------
 # Helpers that safely read possibly-renamed fields
 # --------------------------------------------------------------------------------------
 def get_order_number(o: Any) -> str:
-    """Works with either .order_number (new) or .number (old)."""
-    val = getattr(o, "order_number", None) or getattr(o, "number", None)
-    return str(val) if val else "-"
+    if hasattr(o, "order_number") and getattr(o, "order_number") is not None:
+        return str(getattr(o, "order_number"))
+    if hasattr(o, "number") and getattr(o, "number") is not None:
+        return str(getattr(o, "number"))
+    return "-"
 
 def get_canceled_at(o: Any):
-    """Works with .canceled_at (new) or .cancelled_at (old)."""
     return getattr(o, "canceled_at", None) or getattr(o, "cancelled_at", None)
 
 def get_total(o: Any):
-    """
-    Try common total fields; fall back to computing from items without raising.
-    """
     for name in ("total_price", "total_gross", "total", "grand_total"):
-        val = getattr(o, name, None)
-        if val is not None:
-            return val
-
+        if hasattr(o, name):
+            val = getattr(o, name)
+            if val is not None:
+                return val
+            
     items_mgr = getattr(o, "items", None)
     if not hasattr(items_mgr, "all"):
         return None
 
     total = 0
     for oi in items_mgr.all():
-        # prefer a provided method
         if hasattr(oi, "line_total") and callable(oi.line_total):
-            total += oi.line_total()
-            continue
-        unit = getattr(oi, "unit_price_gross", getattr(oi, "unit_price", 0)) or 0
-        qty = getattr(oi, "quantity", 1) or 1
-        total += unit * qty
+            lt = oi.line_total()
+            total += lt if lt is not None else 0
+        else:
+            unit = getattr(oi, "unit_price_gross", None)
+            if unit is None:
+                unit = getattr(oi, "unit_price", 0)
+            qty = getattr(oi, "quantity", 1) or 1
+            total += (unit or 0) * qty
     return total
 
 def fmt_eur(v: Optional[Any]) -> str:
@@ -86,12 +98,9 @@ def mark_paid(modeladmin, request, queryset):
             continue
         order.status = "paid"
         order.save(update_fields=["status"])
-
-        # Safe no-ops if utils missing
-        generate_invoice_pdf(order)
+        generate_invoice_pdf(order)  
         user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-        send_invoice_email(order, user_locale=user_locale)
-
+        send_invoice_email(order, user_locale=user_locale) 
         updated += 1
     modeladmin.message_user(request, f"Marked {updated} order(s) as paid and sent invoice.", level=messages.SUCCESS)
 
@@ -101,7 +110,7 @@ def mark_shipped(modeladmin, request, queryset):
     for order in queryset:
         order.status = "shipped"
         order.save(update_fields=["status"])
-        send_shipping_update(order, tracking=getattr(order, "tracking_number", "") or "")
+        send_shipping_update(order, tracking=getattr(order, "tracking_number", "") or "")  
         n += 1
     modeladmin.message_user(request, f"Marked {n} order(s) as shipped and sent emails (if configured).", level=messages.SUCCESS)
 
@@ -112,12 +121,9 @@ def mark_cancelled(modeladmin, request, queryset):
         prev = getattr(order, "status", None)
         order.status = "cancelled"
         order.save(update_fields=["status"])
-
-        # release stock if available and not already cancelled before
         if prev != "cancelled" and hasattr(order, "release_stock") and callable(order.release_stock):
             order.release_stock()
-
-        send_cancellation_email(order)
+        send_cancellation_email(order)  
         n += 1
     modeladmin.message_user(request, f"Cancelled {n} order(s) and notified customers (if configured).", level=messages.SUCCESS)
 
@@ -137,9 +143,8 @@ class OrderItemInline(admin.TabularInline):
         return False
 
     def item_name(self, obj):
-        name = getattr(obj, "product_name", None)
-        if name:
-            return name
+        if hasattr(obj, "product_name") and obj.product_name:
+            return obj.product_name
         prod = getattr(obj, "product", None)
         if prod:
             return getattr(prod, "title_en", None) or getattr(prod, "title_de", None) or str(prod)
@@ -157,11 +162,13 @@ class OrderItemInline(admin.TabularInline):
         if hasattr(obj, "line_total") and callable(obj.line_total):
             try:
                 return fmt_eur(obj.line_total())
-            except Exception:  # defensive: line_total is user code
+            except (TypeError, ValueError):
                 pass
-        unit = getattr(obj, "unit_price_gross", getattr(obj, "unit_price", 0)) or 0
+        unit = getattr(obj, "unit_price_gross", None)
+        if unit is None:
+            unit = getattr(obj, "unit_price", 0)
         qty = getattr(obj, "quantity", 1) or 1
-        return fmt_eur(unit * qty)
+        return fmt_eur((unit or 0) * qty)
     line_total_display.short_description = "Line total"
 
 # --------------------------------------------------------------------------------------
@@ -211,16 +218,16 @@ class OrderAdmin(admin.ModelAdmin):
 
     # ---- readonly_fields helpers (names match readonly_fields above) ----
     def subtotal(self, obj):
-        return f"{float(getattr(obj, 'subtotal', 0)): .2f} €".replace(" ", "")
+        return f"{float(getattr(obj, 'subtotal', 0)):.2f} €"
 
     def discount_amount(self, obj):
-        return f"{float(getattr(obj, 'discount_amount', 0)): .2f} €".replace(" ", "")
+        return f"{float(getattr(obj, 'discount_amount', 0)):.2f} €"
 
     def shipping_fee(self, obj):
-        return f"{float(getattr(obj, 'shipping_fee', 0)): .2f} €".replace(" ", "")
+        return f"{float(getattr(obj, 'shipping_fee', 0)):.2f} €"
 
     def total_price(self, obj):
-        return f"{float(getattr(obj, 'total_price', 0)): .2f} €".replace(" ", "")
+        return f"{float(getattr(obj, 'total_price', 0)):.2f} €"
 
     def payment_ref(self, obj):
         return getattr(obj, "payment_ref", "") or "-"
@@ -231,7 +238,6 @@ class OrderAdmin(admin.ModelAdmin):
     def delivered_at(self, obj):
         return getattr(obj, "delivered_at", None)
 
-
     def cancelled_at(self, obj):
         return getattr(obj, "cancelled_at", None)
 
@@ -241,10 +247,12 @@ class OrderAdmin(admin.ModelAdmin):
         if hasattr(items, "all"):
             for it in items.all():
                 name = getattr(it, "product_name", None) or "-"
-                unit_val = getattr(it, "unit_price", None)
-                unit_fmt = fmt_eur(unit_val)
+                unit_fmt = fmt_eur(getattr(it, "unit_price", None))
                 try:
-                    total_fmt = fmt_eur(it.line_total()) if hasattr(it, "line_total") and callable(it.line_total) else fmt_eur((getattr(it, "unit_price", 0) or 0) * (getattr(it, "quantity", 1) or 1))
+                    if hasattr(it, "line_total") and callable(it.line_total):
+                        total_fmt = fmt_eur(it.line_total())
+                    else:
+                        total_fmt = fmt_eur((getattr(it, "unit_price", 0) or 0) * (getattr(it, "quantity", 1) or 1))
                 except (TypeError, ValueError):
                     total_fmt = "-"
                 rows.append((f"{name} × {getattr(it, 'quantity', 1) or 1}", unit_fmt, total_fmt))
@@ -300,8 +308,7 @@ class ProfileAdmin(admin.ModelAdmin):
     mobile_col.short_description = "Mobile"
 
     def verified_col(self, obj):
-        v = getattr(obj, "verified", False)
-        return bool(v)
+        return bool(getattr(obj, "verified", False))
     verified_col.boolean = True
     verified_col.short_description = "Verified"
 
