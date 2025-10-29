@@ -294,8 +294,18 @@ class CustomUserAdmin(DjangoUserAdmin):
 
 @admin.register(Profile)
 class ProfileAdmin(admin.ModelAdmin):
-    list_display = ["user", "full_name", "date_of_birth"]
+    list_display = ("user", "full_name", "mobile_col", "verified_col")
     search_fields = ("user__email", "full_name")
+
+    def mobile_col(self, obj):
+        return getattr(obj, "mobile", "-")
+    mobile_col.short_description = "Mobile"
+
+    def verified_col(self, obj):
+        v = getattr(obj, "verified", None)
+        return bool(v) if isinstance(v, bool) or v in (0, 1, True, False) else False
+    verified_col.boolean = True
+    verified_col.short_description = "Verified"
 
 # --------------------------------------------------------------------------------------
 # Product & Media
