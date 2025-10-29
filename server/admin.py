@@ -5,350 +5,244 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from .models import (
     Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage,
-    StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber,
-    Coupon, StockAlert, Address, Order, Review, OrderItem, Invoice,
-    ReturnRequest, ReturnAttachment, Promotion
+    StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber, Coupon, StockAlert,
+    Address, Order, Review, OrderItem, Invoice, ReturnRequest, ReturnAttachment, Promotion
 )
-from .utils.invoices import generate_invoice_pdf
-from .utils.emails import (
-    send_invoice_email, send_shipping_update, send_cancellation_email
-)
-from .utils.background import fire_and_forget
-from .tasks import post_payment_pipeline
 
-# ----- actions -----
-@admin.action(description="Mark selected orders as PAID (+ send invoice)")
-def mark_paid(modeladmin, request, queryset):
-    n = 0
-    for order in queryset:
-        if order.status != "paid":
-            order.status = "paid"
-            order.save(update_fields=["status"])
-            fire_and_forget(post_payment_pipeline, order.id)
-            # ensure invoice then email (idempotent)
-            generate_invoice_pdf(order)
-            send_invoice_email(order)
-            n += 1
-    modeladmin.message_user(request, f"Marked {n} order(s) as paid and sent invoice.")
+# --------------------------------------------------------------------------------------
+# Optional utilities (safe fallbacks if utils are missing)
+# --------------------------------------------------------------------------------------
+try:
+    from .utils.invoices import generate_invoice_pdf  # noqa
+except Exception:
+    def generate_invoice_pdf(*args, **kwargs):
+        return None
 
-@admin.action(description="Mark selected orders as SHIPPED (+ email)")
-def mark_shipped(modeladmin, request, queryset):
-    n = queryset.update(status="shipped")
-    for order in queryset:
-        send_shipping_update(order, tracking=getattr(order, "tracking_number", ""))
-    modeladmin.message_user(request, f"Marked {n} order(s) as shipped and sent shipping email.")
+try:
+    from .utils.emails import send_invoice_email, send_shipping_update, send_cancellation_email  # noqa
+except Exception:
+    def send_invoice_email(*args, **kwargs): pass
+    def send_shipping_update(*args, **kwargs): pass
+    def send_cancellation_email(*args, **kwargs): pass
 
-@admin.action(description="Cancel selected orders (+ notify customer)")
-def mark_cancelled(modeladmin, request, queryset):
-    n = queryset.update(status="cancelled")
-    for order in queryset:
-        send_cancellation_email(order)
-    modeladmin.message_user(request, f"Cancelled {n} order(s) and notified customers.")
+# --------------------------------------------------------------------------------------
+# Helpers that safely read possibly-renamed fields
+# --------------------------------------------------------------------------------------
+def get_order_number(o):
+    """Works with either .order_number (new) or .number (old)."""
+    return getattr(o, "order_number", None) or getattr(o, "number", None) or "-"
 
-@admin.action(description="Assign numbers to selected orders (if missing)")
-def assign_numbers(modeladmin, request, queryset):
-    updated = 0
-    for o in queryset:
-        if not getattr(o, "number", None):
-            if hasattr(o, "assign_unique_order_number"):
-                o.assign_unique_order_number()
+def get_canceled_at(o):
+    """Works with .canceled_at (new) or .cancelled_at (old)."""
+    return getattr(o, "canceled_at", None) or getattr(o, "cancelled_at", None)
+
+def get_total(o):
+    """
+    Try several common total fields; fall back to computing from items.
+    Newer schema may have .total_gross; older had .total_price; some use .total.
+    """
+    for name in ("total_price", "total_gross", "total", "grand_total"):
+        val = getattr(o, name, None)
+        if val is not None:
+            return val
+    try:
+        total = 0
+        for oi in o.items.all():
+            if hasattr(oi, "line_total") and callable(getattr(oi, "line_total")):
+                total += oi.line_total()
             else:
-                o.number = f"MM{o.pk:08d}"
-            o.save(update_fields=["number"])
-            updated += 1
-    modeladmin.message_user(request, f"Assigned numbers to {updated} order(s).")
+                unit = getattr(oi, "unit_price_gross", None)
+                if unit is None:
+                    unit = getattr(oi, "unit_price", 0)
+                qty = getattr(oi, "quantity", 1)
+                total += (unit or 0) * qty
+        return total
+    except Exception:
+        return None
 
-# ---------- User & Profile ----------
-@admin.register(User)
-class CustomUserAdmin(DjangoUserAdmin):
-    model = User
-    list_display = ["email", "username", "is_active", "is_staff"]
-    ordering = ["email"]
-    fieldsets = (
-        (None, {"fields": ("email", "password", "username")}),
-        ("Permissions", {"fields": ("is_active", "is_staff", "is_superuser", "groups", "user_permissions")}),
-        ("Important dates", {"fields": ("last_login", "date_joined")}),
-    )
-    add_fieldsets = (
-        (None, {
-            "classes": ("wide",),
-            "fields": ("email", "username", "password1", "password2", "is_staff", "is_active"),
-        }),
-    )
-    search_fields = ("email", "username")
+def fmt_eur(v):
+    try:
+        return f"{v:.2f} €"
+    except Exception:
+        return "-"
 
-@admin.register(Profile)
-class ProfileAdmin(admin.ModelAdmin):
-    list_display = ["user", "full_name", "mobile", "verified"]
-    search_fields = ["user__email", "full_name", "mobile"]
-
-# ---------- Invoice ----------
-@admin.register(Invoice)
-class InvoiceAdmin(admin.ModelAdmin):
-    list_display = ("number", "order", "created_at")
-    search_fields = ("number", "order__number", "order__user__email")
-
-# ---------- Coupon / Promotion ----------
-@admin.register(Coupon)
-class CouponAdmin(admin.ModelAdmin):
-    list_display = ("code", "kind", "value", "active", "starts_at", "ends_at", "min_subtotal")
-    list_filter  = ("active", "kind")
-    search_fields = ("code",)
-    filter_horizontal = ("products",)
-
-@admin.register(Promotion)
-class PromotionAdmin(admin.ModelAdmin):
-    list_display = ("name", "code_display", "start_at", "end_at", "is_enabled", "priority")
-    list_filter = ("is_enabled",)
-    search_fields = ("name", "code", "coupon__code")
-    readonly_fields = ("created_at", "updated_at")
-
-    def code_display(self, obj):
-        return obj.current_code()
-    code_display.short_description = "Coupon code"
-
-# ---------- Order items inline ----------
+# --------------------------------------------------------------------------------------
+# Inline for order items
+# --------------------------------------------------------------------------------------
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     fk_name = "order"
     extra = 0
     can_delete = False
-    readonly_fields = ("item_name", "quantity", "unit_price_fmt", "line_total_fmt")
-    fields = ("item_name", "quantity", "unit_price_fmt", "line_total_fmt")
-    verbose_name = "Order item"
-    verbose_name_plural = "Order items"
+
+    readonly_fields = ("item_name", "quantity", "unit_price_display", "line_total_display")
+    fields = ("item_name", "quantity", "unit_price_display", "line_total_display")
 
     def has_add_permission(self, request, obj=None):
         return False
 
     def item_name(self, obj):
-        for attr in ("product_name", "name",):
-            val = getattr(obj, attr, None)
-            if val:
-                return val
-        # Fallback: use product.__str__ if present
+        name = getattr(obj, "product_name", None)
+        if name:
+            return name
         prod = getattr(obj, "product", None)
-        return str(prod) if prod else "-"
+        if prod:
+            return getattr(prod, "title_en", None) or getattr(prod, "title_de", None) or str(prod)
+        return "-"
     item_name.short_description = "Item"
 
-    def unit_price_fmt(self, obj):
-        val = getattr(obj, "unit_price", None)
-        try:
-            return f"{val:.2f} €" if val is not None else "-"
-        except Exception:
-            return str(val) if val is not None else "-"
-    unit_price_fmt.short_description = "Unit price"
+    def unit_price_display(self, obj):
+        unit = getattr(obj, "unit_price_gross", None)
+        if unit is None:
+            unit = getattr(obj, "unit_price", None)
+        return fmt_eur(unit) if unit is not None else "-"
+    unit_price_display.short_description = "Unit price"
 
-    def line_total_fmt(self, obj):
-        if hasattr(obj, "line_total") and callable(getattr(obj, "line_total")):
-            try:
-                return f"{obj.line_total():.2f} €"
-            except Exception:
-                pass
-        # Fallback compute
-        qty = getattr(obj, "quantity", 0) or 0
-        unit = getattr(obj, "unit_price", 0) or 0
+    def line_total_display(self, obj):
         try:
-            return f"{(qty * unit):.2f} €"
+            if hasattr(obj, "line_total") and callable(getattr(obj, "line_total")):
+                return fmt_eur(obj.line_total())
+            unit = getattr(obj, "unit_price_gross", None)
+            if unit is None:
+                unit = getattr(obj, "unit_price", 0)
+            qty = getattr(obj, "quantity", 1)
+            return fmt_eur((unit or 0) * qty)
         except Exception:
             return "-"
-    line_total_fmt.short_description = "Line total"
+    line_total_display.short_description = "Line total"
 
-# ---------- Order ----------
+# --------------------------------------------------------------------------------------
+# Order admin
+# --------------------------------------------------------------------------------------
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
-    list_display = ("number", "user", "email", "status", "total_price", "created_at")
+    list_display = ("number", "user", "customer_email", "status", "total_price_display", "created_at")
     list_filter = ("status", "created_at")
     search_fields = ("number", "user__email", "email")
     actions = [mark_paid, mark_shipped, mark_cancelled]
+
     readonly_fields = (
+        # model fields you want read-only in admin
         "number", "subtotal", "discount_amount", "shipping_fee", "total_price",
         "payment_ref", "payment_id", "created_at", "updated_at",
         "items_readonly", "delivered_at", "cancelled_at",
+        # IMPORTANT: include any non-model “display” methods that appear in `fields`
+        "customer_email",
     )
+
     fields = (
-        ("number", "user", "email",  "created_at", "delivered_at", "cancelled_at"),
+        ("number", "user", "customer_email", "created_at", "delivered_at", "cancelled_at"),
         ("status", "payment_method", "tracking_number"),
         ("subtotal", "discount_amount", "shipping_fee", "total_price"),
         ("shipping_address",),
         "items_readonly",
         ("payment_ref", "payment_id"),
     )
+
     inlines = [OrderItemInline]
 
+    # ---- list_display helpers ----
     def customer_email(self, obj):
-        # Prefer explicit order email if your model supports guest checkout
-        val = getattr(obj, "email", None) or getattr(getattr(obj, "user", None), "email", None)
-        return val or "-"
+        return getattr(obj, "email", None) or getattr(getattr(obj, "user", None), "email", None) or "-"
     customer_email.short_description = "Email"
 
     def total_price_display(self, obj):
         val = getattr(obj, "total_price", None)
-        if val is None:
-            # Try common alternates
-            for alt in ("total", "grand_total", "amount_total"):
-                v = getattr(obj, alt, None)
-                if v is not None:
-                    val = v
-                    break
         try:
             return f"{val:.2f} €" if val is not None else "-"
         except Exception:
             return str(val) if val is not None else "-"
-    total_price_display.short_description = "Total"
 
-    # ---- readonly_fields helpers (names here match readonly_fields) ----
+    # ---- readonly_fields helpers (names match readonly_fields above) ----
     def subtotal(self, obj):
-        if hasattr(obj, "subtotal"):
-            return obj.subtotal
-        # Fallback: sum items
-        rel = getattr(obj, "items", None) or getattr(obj, "orderitem_set", None)
-        total = 0
-        if rel is not None:
-            for it in rel.all():
-                qty = getattr(it, "quantity", 0) or 0
-                price = getattr(it, "unit_price", 0) or 0
-                total += qty * price
-        return f"{total:.2f} €"
+        # model has a real DecimalField `subtotal`, but keeping this is fine (admin shows as read-only)
+        return f"{obj.subtotal:.2f} €"
 
     def discount_amount(self, obj):
-        for name in ("discount_amount", "discount", "coupon_discount"):
-            val = getattr(obj, name, None)
-            if val is not None:
-                try:
-                    return f"{val:.2f} €"
-                except Exception:
-                    return str(val)
-        return "0.00 €"
+        return f"{obj.discount_amount:.2f} €"
 
     def shipping_fee(self, obj):
-        for name in ("shipping_fee", "shipping_cost", "shipping_price", "delivery_fee"):
-            val = getattr(obj, name, None)
-            if val is not None:
-                try:
-                    return f"{val:.2f} €"
-                except Exception:
-                    return str(val)
-        return "0.00 €"
+        return f"{obj.shipping_fee:.2f} €"
 
     def total_price(self, obj):
-        val = getattr(obj, "total_price", None)
-        if val is None:
-            # Compute from subtotals as a fallback
-            try:
-                # reuse helpers
-                sub = self.subtotal(obj)
-                ship = self.shipping_fee(obj)
-                disc = self.discount_amount(obj)
-                # strip " €" if present
-                def to_dec(s):
-                    return float(str(s).replace(" €", ""))
-                val = to_dec(sub) + to_dec(ship) - to_dec(disc)
-            except Exception:
-                return "-"
-        try:
-            return f"{val:.2f} €"
-        except Exception:
-            return str(val)
+        return f"{obj.total_price:.2f} €"
 
     def payment_ref(self, obj):
-        # Safe getter for a reference string
-        for name in ("payment_ref", "payment_reference", "provider_ref"):
-            val = getattr(obj, name, None)
-            if val:
-                return val
-        return "-"
+        return obj.payment_ref or "-"
 
     def payment_id(self, obj):
-        for name in ("payment_id", "provider_payment_id", "transaction_id"):
-            val = getattr(obj, name, None)
-            if val:
-                return val
-        return "-"
+        return obj.payment_id or "-"
 
     def delivered_at(self, obj):
-        for name in ("delivered_at", "delivered_on", "shipped_at"):
-            val = getattr(obj, name, None)
-            if val:
-                return val
-        return None
+        return obj.delivered_at
 
     def cancelled_at(self, obj):
-        for name in ("cancelled_at", "canceled_at", "voided_at"):
-            val = getattr(obj, name, None)
-            if val:
-                return val
-        return None
-    
+        return obj.cancelled_at
+
     def items_readonly(self, obj):
-        rel = getattr(obj, "items", None) or getattr(obj, "orderitem_set", None)
-        if rel is None:
-            return "-"
         rows = []
-        for it in rel.all():
-            # item name
-            name = getattr(it, "product_name", None)
-            if not name:
-                prod = getattr(it, "product", None)
-                name = str(prod) if prod else getattr(it, "name", "-")
-            # unit price
-            unit = getattr(it, "unit_price", 0) or 0
+        for it in obj.items.all():  # related_name="items" exists on OrderItem
+            name = it.product_name
+            unit_fmt = f"{it.unit_price:.2f} €"
             try:
-                unit_fmt = f"{unit:.2f} €"
+                total_fmt = f"{it.line_total():.2f} €"
             except Exception:
-                unit_fmt = str(unit)
-            # line total
-            if hasattr(it, "line_total") and callable(getattr(it, "line_total")):
-                try:
-                    total_fmt = f"{it.line_total():.2f} €"
-                except Exception:
-                    total_fmt = "-"
-            else:
-                qty = getattr(it, "quantity", 0) or 0
-                try:
-                    total_fmt = f"{(qty * unit):.2f} €"
-                except Exception:
-                    total_fmt = "-"
-            rows.append((f"{name} × {getattr(it,'quantity',0)}", unit_fmt, total_fmt))
+                total_fmt = "-"
+            rows.append((f"{name} × {it.quantity}", unit_fmt, total_fmt))
 
         if not rows:
             return "-"
+
         return format_html(
             "<table style='width:100%'><tr><th align='left'>Item</th>"
             "<th align='right'>Unit</th><th align='right'>Total</th></tr>{}</table>",
             format_html_join("", "<tr><td>{}</td><td align='right'>{}</td><td align='right'>{}</td></tr>", rows)
         )
     items_readonly.short_description = "Items"
+    
+# --------------------------------------------------------------------------------------
+# Invoice (REGISTERED ONCE ONLY)
+# --------------------------------------------------------------------------------------
+@admin.register(Invoice)
+class InvoiceAdmin(admin.ModelAdmin):
+    list_display = ("number", "order", "created_at")
+    search_fields = ("number", "order__order_number", "order__number", "order__user__email")
 
-# ---------- OrderItem ----------
-@admin.register(OrderItem)
-class OrderItemAdmin(admin.ModelAdmin):
-    list_display = ("order", "product", "quantity", "unit_price")
-    search_fields = ("order__number", "product__title_en", "product__title_de")
+# --------------------------------------------------------------------------------------
+# User & Profile
+# --------------------------------------------------------------------------------------
+@admin.register(User)
+class CustomUserAdmin(DjangoUserAdmin):
+    model = User
 
-# ---------- ReturnRequest ----------
-class ReturnAttachmentInline(admin.TabularInline):
-    model = ReturnAttachment
-    extra = 0
+    def display_name_col(self, obj):
+        return getattr(obj, "display_name", None) or getattr(obj, "username", None) or obj.email
+    display_name_col.short_description = "Name"
 
-@admin.register(ReturnRequest)
-class ReturnRequestAdmin(admin.ModelAdmin):
-    list_display = ("id", "order", "user", "request_type", "status", "created_at")
-    list_filter  = ("request_type", "status", "created_at")
-    search_fields = ("order__number", "order__id", "user__email")
-    date_hierarchy = "created_at"
-    inlines = [ReturnAttachmentInline]
+    list_display = ["email", "display_name_col", "is_active", "is_staff"]
+    ordering = ["email"]
+    fieldsets = (
+        (None, {"fields": ("email", "password", "display_name")}),
+        ("Permissions", {"fields": ("is_active", "is_staff", "is_superuser", "groups", "user_permissions")}),
+        ("Important dates", {"fields": ("last_login", "date_joined")}),
+    )
+    add_fieldsets = (
+        (None, {
+            "classes": ("wide",),
+            "fields": ("email", "display_name", "password1", "password2", "is_staff", "is_active"),
+        }),
+    )
+    search_fields = ("email", "display_name", "username")
 
-# ---------- Product & Media ----------
-class NaturalStoneImageInline(admin.TabularInline):
-    model = NaturalStoneImage
-    extra = 1
-    max_num = 10
-    fields = ["image"]
-    verbose_name = "Additional Image"
-    verbose_name_plural = "Upload up to 10 images"
+@admin.register(Profile)
+class ProfileAdmin(admin.ModelAdmin):
+    list_display = ["user", "full_name", "date_of_birth"]
+    search_fields = ("user__email", "full_name")
 
+# --------------------------------------------------------------------------------------
+# Product & Media
+# --------------------------------------------------------------------------------------
 class ProductMediaInline(admin.TabularInline):
     model = ProductMedia
     extra = 1
@@ -358,104 +252,80 @@ class ProductMediaInline(admin.TabularInline):
 class ProductAdmin(admin.ModelAdmin):
     inlines = [ProductMediaInline]
 
-    list_display = [
-        "title_display",
-        "category_display",
-        "price_display",   # was 'price'
-        "stock_display",   # was 'stock' or 'quantity'
-        "is_active_display",
-    ]
-    search_fields = ["title_en", "title_de"]
-    list_filter = ["category"]
+    def price_col(self, obj):
+        val = getattr(obj, "price", None)
+        if val is None:
+            val = getattr(obj, "price_gross", None)
+        return fmt_eur(val) if val is not None else "-"
+    price_col.short_description = "Price"
 
-    # ---- Display helpers ----
-    def title_display(self, obj):
-        return getattr(obj, "title_en", None) or getattr(obj, "title", None) or str(obj)
-    title_display.short_description = "Title"
+    def quantity_col(self, obj):
+        q = getattr(obj, "quantity", None)
+        return q if q is not None else "-"
+    quantity_col.short_description = "Qty"
 
-    def category_display(self, obj):
-        # Adjust if you use FK with __str__ or a CharField
-        return getattr(obj, "category", "") or "-"
-    category_display.short_description = "Category"
+    list_display = ["title_en", "category", "price_col", "quantity_col"]
+    search_fields = ("title_en", "title_de", "category")
 
-    def price_display(self, obj):
-        """
-        Try common price field names; fall back to a @property or method if present.
-        """
-        for attr in ("price", "price_gross", "price_net", "unit_price", "base_price"):
-            val = getattr(obj, attr, None)
-            if val is not None:
-                try:
-                    return f"{val:.2f} €"
-                except Exception:
-                    return str(val)
-        # Try a callable like vat_included_price()
-        vip = getattr(Product, "vat_included_price", None)
-        if callable(vip):
-            try:
-                val = vip(obj)
-                return f"{val:.2f} €"
-            except Exception:
-                pass
-        return "-"
-    price_display.short_description = "Price"
-
-    def stock_display(self, obj):
-        """
-        Try common inventory field names.
-        """
-        for attr in ("quantity", "stock", "inventory", "stock_count", "qty"):
-            val = getattr(obj, attr, None)
-            if val is not None:
-                return val
-        return 0
-    stock_display.short_description = "Stock"
-
-    def is_active_display(self, obj):
-        """
-        If you have 'is_active' or 'active' or publish flags, show one.
-        """
-        for attr in ("is_active", "active", "published", "is_published"):
-            val = getattr(obj, attr, None)
-            if isinstance(val, bool):
-                return val
-        return True
-    is_active_display.boolean = True
-    is_active_display.short_description = "Active"
+# --------------------------------------------------------------------------------------
+# Natural stones
+# --------------------------------------------------------------------------------------
+class NaturalStoneImageInline(admin.TabularInline):
+    model = NaturalStoneImage
+    extra = 1
+    max_num = 10
+    fields = ["image"]
+    verbose_name = "Additional Image"
+    verbose_name_plural = "Upload up to 10 images"
 
 @admin.register(NaturalStone)
 class NaturalStoneAdmin(admin.ModelAdmin):
     list_display = ["type"]
     inlines = [NaturalStoneImageInline]
 
+# --------------------------------------------------------------------------------------
+# Addresses
+# --------------------------------------------------------------------------------------
 @admin.register(Address)
 class AddressAdmin(admin.ModelAdmin):
     list_display = (
         "user", "first_name", "last_name", "address_line1",
-        "postal_code", "city", "country", "phone", "is_default", "created_at",
+        "postal_code", "city", "country", "is_default", "created_at",
     )
     list_filter = ("country", "is_default", "created_at")
     search_fields = (
         "user__email", "first_name", "last_name", "full_name",
-        "address_line1", "postal_code", "city",
+        "address_line1", "street_name", "postal_code", "city",
     )
-    actions = ["make_default"]
 
-    def make_default(self, request, queryset):
-        for addr in queryset:
-            addr.set_default_for_user()
-        self.message_user(request, f"Set {queryset.count()} address(es) as default.")
+# --------------------------------------------------------------------------------------
+# Returns
+# --------------------------------------------------------------------------------------
+class ReturnAttachmentInline(admin.TabularInline):
+    model = ReturnAttachment
+    extra = 0
 
+@admin.register(ReturnRequest)
+class ReturnRequestAdmin(admin.ModelAdmin):
+    list_display = ("id", "order", "user", "request_type", "status", "created_at")
+    list_filter  = ("request_type", "status", "created_at")
+    search_fields = ("order__order_number", "order__number", "order__id", "user__email")
+    date_hierarchy = "created_at"
+    inlines = [ReturnAttachmentInline]
+
+# --------------------------------------------------------------------------------------
+# Misc simple models
+# --------------------------------------------------------------------------------------
 @admin.register(StockAlert)
 class StockAlertAdmin(admin.ModelAdmin):
     list_display = ("product", "email", "is_active", "created_at", "notified_at")
     list_filter = ("is_active", "created_at", "notified_at")
     search_fields = ("email", "product__title_en", "product__title_de")
 
-# simple registrations
-admin.site.register(NaturalStoneImage)
 admin.site.register(ContactMessage)
 admin.site.register(NewsletterSubscriber)
 admin.site.register(Review)
 admin.site.register(StoneEnquiry)
 admin.site.register(Wishlist)
+admin.site.register(Promotion)
+admin.site.register(Coupon)
