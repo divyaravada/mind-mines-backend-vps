@@ -267,7 +267,9 @@ class OrderAdmin(admin.ModelAdmin):
 @admin.register(Invoice)
 class InvoiceAdmin(admin.ModelAdmin):
     list_display = ("number", "order", "created_at")
-    search_fields = ("number", "order__number", "order__user__email")
+    search_fields = ("number", "order__number", "order__user__email")  
+    list_select_related = ("order",)
+    ordering = ("-created_at",)
 
 # --------------------------------------------------------------------------------------
 # User & Profile
@@ -376,9 +378,9 @@ class ReturnAttachmentInline(admin.TabularInline):
 class ReturnRequestAdmin(admin.ModelAdmin):
     list_display = ("id", "order", "user", "request_type", "status", "created_at")
     list_filter  = ("request_type", "status", "created_at")
-    search_fields = ("order__number", "order__id", "user__email") 
+    search_fields = ("order__number", "order__id", "user__email")  
     date_hierarchy = "created_at"
-    inlines = [ReturnAttachmentInline]
+    list_select_related = ("order", "user")
 
 # --------------------------------------------------------------------------------------
 # Misc simple models
