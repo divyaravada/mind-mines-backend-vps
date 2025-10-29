@@ -564,12 +564,19 @@ class Order(models.Model):
         # Prefer related manager
         manager = getattr(self, "items", None)
         if manager is not None:
+            yielded = False
             for it in manager.all().select_related("product"):
+                yielded = True
                 yield it
-            return
+            if yielded:
+                return
         # Fallback to query
+        yielded2 = False
         for it in OrderItem.objects.filter(order=self).select_related("product"):
+            yielded2 = True
             yield it
+        if yielded2:
+            return
         # Legacy single-line conversion (read-only)
         if self.product_id and self.quantity:
             yield OrderItem(
