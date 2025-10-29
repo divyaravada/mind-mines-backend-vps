@@ -65,6 +65,66 @@ def fmt_eur(v):
         return f"{v:.2f} €"
     except Exception:
         return "-"
+# ----- actions -----
+@admin.action(description="Mark selected orders as PAID (+ send invoice)")
+def mark_paid(modeladmin, request, queryset):
+    updated = 0
+    for order in queryset:
+        if getattr(order, "status", None) != "paid":
+            order.status = "paid"
+            order.save(update_fields=["status"])
+            try:
+                # ensure invoice then email (idempotent)
+                inv = generate_invoice_pdf(order)
+                try:
+                    # try to get user's preferred language if present
+                    user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+                except Exception:
+                    user_locale = "en"
+                send_invoice_email(order, user_locale=user_locale)
+            except Exception:
+                pass
+            updated += 1
+    modeladmin.message_user(request, f"Marked {updated} order(s) as paid and sent invoice.")
+
+@admin.action(description="Mark selected orders as SHIPPED (+ email)")
+def mark_shipped(modeladmin, request, queryset):
+    n = 0
+    for order in queryset:
+        try:
+            order.status = "shipped"
+            order.save(update_fields=["status"])
+            try:
+                send_shipping_update(order, tracking=getattr(order, "tracking_number", ""))
+            except Exception:
+                pass
+            n += 1
+        except Exception:
+            pass
+    modeladmin.message_user(request, f"Marked {n} order(s) as shipped and (attempted) shipping emails.")
+
+@admin.action(description="Cancel selected orders (+ notify customer)")
+def mark_cancelled(modeladmin, request, queryset):
+    n = 0
+    for order in queryset:
+        try:
+            # release stock if your model supports it
+            prev = getattr(order, "status", None)
+            order.status = "cancelled"
+            order.save(update_fields=["status"])
+            try:
+                if hasattr(order, "release_stock") and callable(order.release_stock) and prev != "cancelled":
+                    order.release_stock()
+            except Exception:
+                pass
+            try:
+                send_cancellation_email(order)
+            except Exception:
+                pass
+            n += 1
+        except Exception:
+            pass
+    modeladmin.message_user(request, f"Cancelled {n} order(s) and notified customers.")
 
 # --------------------------------------------------------------------------------------
 # Inline for order items
@@ -200,7 +260,7 @@ class OrderAdmin(admin.ModelAdmin):
             format_html_join("", "<tr><td>{}</td><td align='right'>{}</td><td align='right'>{}</td></tr>", rows)
         )
     items_readonly.short_description = "Items"
-    
+
 # --------------------------------------------------------------------------------------
 # Invoice (REGISTERED ONCE ONLY)
 # --------------------------------------------------------------------------------------
@@ -216,24 +276,21 @@ class InvoiceAdmin(admin.ModelAdmin):
 class CustomUserAdmin(DjangoUserAdmin):
     model = User
 
-    def display_name_col(self, obj):
-        return getattr(obj, "display_name", None) or getattr(obj, "username", None) or obj.email
-    display_name_col.short_description = "Name"
 
-    list_display = ["email", "display_name_col", "is_active", "is_staff"]
+    list_display = ["email", "username", "is_active", "is_staff"]
     ordering = ["email"]
     fieldsets = (
-        (None, {"fields": ("email", "password", "display_name")}),
+        (None, {"fields": ("email", "password", "username")}),
         ("Permissions", {"fields": ("is_active", "is_staff", "is_superuser", "groups", "user_permissions")}),
         ("Important dates", {"fields": ("last_login", "date_joined")}),
     )
     add_fieldsets = (
         (None, {
             "classes": ("wide",),
-            "fields": ("email", "display_name", "password1", "password2", "is_staff", "is_active"),
+            "fields": ("email", "username", "password1", "password2", "is_staff", "is_active"),
         }),
     )
-    search_fields = ("email", "display_name", "username")
+    search_fields = ("email", "username")
 
 @admin.register(Profile)
 class ProfileAdmin(admin.ModelAdmin):
