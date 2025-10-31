@@ -1201,7 +1201,8 @@ class StripeCreateSepaSetupIntent(APIView):
     permission_classes = [IsAuthenticated]
     def post(self, request):
         try:
-            customer_id = _get_or_create_stripe_customer(request.user)
+            customer_id = _get_or_create_stripe_customer(request.user,
+                email=getattr(request.user, "email", None),)
             si = stripe.SetupIntent.create(
                 customer=customer_id,
                 payment_method_types=["sepa_debit"],
@@ -1219,20 +1220,34 @@ class StripeCreateSepaSetupIntent(APIView):
 # 3) Legacy SEPA one-off (keep; )
 # ============================================================================
 class StripeCreateSepaIntent(APIView):
-    permission_classes = [AllowAny] 
+    permission_classes = [IsAuthenticated] 
     def post(self, request):
         s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
-        email = (s.validated_data.get("email") or getattr(getattr(request, "user", None), "email", "") or "").strip()
+        
+        raw_email = (
+            s.validated_data.get("email")
+            or getattr(getattr(request, "user", None), "email", "")
+            or ""
+        )
+        email = raw_email.strip()
         if not email:
             return Response({"detail": "Email is required for SEPA payments."}, status=400)
-        with transaction.atomic():
-            order = s.save()
-            order.payment_method = "sepa_debit"
-            order.status = "pending"
-            order.save(update_fields=["payment_method", "status"])
+
         try:
-            customer_id = _get_or_create_stripe_customer(user=request.user, email=email)
+            with transaction.atomic():
+                order = s.save()
+                order.payment_method = "sepa_debit"
+                order.status = "pending"
+                order.save(update_fields=["payment_method", "status"])
+        except Exception as e:
+            return Response({"detail": f"Order creation failed: {e}"}, status=500)
+
+        try:
+            customer_id = _get_or_create_stripe_customer(
+                user=request.user,
+                email=email,
+            )
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
@@ -1245,6 +1260,7 @@ class StripeCreateSepaIntent(APIView):
                 idempotency_key=f"pi-create-{order.id}",
             )
         except stripe_error.CardError as e:
+            # immediate Stripe refusal (bad input etc.)
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response({"detail": str(e)}, status=400)
@@ -1259,11 +1275,7 @@ class StripeCreateSepaIntent(APIView):
 
         order.payment_ref = intent.id
         order.save(update_fields=["payment_ref"])
-        try:
-            locale = (getattr(getattr(order, "user", None), "profile", None) and getattr(order.user.profile, "language", None)) or "en"
-            send_sepa_pending_email(order, user_locale=locale, to=_order_to(order))
-        except Exception:
-            pass
+
         return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
 
 # ============================================================================
@@ -1271,28 +1283,38 @@ class StripeCreateSepaIntent(APIView):
 # ============================================================================
 class StripeSepaCreateInstallments(APIView):
     permission_classes = [IsAuthenticated]
+
     def post(self, request):
         months = int(request.data.get("months") or 0)
         if months not in (3, 6, 9):
             return Response({"detail": "Invalid months. Choose 3, 6, or 9."}, status=400)
+
         country = (request.data.get("country") or "").upper()[:2]
         if country != "DE":
             return Response({"detail": "Installments are available in DE only."}, status=400)
+
         method = (request.data.get("method") or "sepa_debit").strip()
         if method == "sepa_debit" and country != "DE":
             return Response({"detail": "SEPA installments are available in DE only."}, status=400)
 
         s = OrderCreateSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
-        email = (s.validated_data.get("email") or request.user.email or "").strip()
-        if not email:
+
+        raw_email = (s.validated_data.get("email") or request.user.email or "").strip()
+        if not raw_email:
             return Response({"detail": "Email is required for installments."}, status=400)
-        with transaction.atomic():
-            order = s.save()
-            order.payment_method = method
-            order.installments_months = months
-            order.status = "pending"
-            order.save(update_fields=["payment_method", "installments_months", "status"])
+        email = raw_email
+
+        # 1. Create order draft
+        try:
+            with transaction.atomic():
+                order = s.save()
+                order.payment_method = method
+                order.installments_months = months
+                order.status = "pending"
+                order.save(update_fields=["payment_method", "installments_months", "status"])
+        except Exception as e:
+            return Response({"detail": f"Order creation failed: {e}"}, status=500)
 
         total_cents = _amount_cents(order.total_price)
         base = total_cents // months
@@ -1303,8 +1325,10 @@ class StripeSepaCreateInstallments(APIView):
             return Response({"detail": "payment_method_id is required"}, status=400)
 
         try:
+            # 2. Attach PM to customer in Stripe
             pm = stripe.PaymentMethod.retrieve(pm_id)
             pm_customer = pm.get("customer")
+
             if pm_customer:
                 customer_id = pm_customer
                 prof = getattr(request.user, "profile", None)
@@ -1312,9 +1336,15 @@ class StripeSepaCreateInstallments(APIView):
                     prof.stripe_customer_id = customer_id
                     prof.save(update_fields=["stripe_customer_id"])
             else:
-                customer_id = _get_or_create_stripe_customer(request.user)
+                customer_id = _get_or_create_stripe_customer(request.user, email=email)
                 stripe.PaymentMethod.attach(pm_id, customer=customer_id)
-            stripe.Customer.modify(customer_id, invoice_settings={"default_payment_method": pm_id})
+
+            stripe.Customer.modify(
+                customer_id,
+                invoice_settings={"default_payment_method": pm_id},
+            )
+
+            # best effort: ensure Stripe customer has email set
             try:
                 cust = stripe.Customer.retrieve(customer_id)
                 if not cust.get("email") and email:
@@ -1322,16 +1352,19 @@ class StripeSepaCreateInstallments(APIView):
             except Exception:
                 pass
 
-            def mk_price(amount: int, label: str):
+            def mk_price(amount_int, label: str):
                 return stripe.Price.create(
-                    unit_amount=amount,
+                    unit_amount=amount_int,
                     currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                     recurring={"interval": "month"},
                     product_data={"name": label},
                 )
 
             now_ = timezone.now()
-            def ts(dt): return int(dt.timestamp())
+
+            def ts(dt):
+                return int(dt.timestamp())
+
             phases = []
             title_base = f"Installments for Order {order.number or order.id}"
 
@@ -1339,15 +1372,28 @@ class StripeSepaCreateInstallments(APIView):
                 if months > 1:
                     price_base = mk_price(base, f"{title_base} (monthly)")
                     end1 = now_ + relativedelta(months=months - 1)
-                    phases.append({"items": [{"price": price_base.id, "quantity": 1}], "end_date": ts(end1)})
-                price_last = mk_price(base + remainder, f"{title_base} (final month adj)")
+                    phases.append({
+                        "items": [{"price": price_base.id, "quantity": 1}],
+                        "end_date": ts(end1),
+                    })
+                price_last = mk_price(
+                    base + remainder,
+                    f"{title_base} (final month adj)"
+                )
                 end2 = now_ + relativedelta(months=months)
-                phases.append({"items": [{"price": price_last.id, "quantity": 1}], "end_date": ts(end2)})
+                phases.append({
+                    "items": [{"price": price_last.id, "quantity": 1}],
+                    "end_date": ts(end2),
+                })
             else:
                 price_all = mk_price(base, f"{title_base} (monthly)")
                 end_all = now_ + relativedelta(months=months)
-                phases.append({"items": [{"price": price_all.id, "quantity": 1}], "end_date": ts(end_all)})
+                phases.append({
+                    "items": [{"price": price_all.id, "quantity": 1}],
+                    "end_date": ts(end_all),
+                })
 
+            # 3. Create subscription schedule
             schedule = stripe.SubscriptionSchedule.create(
                 customer=customer_id,
                 start_date="now",
@@ -1360,12 +1406,16 @@ class StripeSepaCreateInstallments(APIView):
                 metadata={"order_id": str(order.id)},
             )
 
+            # 4. Persist to order
             order.payment_ref = schedule.id
-            order.status = "processing"
+            order.status = "processing"  # installments considered active now
             order.save(update_fields=["payment_ref", "status"])
 
+            # 5. Send installments started email (safe fail)
             try:
                 amounts_eur = _split_installments_eur(total_cents, months)
+
+                # attempt to get anchor date (first charge date)
                 anchor_dt = timezone.now()
                 try:
                     sch = stripe.SubscriptionSchedule.retrieve(schedule.id)
@@ -1373,25 +1423,50 @@ class StripeSepaCreateInstallments(APIView):
                     anchor_ts = sub.get("billing_cycle_anchor") if sub else None
                     if not anchor_ts:
                         phases0 = (sch.get("phases") or [{}])[0]
-                        anchor_ts = phases0.get("start_date") or sch.get("start_date")
+                        anchor_ts = (
+                            phases0.get("start_date")
+                            or sch.get("start_date")
+                        )
                     if anchor_ts:
-                        anchor_dt = datetime.fromtimestamp(anchor_ts, tz=timezone.utc)
+                        anchor_dt = datetime.fromtimestamp(
+                            anchor_ts, tz=timezone.utc
+                        )
                 except Exception:
                     pass
+
                 dates = _month_dates(anchor_dt, months)
-                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                send_installments_started_email(order, months, amounts_eur, dates, user_locale=user_locale, to=_order_to(order))
+                user_locale = (
+                    getattr(getattr(order.user, "profile", None), "language", "en")
+                    or "en"
+                )
+                send_installments_started_email(
+                    order,
+                    months,
+                    amounts_eur,
+                    dates,
+                    user_locale=user_locale,
+                    to=_order_to(order),
+                )
             except Exception:
                 logger.exception("installments started email failed")
 
-            return Response({"order_id": order.id, "schedule_id": schedule.id}, status=201)
+            return Response(
+                {"order_id": order.id, "schedule_id": schedule.id},
+                status=201,
+            )
 
         except stripe_error.CardError as e:
-            return Response({"detail": e.user_message or str(e)}, status=400)
+            return Response(
+                {"detail": e.user_message or str(e)}, status=400
+            )
         except stripe_error.StripeError as e:
-            return Response({"detail": str(e)}, status=502)
+            return Response(
+                {"detail": str(e)}, status=502
+            )
         except Exception as e:
-            return Response({"detail": str(e)}, status=500)
+            return Response(
+                {"detail": str(e)}, status=500
+            )
 
 # ============================================================================
 # 6) Webhook: mark orders paid/failed
@@ -1401,8 +1476,10 @@ def stripe_webhook(request):
     log = logging.getLogger(__name__)
     wh_secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
     sig_header = request.META.get("HTTP_STRIPE_SIGNATURE")
+
     if not sig_header:
         return JsonResponse({"detail": "Missing Stripe-Signature header"}, status=400)
+
     payload = request.body
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, wh_secret)
@@ -1427,69 +1504,114 @@ def stripe_webhook(request):
         if order.status != "paid":
             order.status = "paid"
             changed = True
+
         if not getattr(order, "payment_id", ""):
-            ch_id = (data.get("charges", {}).get("data") or [{}])[0].get("id") or data.get("id","")
+            ch_id = None
+            charges_block = data.get("charges", {})
+            ch_list = charges_block.get("data") if isinstance(charges_block, dict) else None
+            if ch_list and len(ch_list) > 0:
+                ch_id = ch_list[0].get("id")
+            if not ch_id:
+                ch_id = data.get("id", "")
+
             if ch_id:
                 order.payment_id = ch_id
                 changed = True
+
         if changed:
             order.save(update_fields=["status", "payment_id"])
+
+        # invoice creation + email (safe if repeated)
         order.assign_unique_invoice_number()
         generate_invoice_pdf(order)
-        user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+
+        user_locale = (
+            getattr(getattr(order.user, "profile", None), "language", "en")
+            or "en"
+        )
         try:
             send_invoice_email(order, user_locale=user_locale, to=_order_to(order))
         except Exception:
             log.exception("send_invoice_email failed for order %s", order.id)
 
+    # ------- payment_intent.processing -------
     if etype == "payment_intent.processing":
         oid = (data.get("metadata") or {}).get("order_id")
         if oid:
             try:
-                order = Order.objects.get(pk=oid)
-                _mark_processing(order)
-                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                try:
-                    send_sepa_pending_email(order, user_locale=user_locale, to=_order_to(order))
-                except Exception:
-                    log.exception("send_sepa_pending_email failed for order %s", order.id)
+                with transaction.atomic():
+                    order = Order.objects.select_for_update().get(pk=oid)
+                    _mark_processing(order)
+                    user_locale = (
+                        getattr(getattr(order.user, "profile", None), "language", "en")
+                        or "en"
+                    )
+                    try:
+                        send_sepa_pending_email(
+                            order,
+                            user_locale=user_locale,
+                            to=_order_to(order),
+                        )
+                    except Exception:
+                        log.exception(
+                            "send_sepa_pending_email failed for order %s",
+                            order.id,
+                        )
             except Order.DoesNotExist:
                 pass
 
+    # ------- payment_intent.succeeded -------
     elif etype == "payment_intent.succeeded":
         oid = (data.get("metadata") or {}).get("order_id")
         if oid:
             try:
-                order = Order.objects.select_for_update().get(pk=oid)
-                try:
-                    order.reserve_stock()
-                except Exception as e:
-                    log.exception("reserve_stock failed for order %s:%s", order.id, e)
-                _mark_paid(order)
+                with transaction.atomic():
+                    order = Order.objects.select_for_update().get(pk=oid)
+                    # reserve stock (you already had this)
+                    try:
+                        order.reserve_stock()
+                    except Exception as e:
+                        log.exception(
+                            "reserve_stock failed for order %s:%s",
+                            order.id,
+                            e,
+                        )
+                    _mark_paid(order)
             except Order.DoesNotExist:
                 pass
 
+    # ------- invoice.payment_succeeded (installments etc) -------
     elif etype == "invoice.payment_succeeded":
         oid = (data.get("metadata") or {}).get("order_id")
         if oid:
             try:
-                order = Order.objects.get(pk=oid)
-                _mark_paid(order)
+                with transaction.atomic():
+                    order = Order.objects.select_for_update().get(pk=oid)
+                    _mark_paid(order)
             except Order.DoesNotExist:
                 pass
 
+    # ------- failed cases -------
     elif etype in ("payment_intent.payment_failed", "invoice.payment_failed"):
         oid = (data.get("metadata") or {}).get("order_id")
         if oid:
             try:
-                order = Order.objects.select_for_update().get(pk=oid)
-                order.status = "failed"
-                order.save(update_fields=["status"])
-                order.release_stock()
+                with transaction.atomic():
+                    order = Order.objects.select_for_update().get(pk=oid)
+                    order.status = "failed"
+                    order.save(update_fields=["status"])
+                    try:
+                        order.release_stock()
+                    except Exception as e:
+                        log.exception(
+                            "release_stock failed for order %s:%s",
+                            order.id,
+                            e,
+                        )
             except Order.DoesNotExist:
                 pass
-    return HttpResponse(status=200)
 
+    return HttpResponse(status=200)
 
 # -------------------- Bank transfer --------------------
 class CreateBankTransferOrder(APIView):
