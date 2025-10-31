@@ -52,7 +52,7 @@ from .tasks import post_payment_pipeline
 from .utils.emails import (
     send_stock_alert_email, send_installments_started_email, send_return_request_emails,
     send_cancel_request_emails, send_order_confirmation, send_bank_transfer_instructions,
-    send_invoice_email, send_sepa_pending_email,_send_bilingual, send_sepa_processing_email 
+    send_invoice_email, send_sepa_pending_email,_send_bilingual 
 )
 
 import logging
@@ -1468,7 +1468,7 @@ class StripeSepaCreateInstallments(APIView):
                 {"detail": str(e)}, status=500
             )
 #-----------------------SEPA POST Confirm--------------------------
-class SepaPostConfirmView(views.APIView):
+class SepaPostConfirmView(APIView):
     """
     Frontend calls this AFTER stripe.confirmSepaDebitPayment succeeds
     with status 'processing' or 'succeeded'.
@@ -1499,7 +1499,7 @@ class SepaPostConfirmView(views.APIView):
 
         # Send the email now
         try:
-            send_sepa_processing_email(order)
+            send_sepa_pending_email(order)
         except Exception:
             # we swallow email errors so checkout still succeeds
             pass
