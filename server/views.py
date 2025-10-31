@@ -719,6 +719,7 @@ class OrderAdminUpdateAPIView(APIView):
 
         if prev_status != "paid" and order.status == "paid":
             inv = generate_invoice_pdf(order)
+            order.reserve_stock()
             try:
                 user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
                 send_invoice_email(order, user_locale=user_locale, to=_order_to(order))
@@ -1013,20 +1014,20 @@ class PaypalCaptureOrder(PaypalBase):
         if not token:
             return Response({"detail": "FAILED_TO_GET_TOKEN", "error": err}, status=502)
         cap_url = f"{self._base()}/v2/checkout/orders/{order_id}/capture"
+       
+        resp = http.post(
+            cap_url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=30,
+        )
         try:
-            resp = http.post(
-                cap_url,
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                timeout=30,
-            )
-            try:
-                data = resp.json()
-            except Exception:
-                data = {"raw": resp.text}
-        except Exception as e:
-            return Response({"detail": "PAYPAL_CAPTURE_HTTP_FAILED", "error": str(e)}, status=502)
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+        
         if resp.status_code not in (200, 201):
             return Response({"detail": "PAYPAL_CAPTURE_ERROR", "paypal": data}, status=502)
+
         if data.get("status") != "COMPLETED":
             return Response({"detail": "CAPTURE_NOT_COMPLETED", "paypal": data}, status=400)
 
@@ -1482,26 +1483,33 @@ class SepaPostConfirmView(APIView):
         pi_status = request.data.get("payment_intent_status")
 
         if not order_id or not pi_status:
-            return Response({"detail": "Missing order_id or payment_intent_status"}, status=400)
+            return Response({"detail": "Missing order_id or payment_intent_status"}, status=status.HTTP_400_BAD_REQUEST)
 
         # We only act if Stripe said OK.
         if pi_status not in ["processing", "succeeded"]:
             # e.g. requires_payment_method, etc. --> do nothing, no email.
-            return Response({"ok": False, "skipped": True}, status=200)
+            return Response({"ok": False, "skipped": True}, status=status.HTTP_200_OK)
 
         order = get_object_or_404(Order, pk=order_id)
 
         # Optional: update internal order status
         # e.g. "processing" or "awaiting_sepa_settlement"
-        if getattr(order, "status", None):
-            order.status = "processing"  # or "awaiting_sepa" etc
-            order.save(update_fields=["status"])
+        if hasattr(order, "status"):
+            order.status = "processing"  # or "awaiting_sepa_settlement"
+        if hasattr(order, "confirmation_sent_at") and not order.confirmation_sent_at:
+            order.confirmation_sent_at = timezone.now()
+        order.save(update_fields=["status", "confirmation_sent_at"])
+
+        # *** NEW: reserve stock here ***
+        try:
+            order.reserve_stock()
+        except Exception as e:
+            pass
 
         # Send the email now
         try:
             send_sepa_pending_email(order)
         except Exception:
-            # we swallow email errors so checkout still succeeds
             pass
 
         return Response({"ok": True}, status=200)
@@ -1542,6 +1550,7 @@ def stripe_webhook(request):
         changed = False
         if order.status != "paid":
             order.status = "paid"
+            order.reserve_stock()
             changed = True
 
         if not getattr(order, "payment_id", ""):
