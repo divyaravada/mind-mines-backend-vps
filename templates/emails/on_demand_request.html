@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+  <body
+    style="
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    "
+  >
+    <h2>On-demand request / Anfrage (auf Bestellung)</h2>
+
+    <p>
+      <strong>Product:</strong> {{ product.title_en }} / {{
+      product.title_de|default:product.title_en }}
+    </p>
+    <p><strong>Quantity:</strong> {{ req.quantity }}</p>
+    <p>
+      <strong>Customer:</strong> {{ req.name|default:"-" }} &lt;{{ req.email
+      }}&gt;
+    </p>
+    <p><strong>Message:</strong><br />{{ req.message|linebreaksbr }}</p>
+    <p><strong>Current stock:</strong> {{ current_stock }}</p>
+
+    <p><a href="{{ product_url }}">Open product</a></p>
+  </body>
+</html>

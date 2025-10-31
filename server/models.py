@@ -422,7 +422,24 @@ class ProductMedia(models.Model):
 
 
 # ----------------- Wishlist & notifications -----------------
+class OnDemandOrderRequest(models.Model):
+    product = models.ForeignKey("Product", related_name="on_demand_requests", on_delete=models.CASCADE)
+    name = models.CharField(max_length=120, blank=True)
+    email = models.EmailField()
+    quantity = models.PositiveIntegerField(default=1)
+    message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=["product", "created_at"]),
+            models.Index(fields=["email"]),
+        ]
+
+    def __str__(self):
+        return f"On-demand request #{self.id} for {self.product_id} x{self.quantity}"
+    
 class StockAlert(models.Model):
     """Notify me when back in stock."""
     product = models.ForeignKey("Product", related_name="stock_alerts", on_delete=models.CASCADE)
@@ -811,7 +828,7 @@ class CouponRedemption(models.Model):
 
 # ----------------- Promotions -----------------
 
-class Promotion(models.Model):
+class PromotionBanner(models.Model):
     name = models.CharField(max_length=64)
     coupon = models.ForeignKey("Coupon", null=True, blank=True, on_delete=models.SET_NULL, related_name="promotions")
     code = models.CharField(max_length=32, blank=True, help_text="Optional manual code (used if coupon FK empty)")

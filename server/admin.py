@@ -6,7 +6,7 @@ from typing import Any, Optional
 from .models import (
     Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage,
     StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber, Coupon, StockAlert,
-    Address, Order, Review, OrderItem, Invoice, ReturnRequest, ReturnAttachment, Promotion
+    Address, Order, Review, OrderItem, Invoice, ReturnRequest, ReturnAttachment, PromotionBanner
 )
 from django.contrib import messages
 
@@ -399,5 +399,5 @@ admin.site.register(NewsletterSubscriber)
 admin.site.register(Review)
 admin.site.register(StoneEnquiry)
 admin.site.register(Wishlist)
-admin.site.register(Promotion)
+admin.site.register(PromotionBanner)
 admin.site.register(Coupon)

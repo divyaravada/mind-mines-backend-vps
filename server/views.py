@@ -40,10 +40,10 @@ from .serializers import (
     ProductSerializer, ProductMiniSerializer, ContactMessageSerializer, ReviewWriteSerializer,
     NewsletterSubscriberSerializer, AddressSerializer, PromotionSerializer, 
     ReviewSerializer, WishlistSerializer, NaturalStoneSerializer, CouponPreviewIn,
-    StoneEnquirySerializer, AccountSerializer, OrderCreateSerializer, OrderReadSerializer,
+    StoneEnquirySerializer, AccountSerializer, OrderCreateSerializer, OrderReadSerializer, OnDemandOrderRequestSerializer
 )
 from .models import (
-    User, Product, ContactMessage, NewsletterSubscriber, Promotion, StockAlert, Coupon,
+    User, Product, ContactMessage, NewsletterSubscriber, PromotionBanner, StockAlert, Coupon, OnDemandOrderRequest,
     Address, Order, Review, Wishlist, NaturalStone, NaturalStoneImage, ReturnRequest, ReturnAttachment
 )
 from .utils.invoices import generate_invoice_pdf
@@ -783,13 +783,13 @@ class CouponPreviewAPIView(APIView):
             "total": f"{total:.2f}",
         })
 
-#------------------Promotion-------------
+#------------------PromotionBanner-------------
 class ActivePromotionAPIView(APIView):
     permission_classes = [AllowAny]
     def get(self, request):
         now = timezone.now()
         country = (request.GET.get("country") or request.headers.get("X-Country") or "DE").upper()
-        qs = Promotion.objects.filter(
+        qs = PromotionBanner.objects.filter(
             is_enabled=True, start_at__lte=now, end_at__gte=now
         ).order_by("-priority", "-updated_at")
         qs = qs.filter(Q(country_whitelist=[]) | Q(country_whitelist__contains=[country]))
@@ -1617,6 +1617,86 @@ class OrderCancelRequestAPIView(APIView):
 
 
 #-------------------Stock Alert Creation-------------------
+
+DEFAULT_FROM = getattr(settings, "EMAIL_HOST_USER", "no-reply@mindmines.eu")
+
+def send_on_demand_request_email(req: OnDemandOrderRequest):
+    product = req.product
+    admin_mail = None
+
+    if getattr(settings, "ORDER_ALERT_EMAIL", None):
+        admin_mail = settings.ORDER_ALERT_EMAIL
+    elif getattr(settings, "DEFAULT_FROM_EMAIL", None):
+        admin_mail = settings.DEFAULT_FROM_EMAIL
+    elif getattr(settings, "ADMINS", None):
+        # (name, email) tuples
+        admin_mail = settings.ADMINS[0][1] if settings.ADMINS else None
+
+    admin_mail = admin_mail or DEFAULT_FROM
+
+    subject_en = f"On-demand request: {getattr(product, 'title_en', str(product))} x{req.quantity}"
+    subject_de = f"Anfrage (auf Bestellung): {getattr(product, 'title_de', getattr(product, 'title_en', str(product)))} x{req.quantity}"
+    subject = f"{subject_en} / {subject_de}"
+
+    ctx = {
+        "req": req,
+        "product": product,
+        "product_url": f"{getattr(settings, 'SITE_URL', 'https://mindmines.eu')}/products/{product.id}/",
+        "current_stock": getattr(product, "quantity", 0),
+    }
+
+    html = None
+    try:
+        html = render_to_string("emails/on_demand_request.html", ctx)
+    except TemplateDoesNotExist:
+        pass
+
+    text = (
+        "EN:\n"
+        f"Product: {getattr(product, 'title_en', str(product))}\n"
+        f"Quantity: {req.quantity}\n"
+        f"Customer: {req.name or '-'} <{req.email}>\n"
+        f"Message: {req.message or '-'}\n"
+        f"Stock now: {ctx['current_stock']}\n"
+        f"Product URL: {ctx['product_url']}\n\n"
+        "DE:\n"
+        f"Produkt: {getattr(product, 'title_de', getattr(product, 'title_en', str(product)))}\n"
+        f"Menge: {req.quantity}\n"
+        f"Kunde: {req.name or '-'} <{req.email}>\n"
+        f"Nachricht: {req.message or '-'}\n"
+        f"Lagerbestand: {ctx['current_stock']}\n"
+        f"Produktlink: {ctx['product_url']}\n"
+    )
+
+    msg = EmailMultiAlternatives(
+        subject=subject,
+        body=text,
+        from_email=DEFAULT_FROM,
+        to=[admin_mail],
+        reply_to=[req.email],
+    )
+    if html:
+        msg.attach_alternative(html, "text/html")
+    msg.send(fail_silently=not settings.DEBUG)
+
+class OnDemandOrderCreateView(generics.CreateAPIView):
+    permission_classes = [permissions.AllowAny]
+    serializer_class = OnDemandOrderRequestSerializer
+
+    def perform_create(self, serializer):
+        user = getattr(self.request, "user", None)
+        instance = serializer.save(user=user if getattr(user, "is_authenticated", False) else None)
+        try:
+            send_on_demand_request_email(instance)
+        except Exception:
+            # never break the request if email fails
+            pass
+        self._payload = {"ok": True, "id": instance.id}
+
+    def create(self, request, *args, **kwargs):
+        super().create(request, *args, **kwargs)
+        return Response(getattr(self, "_payload", {"ok": True}), status=201)
+
 class StockAlertCreateView(generics.CreateAPIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = StockAlertCreateSerializer

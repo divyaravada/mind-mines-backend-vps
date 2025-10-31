@@ -19,9 +19,9 @@ environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
 SECRET_KEY = 'django-insecure-7^uze)9(a$8&l#o&$h&6%x)t!es*(uvf3gqpcod$z%xrqi@)2y'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
+DEBUG = True
 
-ALLOWED_HOSTS = ["mindmines.eu", "www.mindmines.eu"]
+ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
 
 AUTH_USER_MODEL = 'server.User'
 
@@ -209,25 +209,12 @@ ACCOUNT_USER_MODEL_USERNAME_FIELD = None
 
 # CORS / CSRF for Vite dev on 5173
 CORS_ALLOWED_ORIGINS = [
-    "https://mindmines.eu",
-    "https://www.mindmines.eu",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
 ]
-CORS_ALLOW_HEADERS = [
-    "accept",
-    "accept-encoding",
-    "authorization",
-    "content-type",
-    "origin",
-    "user-agent",
-    "x-csrftoken",
-    "x-requested-with",
-]
-CORS_ALLOW_METHODS = ["GET", "POST", "OPTIONS"]
+
 CORS_ALLOW_CREDENTIALS = True   # <-- correct name (not CORS_ALLOWS_*)
-CSRF_TRUSTED_ORIGINS = [
-    "https://mindmines.eu",
-    "https://www.mindmines.eu",
-]
+
 # If you deploy to a domain, add it here too.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SESSION_COOKIE_SECURE = True

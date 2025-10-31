@@ -17,9 +17,9 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import timedelta
 
 from .models import (
-    Promotion, StockAlert, ReturnRequest, NaturalStoneImage, OrderItem, User, Profile,
+    PromotionBanner, StockAlert, ReturnRequest, NaturalStoneImage, OrderItem, User, Profile,
     Wishlist, NaturalStone, StoneEnquiry, Product, ProductMedia, ContactMessage,
-    NewsletterSubscriber, Address, Order, Review, Coupon
+    NewsletterSubscriber, Address, Order, Review, Coupon, OnDemandOrderRequest
 )
 
 # ----------------- Helpers -----------------
@@ -804,7 +804,7 @@ class PromotionSerializer(serializers.ModelSerializer):
     remaining_seconds = serializers.SerializerMethodField()
 
     class Meta:
-        model = Promotion
+        model = PromotionBanner
         fields = [
             "id", "headline", "subheadline", "code",
             "start_at", "end_at", "remaining_seconds",
@@ -901,7 +901,22 @@ class ReviewWriteSerializer(serializers.ModelSerializer):
 
  
  # ----------------- Stock Alert -----------------
+class OnDemandOrderRequestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OnDemandOrderRequest
+        fields = ["id", "product", "name", "email", "quantity", "message", "created_at"]
+        read_only_fields = ["id", "created_at"]
 
+    def validate(self, attrs):
+        qty = int(attrs.get("quantity") or 0)
+        if qty < 1:
+            raise serializers.ValidationError({"quantity": "Must be at least 1."})
+        # Ensure product exists (and is active if you have such a flag)
+        product = attrs.get("product")
+        if not isinstance(product, Product):
+            raise serializers.ValidationError({"product": "Invalid product."})
+        return attrs
+    
 class StockAlertCreateSerializer(serializers.Serializer):
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
     email = serializers.EmailField()

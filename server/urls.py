@@ -65,7 +65,7 @@ from .views import (
     OrderRequestReturnAPIView, OrderCancelRequestAPIView,
 
     # Stock Alerts
-    StockAlertCreateView, StockAlertUnsubscribeView,
+    StockAlertCreateView, StockAlertUnsubscribeView, OnDemandOrderCreateView,
 
     # Admin birthday coupon send
     SendBirthdayCouponAPIView
@@ -147,7 +147,7 @@ urlpatterns = [
     path("admin/orders/<int:pk>/update/", OrderAdminUpdateAPIView.as_view(), name="admin_order_update"),
     path("admin/orders/<int:pk>/set-tracking/", SetTrackingAPIView.as_view(), name="admin_set_tracking"),
 
-    # -------- Coupons / Promotion --------
+    # -------- Coupons / PromotionBanner --------
     path("coupons/preview/", CouponPreviewAPIView.as_view(), name="coupon_preview"),
     path("promotions/active/", ActivePromotionAPIView.as_view(), name="active_promotion"),
 
@@ -180,6 +180,7 @@ urlpatterns = [
     # -------- Stock alerts --------
     path("stock-alerts/", StockAlertCreateView.as_view(), name="stock-alerts-create"),
     path("stock-alerts/unsubscribe/<str:unsubscribe_token>/", StockAlertUnsubscribeView.as_view(), name="stock-alerts-unsubscribe"),
+    path("on-demand/", OnDemandOrderCreateView.as_view(), name="on-demand-create"),
 
     # -------- Admin birthday coupon send --------
     path("admin/send-birthday-coupon/", SendBirthdayCouponAPIView.as_view(), name="admin_send_birthday_coupon"),
