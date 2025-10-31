@@ -56,7 +56,7 @@ from .views import (
 
     # Stripe
     StripeCreateIntent, StripeCreateCardSetupIntent, StripeCreateSepaSetupIntent,
-    StripeCreateSepaIntent, StripeSepaCreateInstallments, stripe_webhook,
+    StripeCreateSepaIntent, StripeSepaCreateInstallments, SepaPostConfirmView, stripe_webhook,
 
     # Bank transfer
     CreateBankTransferOrder,
@@ -165,6 +165,7 @@ urlpatterns = [
     path("stripe/setup-intent/sepa/", StripeCreateSepaSetupIntent.as_view(), name="stripe_setup_sepa"),
     path("stripe/create-intent/sepa/", StripeCreateSepaIntent.as_view(), name="stripe_create_sepa_intent"),
     path("stripe/installments/sepa/", StripeSepaCreateInstallments.as_view(), name="stripe_sepa_installments"),
+    path("payments/sepa-post-confirm/", SepaPostConfirmView.as_view(), name="sepa-post-confirm"),
     path("stripe/webhook/", stripe_webhook, name="stripe_webhook"),
 
     # -------- Bank transfer --------

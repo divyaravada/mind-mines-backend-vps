@@ -52,7 +52,7 @@ from .tasks import post_payment_pipeline
 from .utils.emails import (
     send_stock_alert_email, send_installments_started_email, send_return_request_emails,
     send_cancel_request_emails, send_order_confirmation, send_bank_transfer_instructions,
-    send_invoice_email, send_sepa_pending_email,_send_bilingual
+    send_invoice_email, send_sepa_pending_email,_send_bilingual, send_sepa_processing_email 
 )
 
 import logging
@@ -1467,6 +1467,45 @@ class StripeSepaCreateInstallments(APIView):
             return Response(
                 {"detail": str(e)}, status=500
             )
+#-----------------------SEPA POST Confirm--------------------------
+class SepaPostConfirmView(views.APIView):
+    """
+    Frontend calls this AFTER stripe.confirmSepaDebitPayment succeeds
+    with status 'processing' or 'succeeded'.
+
+    This is the ONLY moment we send the "your order is being processed (SEPA)" email.
+    """
+    permission_classes = [permissions.AllowAny]  # it's okay because we'll only get harmless data
+
+    def post(self, request, *args, **kwargs):
+        order_id = request.data.get("order_id")
+        pi_status = request.data.get("payment_intent_status")
+
+        if not order_id or not pi_status:
+            return Response({"detail": "Missing order_id or payment_intent_status"}, status=400)
+
+        # We only act if Stripe said OK.
+        if pi_status not in ["processing", "succeeded"]:
+            # e.g. requires_payment_method, etc. --> do nothing, no email.
+            return Response({"ok": False, "skipped": True}, status=200)
+
+        order = get_object_or_404(Order, pk=order_id)
+
+        # Optional: update internal order status
+        # e.g. "processing" or "awaiting_sepa_settlement"
+        if getattr(order, "status", None):
+            order.status = "processing"  # or "awaiting_sepa" etc
+            order.save(update_fields=["status"])
+
+        # Send the email now
+        try:
+            send_sepa_processing_email(order)
+        except Exception:
+            # we swallow email errors so checkout still succeeds
+            pass
+
+        return Response({"ok": True}, status=200)
+
 
 # ============================================================================
 # 6) Webhook: mark orders paid/failed
