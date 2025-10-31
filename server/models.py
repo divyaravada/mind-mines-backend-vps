@@ -275,9 +275,9 @@ class Product(models.Model):
     returnspara3_de = models.TextField(blank=True)
 
     # attributes
-    type_of_stone = models.CharField(max_length=50, choices=STONE_TYPES)
-    material = models.CharField(max_length=20, choices=MATERIAL_CHOICES, default="marble")
-    color = models.CharField(max_length=20, choices=COLOR_CHOICES, default="white")
+    type_of_stone = models.CharField(max_length=50, choices=STONE_TYPES, blank=True, null=True)
+    material = models.CharField(max_length=20, choices=MATERIAL_CHOICES, default="marble", blank=True, null=True)
+    color = models.CharField(max_length=20, choices=COLOR_CHOICES, default="white", blank=True, null=True)
     stone_color_image = models.ImageField(upload_to="decor-products/colors/", null=True, blank=True)
 
     # inventory
