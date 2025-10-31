@@ -4,7 +4,7 @@ from django.utils.html import format_html_join, format_html
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from typing import Any, Optional
 from .models import (
-    Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage,
+    Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage, OnDemandOrderRequest,
     StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber, Coupon, StockAlert,
     Address, Order, Review, OrderItem, Invoice, ReturnRequest, ReturnAttachment, PromotionBanner
 )
@@ -393,6 +393,35 @@ class StockAlertAdmin(admin.ModelAdmin):
     list_display = ("product", "email", "is_active", "created_at", "notified_at")
     list_filter = ("is_active", "created_at", "notified_at")
     search_fields = ("email", "product__title_en", "product__title_de")
+
+@admin.register(OnDemandOrderRequest)
+class OnDemandOrderRequestAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "product_display",
+        "quantity",
+        "email",
+        "created_at",
+    )
+    list_filter = ("created_at",)
+    search_fields = (
+        "email",
+        "name",
+        "message",
+        "product__title_en",
+        "product__title_de",
+        "product__key",
+    )
+    readonly_fields = ("created_at",)
+
+    def product_display(self, obj):
+        # Nice readable product label in the admin list
+        title = getattr(obj.product, "title_en", None) or getattr(
+            obj.product, "title_de", None
+        ) or str(obj.product)
+        return f"{title} ({obj.product_id})"
+    product_display.short_description = "Product"
+
 
 admin.site.register(ContactMessage)
 admin.site.register(NewsletterSubscriber)
