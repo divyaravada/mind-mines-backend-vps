@@ -1151,7 +1151,28 @@ class StripeCreateIntent(APIView):
         except Exception as e:
             return Response({"detail": "Order creation failed", "error": str(e)}, status=400)
 
-        # 2. Create Stripe PaymentIntent
+        # 2. pick which Stripe methods to allow based on total
+        total_amount = order.total_price  # Decimal
+        try:
+            total_decimal = Decimal(total_amount)
+        except Exception:
+            total_decimal = Decimal("0.00")
+
+        # base methods: card ALWAYS allowed
+        payment_method_types = ["card"]
+
+        # allow the redirect/pay-later methods only if basket is big enough
+        # (because Klarna / Sofort / etc. have minimum order amounts)
+        if total_decimal >= Decimal("10.00"):
+            payment_method_types += [
+                "klarna",
+                "giropay",
+            ]
+
+        # NOTE: we are intentionally NOT including "sepa_debit" here
+        # because SEPA debit is handled by your dedicated SEPA flow.
+
+        # 3. create or reuse Stripe customer (optional for guests)
         try:
             customer_id = _get_or_create_stripe_customer(
                 request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
@@ -1165,16 +1186,12 @@ class StripeCreateIntent(APIView):
                 status=502
             )
         
-        # 3. create PaymentIntent ONE time
+        # 4. create PaymentIntent ONE time
         try:
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                payment_method_types=[
-                    "card",
-                    "klarna",
-                    "giropay",
-                ],
+                payment_method_types=payment_method_types,
                 metadata={"order_id": str(order.id)},
                 customer=customer_id or None,
                 description=f"Order {order.number or order.id} — MindMines",
@@ -1196,7 +1213,7 @@ class StripeCreateIntent(APIView):
             )
 
 
-         # 4. save PI id on order
+         # 5. save PI id on order
         order.payment_ref = intent.id
         order.stripe_pi = intent.id
         order.save(update_fields=["payment_ref", "stripe_pi"])
