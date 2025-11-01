@@ -1154,11 +1154,19 @@ class StripeCreateIntent(APIView):
         # 2. Create Stripe PaymentIntent
         try:
             customer_id = _get_or_create_stripe_customer(
-                getattr(request, "user", None),
+                request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
                 email=ser.validated_data.get("email", "")
             )
-
-            # let Stripe decide methods incl. redirect methods
+        except stripe_error.StripeError as e:
+            order.status = "failed"
+            order.save(update_fields=["status"])
+            return Response(
+                {"detail": f"Stripe customer error: {str(e)}"},
+                status=502
+            )
+        
+        # 3. create PaymentIntent ONE time
+        try:
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
@@ -1169,22 +1177,28 @@ class StripeCreateIntent(APIView):
                 metadata={"order_id": str(order.id)},
                 customer=customer_id or None,
                 description=f"Order {order.number or order.id} — MindMines",
-                # you could also send receipt_email if you want Stripe to send a receipt
                 receipt_email=ser.validated_data.get("email", None) or None,
             )
         except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
-            # we don't release_stock() yet because we only reserve stock on PAID
-            return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
+            return Response(
+                {"detail": f"Stripe error: {str(e)}"},
+                status=502
+            )
         except Exception as e:
             order.status = "failed"
             order.save(update_fields=["status"])
-            return Response({"detail": f"Server error: {str(e)}"}, status=500)
+            return Response(
+                {"detail": f"Server error: {str(e)}"},
+                status=500
+            )
 
-        # 3. Save intent ref on Order
+
+         # 4. save PI id on order
         order.payment_ref = intent.id
-        order.save(update_fields=["payment_ref"])
+        order.stripe_pi = intent.id
+        order.save(update_fields=["payment_ref", "stripe_pi"])
 
         return Response(
             {

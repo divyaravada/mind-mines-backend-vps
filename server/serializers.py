@@ -679,9 +679,8 @@ class OrderCreateSerializer(serializers.Serializer):
             "bank": "bank_transfer",
             "bank_transfer": "bank_transfer",
             "paypal": "paypal",
-            "giropay": "card",   # frontend will use Stripe PaymentElement (redirect), we'll treat as card intent
-            "klarna": "card",
-            "sofort": "card",
+            "giropay": "giropay",   # frontend will use Stripe PaymentElement (redirect), we'll treat as card intent
+            "klarna": "klarna",
         }
         key = (attrs.get("payment_method") or "").strip().lower() or "card"
         mapped = aliases.get(key, key)
@@ -852,11 +851,12 @@ class OrderCreateSerializer(serializers.Serializer):
                 coupon=coupon_obj,
                 discount_amount=discount,
                 installments_months=validated.get("months"),
+
                 ship_first_name=snap_fn,
                 ship_last_name=snap_ln,
-                ship_address_line1=snap_addr1,
-                ship_address_line2=snap_addr2,
-                ship_postal_code=snap_zip,
+                ship_line1=snap_addr1,
+                ship_line2=snap_addr2,
+                ship_postal=snap_zip,
                 ship_city=snap_city,
                 ship_country=snap_country,
                 ship_phone=snap_phone,

@@ -536,7 +536,6 @@ class Order(models.Model):
     # the email we will use for confirmations + invoice
     email = models.EmailField()
 
-
     # legacy (optional single-line)
     product = models.ForeignKey("server.Product", on_delete=models.SET_NULL, null=True, blank=True)
     quantity = models.PositiveIntegerField(null=True, blank=True)
