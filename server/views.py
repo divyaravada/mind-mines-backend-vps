@@ -1170,10 +1170,11 @@ class StripeCreateIntent(APIView):
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                automatic_payment_methods={
-                    "enabled": True,
-                    "allow_redirects": "always",
-                },
+                payment_method_types=[
+                    "card",
+                    "klarna",
+                    "giropay",
+                ],
                 metadata={"order_id": str(order.id)},
                 customer=customer_id or None,
                 description=f"Order {order.number or order.id} — MindMines",
@@ -1764,35 +1765,33 @@ def stripe_webhook(request):
             return "card"
         return "card"
 
-    def _inject_real_payment_method(order: Order, pi_data: dict) -> bool:
+    def _inject_real_payment_method(order, pi_data) :
         """
         Try to update order.payment_method to the actual method used.
         Returns True if we changed and saved it.
         """
-        try:
-            charges_block = pi_data.get("charges", {})
-            ch_list = charges_block.get("data") if isinstance(charges_block, dict) else None
-            if not ch_list:
-                return False
+       
+        charges_block = pi_data.get("charges", {})
+        ch_list = charges_block.get("data") if isinstance(charges_block, dict) else None
+        if not ch_list:
+            return False
 
-            ch0 = ch_list[0] if len(ch_list) > 0 else None
-            if not ch0:
-                return False
+        ch0 = ch_list[0] if len(ch_list) > 0 else None
+        if not ch0:
+            return False
 
-            pmd = ch0.get("payment_method_details", {})
-            stripe_type = pmd.get("type")
-            if not stripe_type:
-                return False
+        pmd = ch0.get("payment_method_details", {})
+        stripe_type = pmd.get("type")
+        if not stripe_type:
+            return False
 
-            new_method = _map_stripe_type_to_internal(stripe_type)
+        new_method = _map_stripe_type_to_internal(stripe_type)
 
-            if new_method and new_method != order.payment_method:
-                order.payment_method = new_method
-                order.save(update_fields=["payment_method"])
-                return True
-        except Exception as e:
-            log.exception("failed to inject real payment_method on order %s: %s", order.id, e)
-        return False
+        if new_method and new_method != order.payment_method:
+            order.payment_method = new_method
+            order.save(update_fields=["payment_method"])
+            return True
+       
 
     def _mark_processing(order: Order):
         if order.status != "processing":
