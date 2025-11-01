@@ -1741,13 +1741,71 @@ def stripe_webhook(request):
     data = event["data"]["object"]
     log.info("WEBHOOK %s object=%s", etype, data.get("id"))
 
+    # --- helper: map Stripe payment_method_details.type -> our Order.PAYMENT_METHODS ---
+    def _map_stripe_type_to_internal(stripe_type: str) -> str:
+        """
+        Stripe examples:
+          'card', 'klarna', 'giropay', 'sofort', 'sepa_debit', 'bancontact', 'eps', ...
+        We map to our enum strings.
+        """
+        st = (stripe_type or "").lower()
+        if st == "card":
+            return "card"
+        if st == "klarna":
+            return "klarna"
+        if st == "giropay":
+            return "giropay"
+        if st in ("sepa_debit", "sepa_debit_payment_method"):  # stripe variations
+            return "sepa_debit"
+        # you can extend this if you add sofort, bancontact, etc.
+        if st in ("sofort", "bancontact", "eps", "ideal"):
+            # these are all redirect methods still processed via Stripe PI.
+            # We don't have dedicated enums for each yet, so mark them as 'card' or create new enums if you want.
+            return "card"
+        return "card"
+
+    def _inject_real_payment_method(order: Order, pi_data: dict) -> bool:
+        """
+        Try to update order.payment_method to the actual method used.
+        Returns True if we changed and saved it.
+        """
+        try:
+            charges_block = pi_data.get("charges", {})
+            ch_list = charges_block.get("data") if isinstance(charges_block, dict) else None
+            if not ch_list:
+                return False
+
+            ch0 = ch_list[0] if len(ch_list) > 0 else None
+            if not ch0:
+                return False
+
+            pmd = ch0.get("payment_method_details", {})
+            stripe_type = pmd.get("type")
+            if not stripe_type:
+                return False
+
+            new_method = _map_stripe_type_to_internal(stripe_type)
+
+            if new_method and new_method != order.payment_method:
+                order.payment_method = new_method
+                order.save(update_fields=["payment_method"])
+                return True
+        except Exception as e:
+            log.exception("failed to inject real payment_method on order %s: %s", order.id, e)
+        return False
+
     def _mark_processing(order: Order):
         if order.status != "processing":
             order.status = "processing"
             order.save(update_fields=["status"])
 
-    def _mark_paid(order: Order):
+    def _mark_paid(order: Order, pi_data: dict):
         changed = False
+
+        # 1. Update the real payment_method if possible (klarna, giropay, etc.)
+        _inject_real_payment_method(order, pi_data)
+
+        # 2. Ensure status, stock, payment_id, invoice, emails
         if order.status != "paid":
             order.status = "paid"
             order.reserve_stock()
@@ -1755,12 +1813,12 @@ def stripe_webhook(request):
 
         if not getattr(order, "payment_id", ""):
             ch_id = None
-            charges_block = data.get("charges", {})
+            charges_block = pi_data.get("charges", {})
             ch_list = charges_block.get("data") if isinstance(charges_block, dict) else None
             if ch_list and len(ch_list) > 0:
                 ch_id = ch_list[0].get("id")
             if not ch_id:
-                ch_id = data.get("id", "")
+                ch_id = pi_data.get("id", "")
             if ch_id:
                 order.payment_id = ch_id
                 changed = True
@@ -1768,7 +1826,7 @@ def stripe_webhook(request):
         if changed:
             order.save(update_fields=["status", "payment_id"])
 
-        # invoice creation + email (safe if repeated)
+        # create invoice + email
         order.assign_unique_invoice_number()
         generate_invoice_pdf(order)
 
@@ -1781,7 +1839,6 @@ def stripe_webhook(request):
         except Exception:
             log.exception("send_invoice_email failed for order %s", order.id)
 
-        # NEW: order confirmation email like you do in PayPalCaptureOrder
         try:
             send_order_confirmation(
                 order,
@@ -1799,6 +1856,8 @@ def stripe_webhook(request):
                 with transaction.atomic():
                     order = Order.objects.select_for_update().get(pk=oid)
                     _mark_processing(order)
+
+                    # optional: send "pending SEPA" only if it's sepa-like
                     user_locale = (
                         getattr(getattr(order.user, "profile", None), "language", "en")
                         or "en"
@@ -1824,16 +1883,11 @@ def stripe_webhook(request):
             try:
                 with transaction.atomic():
                     order = Order.objects.select_for_update().get(pk=oid)
-                    # reserve stock (you already had this)
                     try:
                         order.reserve_stock()
                     except Exception as e:
-                        log.exception(
-                            "reserve_stock failed for order %s:%s",
-                            order.id,
-                            e,
-                        )
-                    _mark_paid(order)
+                        log.exception("reserve_stock failed for order %s:%s", order.id, e)
+                    _mark_paid(order, data)
             except Order.DoesNotExist:
                 pass
 
@@ -1844,7 +1898,7 @@ def stripe_webhook(request):
             try:
                 with transaction.atomic():
                     order = Order.objects.select_for_update().get(pk=oid)
-                    _mark_paid(order)
+                    _mark_paid(order, data)
             except Order.DoesNotExist:
                 pass
 
@@ -1860,62 +1914,13 @@ def stripe_webhook(request):
                     try:
                         order.release_stock()
                     except Exception as e:
-                        log.exception(
-                            "release_stock failed for order %s:%s",
-                            order.id,
-                            e,
-                        )
+                        log.exception("release_stock failed for order %s:%s", order.id, e)
             except Order.DoesNotExist:
                 pass
 
     return HttpResponse(status=200)
 
-# -------------------- Bank transfer --------------------
-class CreateBankTransferOrder(APIView):
-    permission_classes = [AllowAny]
-    def post(self, request):
-        data = request.data.copy()
-        data.pop("payment_method", None)
-        s = OrderCreateSerializer(data=data, context={"request": request})
-        s.is_valid(raise_exception=True)
-        with transaction.atomic():
-            order = s.save()
-            order.payment_method = "bank_transfer"
-            order.status = "pending"
-            order.save(update_fields=["payment_method", "status"])
-        try:
-            locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-            send_bank_transfer_instructions(
-                order,
-                {
-                    "iban": settings.BANK_TRANSFER["IBAN"],
-                    "bic": settings.BANK_TRANSFER["BIC"],
-                    "account_name": settings.BANK_TRANSFER["ACCOUNT_NAME"],
-                },
-                user_locale=locale,
-                due_hours=settings.BANK_TRANSFER["PAYMENT_DUE_HOURS"],
-                to=_order_to(order),
-            )
-        except Exception:
-            logger.exception("Bank transfer email failed")
-        return self._resp(order)
 
-    def _resp(self, order):
-        return Response(
-            {
-                "ok": True,
-                "order_id": order.id,
-                "order_number": order.number,
-                "amount": f"{order.total_price:.2f}",
-                "currency": "EUR",
-                "iban": settings.BANK_TRANSFER["IBAN"].replace(" ", ""),
-                "bic": settings.BANK_TRANSFER["BIC"],
-                "beneficiary": settings.BANK_TRANSFER["ACCOUNT_NAME"],
-                "reference": order.number,
-                "instructions": f"Please transfer the total amount using the reference above within {settings.BANK_TRANSFER['PAYMENT_DUE_HOURS']} hours.",
-            },
-            status=201,
-        )
 
 # ✅ Invoice download (user)
 class InvoiceDownloadView(APIView):
