@@ -56,7 +56,7 @@ from .views import (
 
     # Stripe
     StripeCreateIntent, StripeCreateCardSetupIntent, StripeCreateSepaSetupIntent, StripeCardCreateInstallments,
-    StripeCreateSepaIntent, StripeSepaCreateInstallments, SepaPostConfirmView, stripe_webhook,
+    StripeCreateSepaIntent, StripeSepaCreateInstallments, SepaPostConfirmView, stripe_webhook, OrderPaymentStatusUpdateAPIView,
 
 
     # Returns / Cancellations
@@ -66,7 +66,10 @@ from .views import (
     StockAlertCreateView, StockAlertUnsubscribeView, OnDemandOrderCreateView,
 
     # Admin birthday coupon send
-    SendBirthdayCouponAPIView
+    SendBirthdayCouponAPIView,
+
+    #Guest lookup
+    GuestOrderLookupAPIView,GuestInvoiceDownloadView
 )
 
 sitemaps = {
@@ -181,6 +184,13 @@ urlpatterns = [
 
     # -------- Admin birthday coupon send --------
     path("admin/send-birthday-coupon/", SendBirthdayCouponAPIView.as_view(), name="admin_send_birthday_coupon"),
+
+    # Guest order lookup (guest can retrieve order + invoice using email + order number)
+    path("orders/guest-lookup/", GuestOrderLookupAPIView.as_view(), name="guest_order_lookup"),
+    path("orders/guest-invoice-download/", GuestInvoiceDownloadView.as_view(), name="guest_invoice_download"),
+
+    # Frontend payment status callback
+    path("orders/<int:pk>/payment-status/", OrderPaymentStatusUpdateAPIView.as_view(), name="order_payment_status"),
 ]
 
 if settings.DEBUG:

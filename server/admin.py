@@ -1,4 +1,3 @@
-# server/admin.py
 from django.contrib import admin
 from django.utils.html import format_html_join, format_html
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
@@ -28,24 +27,24 @@ def send_cancellation_email(*args, **kwargs):
 
 try:
     from .utils.invoices import generate_invoice_pdf as _gen_inv_pdf
-    generate_invoice_pdf = _gen_inv_pdf  
+    generate_invoice_pdf = _gen_inv_pdf
 except (ImportError, ModuleNotFoundError, AttributeError):
     pass
 
 try:
-    from .utils.emails import (  
+    from .utils.emails import (
         send_invoice_email as _send_invoice_email,
         send_shipping_update as _send_shipping_update,
         send_cancellation_email as _send_cancellation_email,
     )
-    send_invoice_email = _send_invoice_email     
-    send_shipping_update = _send_shipping_update  
-    send_cancellation_email = _send_cancellation_email 
+    send_invoice_email = _send_invoice_email
+    send_shipping_update = _send_shipping_update
+    send_cancellation_email = _send_cancellation_email
 except (ImportError, ModuleNotFoundError, AttributeError):
     pass
 
 # --------------------------------------------------------------------------------------
-# Helpers that safely read possibly-renamed fields
+# Helpers
 # --------------------------------------------------------------------------------------
 def get_order_number(o: Any) -> str:
     if hasattr(o, "order_number") and getattr(o, "order_number") is not None:
@@ -63,7 +62,7 @@ def get_total(o: Any):
             val = getattr(o, name)
             if val is not None:
                 return val
-            
+
     items_mgr = getattr(o, "items", None)
     if not hasattr(items_mgr, "all"):
         return None
@@ -88,7 +87,7 @@ def fmt_eur(v: Optional[Any]) -> str:
         return f"{float(v):.2f} €"
     except (TypeError, ValueError):
         return "-"
-    
+
 # ----- actions -----
 @admin.action(description="Mark selected orders as PAID (+ send invoice)")
 def mark_paid(modeladmin, request, queryset):
@@ -97,10 +96,11 @@ def mark_paid(modeladmin, request, queryset):
         if getattr(order, "status", None) == "paid":
             continue
         order.status = "paid"
-        order.save(update_fields=["status"])
-        generate_invoice_pdf(order)  
+        order.payment_status = "paid"
+        order.save(update_fields=["status", "payment_status"])
+        generate_invoice_pdf(order)
         user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-        send_invoice_email(order, user_locale=user_locale) 
+        send_invoice_email(order, user_locale=user_locale)
         updated += 1
     modeladmin.message_user(request, f"Marked {updated} order(s) as paid and sent invoice.", level=messages.SUCCESS)
 
@@ -110,7 +110,7 @@ def mark_shipped(modeladmin, request, queryset):
     for order in queryset:
         order.status = "shipped"
         order.save(update_fields=["status"])
-        send_shipping_update(order, tracking=getattr(order, "tracking_number", "") or "")  
+        send_shipping_update(order, tracking=getattr(order, "tracking_number", "") or "")
         n += 1
     modeladmin.message_user(request, f"Marked {n} order(s) as shipped and sent emails (if configured).", level=messages.SUCCESS)
 
@@ -120,10 +120,11 @@ def mark_cancelled(modeladmin, request, queryset):
     for order in queryset:
         prev = getattr(order, "status", None)
         order.status = "cancelled"
-        order.save(update_fields=["status"])
+        order.payment_status = "cancelled"
+        order.save(update_fields=["status", "payment_status"])
         if prev != "cancelled" and hasattr(order, "release_stock") and callable(order.release_stock):
             order.release_stock()
-        send_cancellation_email(order)  
+        send_cancellation_email(order)
         n += 1
     modeladmin.message_user(request, f"Cancelled {n} order(s) and notified customers (if configured).", level=messages.SUCCESS)
 
@@ -143,6 +144,7 @@ class OrderItemInline(admin.TabularInline):
         return False
 
     def item_name(self, obj):
+        # prefer snapshot
         if hasattr(obj, "product_name") and obj.product_name:
             return obj.product_name
         prod = getattr(obj, "product", None)
@@ -159,6 +161,7 @@ class OrderItemInline(admin.TabularInline):
     unit_price_display.short_description = "Unit price"
 
     def line_total_display(self, obj):
+        # support OrderItem.line_total() if present
         if hasattr(obj, "line_total") and callable(obj.line_total):
             try:
                 return fmt_eur(obj.line_total())
@@ -183,7 +186,6 @@ class OrderAdmin(admin.ModelAdmin):
     actions = [mark_paid, mark_shipped, mark_cancelled]
 
     readonly_fields = (
-        # model fields you want read-only in admin
         "number", "subtotal", "discount_amount", "shipping_fee", "total_price",
         "payment_ref", "payment_id", "created_at", "updated_at",
         "items_readonly", "delivered_at", "cancelled_at",
@@ -195,7 +197,8 @@ class OrderAdmin(admin.ModelAdmin):
         ("number", "user", "customer_email", "created_at", "delivered_at", "cancelled_at"),
         ("status", "payment_method", "tracking_number"),
         ("subtotal", "discount_amount", "shipping_fee", "total_price"),
-        ("shipping_address",),"shipping_snapshot_readonly",
+        ("shipping_address",),
+        "shipping_snapshot_readonly",
         "items_readonly",
         ("payment_ref", "payment_id"),
     )
@@ -208,23 +211,41 @@ class OrderAdmin(admin.ModelAdmin):
     customer_email.short_description = "Email"
 
     def shipping_snapshot_readonly(self, obj):
-        # nicely render guest snapshot, also visible for logged-in users (audit)
+        """
+        Show the snapshot we stored on the Order at checkout time.
+        Works for both guest and logged-in users.
+        NOTE: field names here MUST match what we save in OrderCreateSerializer.create()
+        """
+        fn = getattr(obj, "ship_first_name", "") or ""
+        ln = getattr(obj, "ship_last_name", "") or ""
+        line1 = getattr(obj, "ship_line1", "") or ""
+        line2 = getattr(obj, "ship_line2", "") or ""
+        postal = getattr(obj, "ship_postal", "") or ""
+        city = getattr(obj, "ship_city", "") or ""
+        country = getattr(obj, "ship_country", "") or ""
+        phone = getattr(obj, "ship_phone", "") or ""
+        street_name = getattr(obj, "ship_street_name", "") or ""
+        house_number = getattr(obj, "ship_house_number", "") or ""
+
         return format_html(
             "<div>"
-            "<div><b>{}</b> {}</div>"
-            "<div>{}</div>"
-            "<div>{} {}</div>"
-            "<div>{} {}</div>"
-            "<div>{}</div>"
+            "<div><b>{fn}</b> {ln}</div>"
+            "<div>{line1}</div>"
+            "<div>{line2}</div>"
+            "<div>{postal} {city}</div>"
+            "<div>{country}</div>"
+            "<div>{phone}</div>"
+            "<div>{street}</div>"
             "</div>",
-            (obj.ship_first_name or ""),
-            (obj.ship_last_name or ""),
-            (obj.ship_address_line1 or ""),
-            (obj.ship_postal_code or ""),
-            (obj.ship_city or ""),
-            (obj.ship_country or ""),
-            (obj.ship_phone or ""),
-            (f"Street: {obj.ship_street_name} {obj.ship_house_number}" if obj.ship_street_name or obj.ship_house_number else "")
+            fn=fn,
+            ln=ln,
+            line1=line1,
+            line2=line2,
+            postal=postal,
+            city=city,
+            country=country,
+            phone=phone,
+            street=f"Street: {street_name} {house_number}".strip(),
         )
     shipping_snapshot_readonly.short_description = "Shipping snapshot"
 
@@ -237,7 +258,7 @@ class OrderAdmin(admin.ModelAdmin):
         except (TypeError, ValueError):
             return str(val)
 
-    # ---- readonly_fields helpers (names match readonly_fields above) ----
+    # ---- readonly_fields helpers ----
     def subtotal(self, obj):
         return f"{float(getattr(obj, 'subtotal', 0)):.2f} €"
 
@@ -267,6 +288,7 @@ class OrderAdmin(admin.ModelAdmin):
         items = getattr(obj, "items", None)
         if hasattr(items, "all"):
             for it in items.all():
+                # prefer snapshot
                 name = getattr(it, "product_name", None) or "-"
                 unit_fmt = fmt_eur(getattr(it, "unit_price", None))
                 try:
@@ -284,17 +306,21 @@ class OrderAdmin(admin.ModelAdmin):
         return format_html(
             "<table style='width:100%'><tr><th align='left'>Item</th>"
             "<th align='right'>Unit</th><th align='right'>Total</th></tr>{}</table>",
-            format_html_join("", "<tr><td>{}</td><td align='right'>{}</td><td align='right'>{}</td></tr>", rows)
+            format_html_join(
+                "",
+                "<tr><td>{}</td><td align='right'>{}</td><td align='right'>{}</td></tr>",
+                rows
+            )
         )
     items_readonly.short_description = "Items"
 
 # --------------------------------------------------------------------------------------
-# Invoice (REGISTERED ONCE ONLY)
+# Invoice
 # --------------------------------------------------------------------------------------
 @admin.register(Invoice)
 class InvoiceAdmin(admin.ModelAdmin):
     list_display = ("number", "order", "created_at")
-    search_fields = ("number", "order__number", "order__user__email")  
+    search_fields = ("number", "order__number", "order__user__email")
     list_select_related = ("order",)
     ordering = ("-created_at",)
 
@@ -321,7 +347,7 @@ class CustomUserAdmin(DjangoUserAdmin):
 
 @admin.register(Profile)
 class ProfileAdmin(admin.ModelAdmin):
-    list_display = ("user", "full_name", "mobile_col", "verified_col")
+    list_display = ("user", "full_name", "mobile_col", "verified_col", "language", "date_of_birth")
     search_fields = ("user__email", "full_name")
 
     def mobile_col(self, obj):
@@ -402,7 +428,7 @@ class ReturnAttachmentInline(admin.TabularInline):
 class ReturnRequestAdmin(admin.ModelAdmin):
     list_display = ("id", "order", "user", "request_type", "status", "created_at")
     list_filter  = ("request_type", "status", "created_at")
-    search_fields = ("order__number", "order__id", "user__email")  
+    search_fields = ("order__number", "order__id", "user__email")
     date_hierarchy = "created_at"
     list_select_related = ("order", "user")
 
@@ -436,13 +462,11 @@ class OnDemandOrderRequestAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at",)
 
     def product_display(self, obj):
-        # Nice readable product label in the admin list
         title = getattr(obj.product, "title_en", None) or getattr(
             obj.product, "title_de", None
         ) or str(obj.product)
         return f"{title} ({obj.product_id})"
     product_display.short_description = "Product"
-
 
 admin.site.register(ContactMessage)
 admin.site.register(NewsletterSubscriber)

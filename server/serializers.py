@@ -1,84 +1,94 @@
-#server/serializers.py
-from rest_framework import serializers
+from decimal import Decimal, ROUND_HALF_UP
+
+from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.tokens import default_token_generator
+from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.utils import timezone
-from django.utils.timezone import now
 from django.utils.http import urlsafe_base64_encode
 from django.utils.encoding import force_bytes
-from django.contrib.auth.password_validation import validate_password
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from django.conf import settings
-from django.template.loader import render_to_string, TemplateDoesNotExist
-from django.core.mail import EmailMultiAlternatives
-from django.contrib.auth.tokens import default_token_generator
-from django.contrib.auth import get_user_model
 from django.db import transaction
 
-from decimal import Decimal, ROUND_HALF_UP
-from datetime import timedelta
+from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from django.core.mail import EmailMultiAlternatives
 
 from .models import (
-    PromotionBanner, StockAlert, ReturnRequest, NaturalStoneImage, OrderItem, User, Profile,
-    Wishlist, NaturalStone, StoneEnquiry, Product, ProductMedia, ContactMessage,
-    NewsletterSubscriber, Address, Order, Review, Coupon, OnDemandOrderRequest
+    PromotionBanner,
+    StockAlert,
+    ReturnRequest,
+    NaturalStoneImage,
+    OrderItem,
+    User,
+    Profile,
+    Wishlist,
+    NaturalStone,
+    StoneEnquiry,
+    Product,
+    ProductMedia,
+    ContactMessage,
+    NewsletterSubscriber,
+    Address,
+    Order,
+    Review,
+    Coupon,
+    OnDemandOrderRequest,
 )
 
-# ----------------- Helpers -----------------
-
-def _norm(s):
-    return " ".join((s or "").strip().split()).lower()
-
-def _addr_signature_dict(validated):
-    line1 = validated.get("address_line1") or " ".join([
-        validated.get("street_name",""), validated.get("house_number","")
-    ]).strip()
-    return (
-        _norm(validated.get("first_name")),
-        _norm(validated.get("last_name")),
-        _norm(line1),
-        _norm(validated.get("address_line2")),
-        _norm(validated.get("postal_code")),
-        _norm(validated.get("city")),
-        _norm(validated.get("country")),
-        _norm(validated.get("phone")),
-    )
-
-def _addr_signature_model(addr):
-    line1 = addr.address_line1 or f"{addr.street_name} {addr.house_number}".strip()
-    return (
-        _norm(addr.first_name),
-        _norm(addr.last_name),
-        _norm(line1),
-        _norm(addr.apartment),
-        _norm(addr.postal_code or addr.pincode),
-        _norm(addr.city or addr.state),
-        _norm(addr.country),
-        _norm(addr.phone),
-    )
-
-# ----------------- Auth / Account -----------------
+# -----------------
+# Auth / Account
+# -----------------
 
 class AuthSerializer(serializers.Serializer):
     code = serializers.CharField(required=False)
     error = serializers.CharField(required=False)
+
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ("id", "email", "username")
 
+
 class ProfileSerializer(serializers.ModelSerializer):
+    """
+    Profile surface for 'My Account' settings.
+
+    Includes:
+    - language (so we know which locale to prefer in emails)
+    - date_of_birth (for birthday coupon logic)
+    """
     class Meta:
         model = Profile
-        fields = ['full_name', 'mobile', 'image', 'verified']
-        read_only_fields = ['verified']
+        fields = [
+            "full_name",
+            "mobile",
+            "image",
+            "verified",
+            "language",
+            "date_of_birth",
+        ]
+        read_only_fields = ["verified"]
+
 
 class AccountSerializer(serializers.Serializer):
+    """
+    Unified serializer for account overview/edit:
+    - lets user change username (User model)
+    - lets user change profile fields (Profile model)
+    """
+    # User-level
     email = serializers.EmailField(read_only=True)
     username = serializers.CharField(required=False, allow_blank=True)
+
+    # Profile-level
     full_name = serializers.CharField(required=False, allow_blank=True)
     mobile = serializers.CharField(required=False, allow_blank=True)
     image = serializers.ImageField(required=False, allow_null=True)
     verified = serializers.BooleanField(read_only=True)
+    language = serializers.CharField(required=False, allow_blank=True)
+    date_of_birth = serializers.DateField(required=False, allow_null=True)
 
     def to_representation(self, instance):
         user = instance
@@ -86,42 +96,60 @@ class AccountSerializer(serializers.Serializer):
         return {
             "email": user.email,
             "username": user.username,
-            "full_name": getattr(prof, "full_name", ""),
-            "mobile": getattr(prof, "mobile", ""),
+            "full_name": getattr(prof, "full_name", "") or "",
+            "mobile": getattr(prof, "mobile", "") or "",
             "image": prof.image.url if getattr(prof, "image", None) else None,
-            "verified": getattr(prof, "verified", False),
+            "verified": bool(getattr(prof, "verified", False)),
+            "language": getattr(prof, "language", "") or "en",
+            "date_of_birth": getattr(prof, "date_of_birth", None),
         }
 
     def update(self, instance, validated_data):
+        # instance is User
         if "username" in validated_data:
             instance.username = validated_data["username"]
             instance.save(update_fields=["username"])
 
         prof = instance.profile
-        for f in ["full_name", "mobile", "image"]:
+        for f in ["full_name", "mobile", "image", "language", "date_of_birth"]:
             if f in validated_data:
                 setattr(prof, f, validated_data[f])
         prof.save()
         return instance
 
-# ----------------- Addresses -----------------
+
+# -----------------
+# Addresses
+# -----------------
 
 class AddressSerializer(serializers.ModelSerializer):
-    address_line2 = serializers.CharField(source="apartment", allow_blank=True, required=False)
+    # Frontend expects "address_line2" but model calls it "apartment".
+    address_line2 = serializers.CharField(
+        source="apartment", allow_blank=True, required=False
+    )
 
     class Meta:
         model = Address
         fields = [
             "id",
-            "first_name", "last_name",
-            "address_line1", "address_line2",
-            "postal_code", "city", "country", "phone",
+            "first_name",
+            "last_name",
+            "address_line1",
+            "address_line2",
+            "postal_code",
+            "city",
+            "country",
+            "phone",
             "is_default",
-            "created_at", "updated_at",
+            "created_at",
+            "updated_at",
         ]
         read_only_fields = ["created_at", "updated_at"]
 
-    def _sync_full_name(self, addr):
+    def _sync_full_name(self, addr: Address):
+        """
+        Keep Address.full_name (legacy field) in sync.
+        """
         full = " ".join(filter(None, [addr.first_name, addr.last_name])).strip()
         if full and addr.full_name != full:
             addr.full_name = full
@@ -131,6 +159,7 @@ class AddressSerializer(serializers.ModelSerializer):
         user = self.context["request"].user
         make_default = bool(validated_data.pop("is_default", False))
 
+        # If frontend sent split street/house_number instead of address_line1
         if not validated_data.get("address_line1"):
             hn = self.initial_data.get("house_number") or ""
             sn = self.initial_data.get("street_name") or ""
@@ -138,12 +167,12 @@ class AddressSerializer(serializers.ModelSerializer):
             if synth:
                 validated_data["address_line1"] = synth
 
-        # ✅ Always insert as non-default, then flip
+        # Always create first as non-default — then flip if needed.
         validated_data["is_default"] = False
         addr = Address.objects.create(user=user, **validated_data)
 
-        is_first = not Address.objects.filter(user=user).exclude(pk=addr.pk).exists()
-        if is_first or make_default:
+        is_first_for_user = not Address.objects.filter(user=user).exclude(pk=addr.pk).exists()
+        if is_first_for_user or make_default:
             addr.set_default_for_user()
 
         self._sync_full_name(addr)
@@ -151,9 +180,10 @@ class AddressSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         make_default = bool(validated_data.pop("is_default", False))
+
         for k, v in validated_data.items():
             setattr(instance, k, v)
-        # ✅ Save without toggling default first
+
         instance.save()
 
         if make_default:
@@ -161,16 +191,23 @@ class AddressSerializer(serializers.ModelSerializer):
 
         self._sync_full_name(instance)
         return instance
-# ----------------- Wishlist -----------------
+
+
+# -----------------
+# Wishlist
+# -----------------
 
 class WishlistSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source="product", read_only=True)
+
     class Meta:
         model = Wishlist
         fields = ["id", "product", "product_name"]
 
 
-# ----------------- JWT -----------------
+# -----------------
+# JWT
+# -----------------
 
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
@@ -183,26 +220,32 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
 
-# ----------------- Registration -----------------
+# -----------------
+# Registration
+# -----------------
 
 class RegisterSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
+    password = serializers.CharField(
+        write_only=True, required=True, validators=[validate_password]
+    )
     password2 = serializers.CharField(write_only=True, required=True)
 
     class Meta:
         model = User
-        fields = ('email', 'username', 'password', 'password2')
+        fields = ("email", "username", "password", "password2")
 
     def validate(self, attrs):
-        if attrs['password'] != attrs['password2']:
-            raise serializers.ValidationError({"password": "Password fields didn't match."})
+        if attrs["password"] != attrs["password2"]:
+            raise serializers.ValidationError(
+                {"password": "Password fields didn't match."}
+            )
         return attrs
 
     def create(self, validated_data):
         user = User(
             username=validated_data.get("username"),
             email=validated_data["email"],
-            is_active=False,   # requires verification
+            is_active=False,  # must verify email first
         )
         user.set_password(validated_data["password"])
         user.save()
@@ -213,15 +256,20 @@ class RegisterSerializer(serializers.ModelSerializer):
         verification_link = f"{base}/verify-email/{uid}/{token}/"
 
         subject = "Verify your MindMines account"
-        text_body = f"Please click the link to verify your email:\n{verification_link}"
-        from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or getattr(settings, "EMAIL_HOST_USER", None)
+        text_body = (
+            "Please click the link to verify your email:\n" + verification_link
+        )
+        from_email = (
+            getattr(settings, "DEFAULT_FROM_EMAIL", None)
+            or getattr(settings, "EMAIL_HOST_USER", None)
+        )
 
         html_body = None
         try:
-            html_body = render_to_string("emails/verification_email.html", {
-                "user": user,
-                "verification_link": verification_link,
-            })
+            html_body = render_to_string(
+                "emails/verification_email.html",
+                {"user": user, "verification_link": verification_link},
+            )
         except TemplateDoesNotExist:
             pass
 
@@ -238,24 +286,34 @@ class RegisterSerializer(serializers.ModelSerializer):
         return user
 
 
-# ----------------- Natural Stones -----------------
+# -----------------
+# Natural Stones
+# -----------------
 
 class NaturalStoneImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = NaturalStoneImage
         fields = ["id", "image"]
 
+
 class NaturalStoneSerializer(serializers.ModelSerializer):
     images = NaturalStoneImageSerializer(many=True, read_only=True)
+
     class Meta:
         model = NaturalStone
         fields = [
-            "id", "type",
-            "description_en", "description_de",
-            "interest_en", "interest_de",
-            "key_features_en", "key_features_de",
-            "usage_en", "usage_de",
-            "image", "images"
+            "id",
+            "type",
+            "description_en",
+            "description_de",
+            "interest_en",
+            "interest_de",
+            "key_features_en",
+            "key_features_de",
+            "usage_en",
+            "usage_de",
+            "image",
+            "images",
         ]
 
 
@@ -265,7 +323,9 @@ class StoneEnquirySerializer(serializers.ModelSerializer):
         fields = ["id", "stone_type", "name", "email", "message", "created_at"]
 
 
-# ----------------- Catalog -----------------
+# -----------------
+# Catalog
+# -----------------
 
 class ProductMediaSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
@@ -306,9 +366,11 @@ class ProductSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
     stone_color_image_url = serializers.SerializerMethodField()
 
-    # computed flags/values from model
+    # computed flags from model
     is_discounted = serializers.BooleanField(read_only=True)
-    final_price_gross = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    final_price_gross = serializers.DecimalField(
+        max_digits=10, decimal_places=2, read_only=True
+    )
     low_stock = serializers.BooleanField(read_only=True)
     out_of_stock = serializers.BooleanField(read_only=True)
 
@@ -316,35 +378,65 @@ class ProductSerializer(serializers.ModelSerializer):
     stock = serializers.SerializerMethodField()
     reviews_count = serializers.SerializerMethodField()
     average_rating = serializers.SerializerMethodField()
-    price_net = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+    price_net = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True
+    )
     vat_rate = serializers.DecimalField(max_digits=4, decimal_places=4)
 
     class Meta:
         model = Product
         fields = [
-            "id", "title_en", "title_de",
-            "short_description1_en", "short_description1_de",
-            "short_description2_en", "short_description2_de",
-            "short_description3_en", "short_description3_de",
-            "descriptionpara1_en", "descriptionpara1_de",
-            "descriptionpara2_en", "descriptionpara2_de",
-            "descriptionpara3_en", "descriptionpara3_de",
-            "carepara_en", "carepara_de",
-            "delivery_en", "delivery_de",
-            "returnspara1_en", "returnspara1_de",
-            "returnspara2_en", "returnspara2_de",
-            "returnspara3_en", "returnspara3_de",
-            "type_of_stone", "material", "color",
+            "id",
+            "title_en",
+            "title_de",
+            "short_description1_en",
+            "short_description1_de",
+            "short_description2_en",
+            "short_description2_de",
+            "short_description3_en",
+            "short_description3_de",
+            "descriptionpara1_en",
+            "descriptionpara1_de",
+            "descriptionpara2_en",
+            "descriptionpara2_de",
+            "descriptionpara3_en",
+            "descriptionpara3_de",
+            "carepara_en",
+            "carepara_de",
+            "delivery_en",
+            "delivery_de",
+            "returnspara1_en",
+            "returnspara1_de",
+            "returnspara2_en",
+            "returnspara2_de",
+            "returnspara3_en",
+            "returnspara3_de",
+            "type_of_stone",
+            "material",
+            "color",
             "stone_color_image_url",
-            "quantity", "dimensions", "weight", "category",
-            # pricing (gross)
-            "price_net", "vat_rate",
-            "price_gross", "sale_price_gross", "discount_percent",
-            "final_price_gross", "is_discounted",
+            "quantity",
+            "dimensions",
+            "weight",
+            "category",
+            # pricing
+            "price_net",
+            "vat_rate",
+            "price_gross",
+            "sale_price_gross",
+            "discount_percent",
+            "final_price_gross",
+            "is_discounted",
             # misc
-            "key", "image", "stock", "low_stock", "out_of_stock",
-            "media", "stock_status",
-            "reviews_count", "average_rating",
+            "key",
+            "image",
+            "stock",
+            "low_stock",
+            "out_of_stock",
+            "media",
+            "stock_status",
+            "reviews_count",
+            "average_rating",
         ]
 
     def _abs(self, request, url: str) -> str:
@@ -392,13 +484,20 @@ class ProductMiniSerializer(serializers.ModelSerializer):
     title_de = serializers.CharField()
     image = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
-    # expose gross pricing
     price_gross = serializers.DecimalField(max_digits=10, decimal_places=2)
     final_price_gross = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
-        fields = ["id", "title_en", "title_de", "image", "thumbnail_url", "price_gross", "final_price_gross"]
+        fields = [
+            "id",
+            "title_en",
+            "title_de",
+            "image",
+            "thumbnail_url",
+            "price_gross",
+            "final_price_gross",
+        ]
 
     def _abs(self, request, url: str) -> str:
         if not url:
@@ -435,7 +534,9 @@ class ProductMiniSerializer(serializers.ModelSerializer):
             return obj.price_gross
 
 
-# ----------------- Contact / Newsletter -----------------
+# -----------------
+# Contact / Newsletter
+# -----------------
 
 class ContactMessageSerializer(serializers.ModelSerializer):
     class Meta:
@@ -443,9 +544,10 @@ class ContactMessageSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "email", "message", "sent_at"]
 
     def validate(self, attrs):
-        if len(attrs.get("message","").strip()) < 10:
+        if len(attrs.get("message", "").strip()) < 10:
             raise serializers.ValidationError("Message is too short.")
         return attrs
+
 
 class NewsletterSubscriberSerializer(serializers.ModelSerializer):
     email = serializers.EmailField()
@@ -458,16 +560,21 @@ class NewsletterSubscriberSerializer(serializers.ModelSerializer):
         return value.strip().lower()
 
 
-# ----------------- Basic Order (legacy single-line) -----------------
+# -----------------
+# Basic legacy order (single-line style)
+# -----------------
 
 class OrderSerializer(serializers.ModelSerializer):
     product = ProductSerializer()
+
     class Meta:
         model = Order
         fields = ["id", "product", "quantity", "created_at"]
 
 
-# ----------------- Orders (items) -----------------
+# -----------------
+# Order detail / items
+# -----------------
 
 class OrderItemReadSerializer(serializers.ModelSerializer):
     product = ProductMiniSerializer()
@@ -479,9 +586,12 @@ class OrderItemReadSerializer(serializers.ModelSerializer):
 
     def get_line_total(self, obj):
         try:
-            return (Decimal(obj.unit_price) * obj.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            return (
+                Decimal(obj.unit_price) * obj.quantity
+            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         except Exception:
             return Decimal("0.00")
+
 
 class ShippingSnapshotSerializer(serializers.Serializer):
     first_name = serializers.CharField()
@@ -492,8 +602,21 @@ class ShippingSnapshotSerializer(serializers.Serializer):
     city = serializers.CharField()
     country = serializers.CharField()
     phone = serializers.CharField()
+    street_name = serializers.CharField(required=False, allow_blank=True)
+    house_number = serializers.CharField(required=False, allow_blank=True)
+
 
 class OrderReadSerializer(serializers.ModelSerializer):
+    """
+    Serializer for /account/orders and order detail page.
+    Includes:
+    - items (snapshot pricing)
+    - billing/shipping info
+    - invoice download link
+    - payment_status, paid_at
+    - installments_months
+    - return_deadline + is_returnable
+    """
     items = OrderItemReadSerializer(many=True, read_only=True)
     invoice_pdf = serializers.SerializerMethodField()
     shipping_address = AddressSerializer(read_only=True)
@@ -502,15 +625,35 @@ class OrderReadSerializer(serializers.ModelSerializer):
     return_deadline = serializers.SerializerMethodField()
     payment_method_label = serializers.SerializerMethodField()
     coupon_code = serializers.SerializerMethodField()
+    payment_status = serializers.SerializerMethodField()
+    paid_at = serializers.DateTimeField(read_only=True)
+    installments_months = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Order
         fields = [
-            "id", "number", "status", "payment_method", "payment_method_label",
-            "subtotal", "discount_amount", "shipping_fee", "total_price",
-            "created_at", "updated_at", "tracking_number",
-            "items", "invoice_pdf", "is_returnable", "return_deadline",
-            "shipping_address", "shipping_snapshot", "coupon_code",
+            "id",
+            "number",
+            "status",
+            "payment_method",
+            "payment_method_label",
+            "payment_status",
+            "paid_at",
+            "installments_months",
+            "subtotal",
+            "discount_amount",
+            "shipping_fee",
+            "total_price",
+            "created_at",
+            "updated_at",
+            "tracking_number",
+            "items",
+            "invoice_pdf",
+            "is_returnable",
+            "return_deadline",
+            "shipping_address",
+            "shipping_snapshot",
+            "coupon_code",
             "email",
         ]
 
@@ -524,6 +667,8 @@ class OrderReadSerializer(serializers.ModelSerializer):
             "city": obj.ship_city,
             "country": obj.ship_country,
             "phone": obj.ship_phone,
+            "street_name": getattr(obj, "ship_street_name", None),
+            "house_number": getattr(obj, "ship_house_number", None),
         }
 
     def get_payment_method_label(self, obj):
@@ -541,7 +686,7 @@ class OrderReadSerializer(serializers.ModelSerializer):
 
     def get_invoice_pdf(self, obj):
         request = self.context.get("request")
-        # 1) Invoice relation (preferred)
+        # Prefer related Invoice model (Invoice.pdf)
         try:
             inv = getattr(obj, "invoice", None)
             f = getattr(inv, "pdf", None)
@@ -549,7 +694,7 @@ class OrderReadSerializer(serializers.ModelSerializer):
                 return self._abs(request, f.url)
         except Exception:
             pass
-        # 2) Legacy on Order
+        # Fallback: legacy FileField on Order
         try:
             f = getattr(obj, "invoice_pdf", None)
             if f and getattr(f, "url", None):
@@ -557,7 +702,7 @@ class OrderReadSerializer(serializers.ModelSerializer):
         except Exception:
             pass
         return None
-    
+
     def get_is_returnable(self, obj):
         try:
             return obj.is_returnable
@@ -574,6 +719,12 @@ class OrderReadSerializer(serializers.ModelSerializer):
     def get_coupon_code(self, obj):
         return getattr(obj.coupon, "code", None)
 
+    def get_payment_status(self, obj):
+        # explicit payment_status if set, else infer from status
+        return getattr(obj, "payment_status", "") or (
+            "paid" if obj.status == "paid" else obj.status
+        )
+
 
 class ReturnRequestSerializer(serializers.ModelSerializer):
     class Meta:
@@ -581,13 +732,25 @@ class ReturnRequestSerializer(serializers.ModelSerializer):
         fields = ("id", "request_type", "message", "status", "created_at")
 
 
-# ----------------- Order Create (cart → order pending) -----------------
+# -----------------
+# Checkout / create order
+# -----------------
 
 class OrderItemIn(serializers.Serializer):
     product_id = serializers.IntegerField()
     qty = serializers.IntegerField(min_value=1)
 
+
 class OrderCreateSerializer(serializers.Serializer):
+    """
+    This is called by checkout.
+    It creates an Order with status 'pending' and payment_status 'created'.
+    We:
+    - snapshot shipping details
+    - snapshot line items (name, VAT, gross unit price)
+    - attach coupon if valid
+    - compute totals
+    """
     email = serializers.EmailField(required=False, allow_blank=True)
     items = OrderItemIn(many=True)
 
@@ -599,10 +762,10 @@ class OrderCreateSerializer(serializers.Serializer):
 
     coupon_code = serializers.CharField(allow_blank=True, required=False)
 
-    # shipping address input (always collected)
+    # shipping address input
     address_id = serializers.IntegerField(required=False)
     first_name = serializers.CharField(allow_blank=True, required=False)
-    last_name  = serializers.CharField(allow_blank=True, required=False)
+    last_name = serializers.CharField(allow_blank=True, required=False)
     address_line1 = serializers.CharField(allow_blank=True, required=False)
     address_line2 = serializers.CharField(allow_blank=True, required=False)
     postal_code = serializers.CharField(allow_blank=True, required=False)
@@ -610,22 +773,31 @@ class OrderCreateSerializer(serializers.Serializer):
     country = serializers.CharField(allow_blank=True, required=False)
     phone = serializers.CharField(allow_blank=True, required=False)
     is_default = serializers.BooleanField(required=False)
+
     # DE-style split fields from frontend (optional)
     house_number = serializers.CharField(allow_blank=True, required=False)
-    street_name  = serializers.CharField(allow_blank=True, required=False)
+    street_name = serializers.CharField(allow_blank=True, required=False)
 
-    # optional installments hint
+    # installments / alt methods
     method = serializers.ChoiceField(
         choices=[
-            "card", "card_installments",
-            "sepa_debit", "sepa_debit_installments",
-            "paypal", "bank_transfer",
-            "giropay", "klarna",
+            "card",
+            "card_installments",
+            "sepa_debit",
+            "sepa_debit_installments",
+            "paypal",
+            "bank_transfer",
+            "giropay",
+            "klarna",
         ],
-        required=False
+        required=False,
     )
-    months = serializers.IntegerField(required=False, min_value=2, max_value=24)
-    idempotency_key = serializers.CharField(required=False, allow_blank=True)
+    months = serializers.IntegerField(
+        required=False, min_value=2, max_value=24
+    )
+    idempotency_key = serializers.CharField(
+        required=False, allow_blank=True
+    )
 
     def _normalize_country(self, c: str) -> str:
         if not c:
@@ -654,18 +826,19 @@ class OrderCreateSerializer(serializers.Serializer):
         user = getattr(req, "user", None)
 
         # Decide checkout mode
-        is_auth = bool(user and user.is_authenticated and getattr(user, "is_active", True))
+        is_auth = bool(
+            user and user.is_authenticated and getattr(user, "is_active", True)
+        )
 
-        # email requirement
+        # Email is always required; for auth user we can fill it
         incoming_email = (attrs.get("email") or "").strip().lower()
-        if is_auth:
-            if not incoming_email:
-                incoming_email = (getattr(user, "email", "") or "").strip().lower()
+        if is_auth and not incoming_email:
+            incoming_email = (getattr(user, "email", "") or "").strip().lower()
         if not incoming_email:
             raise serializers.ValidationError({"email": "Email is required."})
         attrs["email"] = incoming_email
 
-        # normalize payment method / aliases
+        # Normalize payment method from aliases
         aliases = {
             "stripe_sepa": "sepa_debit",
             "stripe_card": "card",
@@ -679,77 +852,115 @@ class OrderCreateSerializer(serializers.Serializer):
             "bank": "bank_transfer",
             "bank_transfer": "bank_transfer",
             "paypal": "paypal",
-            "giropay": "giropay",   # frontend will use Stripe PaymentElement (redirect), we'll treat as card intent
+            "giropay": "giropay",
             "klarna": "klarna",
         }
         key = (attrs.get("payment_method") or "").strip().lower() or "card"
         mapped = aliases.get(key, key)
         attrs["payment_method"] = mapped
 
-        # country normalization
+        # Normalize + restrict country
         attrs["country"] = self._normalize_country(attrs.get("country") or "")
-
-        # rules: SEPA + manual bank -> DE only
-        if attrs["payment_method"] in ("sepa_debit", "sepa_debit_installments", "bank_transfer"):
+        if attrs["payment_method"] in (
+            "sepa_debit",
+            "sepa_debit_installments",
+            "bank_transfer",
+        ):
             if attrs["country"] != "DE":
                 raise serializers.ValidationError(
-                    {"payment_method": "SEPA / Bank Transfer is only available in DE."}
+                    {
+                        "payment_method": "SEPA / Bank Transfer is only available in DE."
+                    }
                 )
 
-        # installments rule for card_installments (we also reuse same choices)
+        # Installments allowed only for certain methods
         months = attrs.get("months")
         if attrs["payment_method"] == "card_installments":
             if months is None or months not in (3, 6, 9):
                 raise serializers.ValidationError(
-                    {"months": "Choose 3, 6, or 9 months for card installments."}
+                    {
+                        "months": "Choose 3, 6, or 9 months for card installments."
+                    }
                 )
         else:
-            attrs["months"] = None  # ignore months if not card_installments
+            attrs["months"] = None
 
         return attrs
 
     def _apply_coupon(self, user, items, subtotal, code):
+        """
+        Check coupon validity and compute discount.
+        """
         if not code:
             return None, Decimal("0.00"), None
+
         coup = Coupon.objects.filter(code__iexact=str(code).strip()).first()
         if not coup:
             raise serializers.ValidationError({"coupon_code": "Coupon not found."})
-        ok, reason = coup.can_apply(user if getattr(user, "is_authenticated", False) else None, items, subtotal)
+
+        ok, reason = coup.can_apply(
+            user if getattr(user, "is_authenticated", False) else None,
+            items,
+            subtotal,
+        )
         if not ok:
             raise serializers.ValidationError({"coupon_code": reason})
-        disc = coup.discount_amount(user if getattr(user, "is_authenticated", False) else None, items, subtotal)
+
+        disc = coup.discount_amount(
+            user if getattr(user, "is_authenticated", False) else None,
+            items,
+            subtotal,
+        )
         return coup, disc, None
 
     def _calc_prices(self, items_in):
-        """Resolve products, build clean line list, calc subtotal."""
+        """
+        Turn posted cart line items into:
+        - clean_items: [(product, qty, unit_price_gross_decimal), ...]
+        - subtotal (gross)
+        """
         products = {}
         subtotal = Decimal("0.00")
         clean_items = []
+
         for it in items_in:
             pid = int(it["product_id"])
             qty = int(it["qty"])
+
             if qty <= 0:
-                raise serializers.ValidationError({"items": "Quantity must be >= 1"})
+                raise serializers.ValidationError(
+                    {"items": "Quantity must be >= 1"}
+                )
+
             if pid not in products:
                 try:
                     products[pid] = Product.objects.get(pk=pid)
                 except Product.DoesNotExist:
-                    raise serializers.ValidationError({"items": f"Product {pid} not found"})
+                    raise serializers.ValidationError(
+                        {"items": f"Product {pid} not found"}
+                    )
+
             p = products[pid]
-            unit = Decimal(p.final_price_gross)
+            unit = Decimal(p.final_price_gross)  # gross snapshot
+
             clean_items.append((p, qty, unit))
             subtotal += (unit * qty)
+
         return clean_items, subtotal
 
     def _resolve_address_for_user(self, user, validated):
         """
-        If user is authenticated:
+        For authenticated users only:
         - try address_id
-        - try dedupe existing
-        - else create Address(user=...)
-        Guests do NOT go here.
+        - else dedupe match
+        - else create new Address
+        Guests skip this completely.
         """
-        if not (user and user.is_authenticated and getattr(user, "is_active", True)):
+        if not (
+            user
+            and user.is_authenticated
+            and getattr(user, "is_active", True)
+        ):
             return None
 
         aid = validated.get("address_id")
@@ -758,21 +969,22 @@ class OrderCreateSerializer(serializers.Serializer):
             if a:
                 return a
 
-        # build sig for dedupe
+        # dedupe signature from posted fields
         sig_fields = {
             "first_name": validated.get("first_name", "").strip(),
-            "last_name":  validated.get("last_name", "").strip(),
-            "address_line1": validated.get("address_line1") or (
-                f"{validated.get('street_name','')} {validated.get('house_number','')}".strip()
-            ),
-            "address_line2": validated.get("address_line2",""),
-            "postal_code": validated.get("postal_code",""),
-            "city": validated.get("city",""),
-            "country": validated.get("country",""),
-            "phone": validated.get("phone",""),
+            "last_name": validated.get("last_name", "").strip(),
+            "address_line1": validated.get("address_line1")
+            or (
+                f"{validated.get('street_name','')} "
+                f"{validated.get('house_number','')}"
+            ).strip(),
+            "address_line2": validated.get("address_line2", ""),
+            "postal_code": validated.get("postal_code", ""),
+            "city": validated.get("city", ""),
+            "country": validated.get("country", ""),
+            "phone": validated.get("phone", ""),
         }
 
-        # match an exact-ish address already stored
         for a in Address.objects.filter(user=user):
             if (
                 a.first_name == sig_fields["first_name"]
@@ -786,7 +998,7 @@ class OrderCreateSerializer(serializers.Serializer):
             ):
                 return a
 
-        # otherwise create new Address
+        # Otherwise create new Address for this user
         line1 = sig_fields["address_line1"]
         addr = Address.objects.create(
             user=user,
@@ -798,59 +1010,87 @@ class OrderCreateSerializer(serializers.Serializer):
             city=sig_fields["city"],
             country=sig_fields["country"],
             phone=sig_fields["phone"],
-            street_name=validated.get("street_name",""),
-            house_number=validated.get("house_number",""),
+            street_name=validated.get("street_name", ""),
+            house_number=validated.get("house_number", ""),
         )
-        # first address becomes default
+
+        # First address becomes default automatically
         if not Address.objects.filter(user=user).exclude(pk=addr.pk).exists():
             addr.set_default_for_user()
+
         return addr
 
     def create(self, validated):
+        """
+        Build a pending Order with:
+        - contact email
+        - shipping snapshot stored on the order
+        - item snapshots (price, name, VAT at purchase)
+        - coupon + totals
+        - payment_status='created', status='pending'
+        """
         req_user = getattr(self.context["request"], "user", None)
-        is_auth = bool(req_user and req_user.is_authenticated and getattr(req_user, "is_active", True))
+        is_auth = bool(
+            req_user
+            and req_user.is_authenticated
+            and getattr(req_user, "is_active", True)
+        )
 
         items_in = validated["items"]
         clean_items, subtotal = self._calc_prices(items_in)
 
         coupon_code = (validated.get("coupon_code") or "").strip()
-        coupon_obj, discount, _ = self._apply_coupon(req_user, items_in, subtotal, coupon_code)
+        coupon_obj, discount, _ = self._apply_coupon(
+            req_user, items_in, subtotal, coupon_code
+        )
 
-        shipping_fee = Decimal("0.00")  # placeholder (you can calculate later by country/weight)
-        total = (subtotal - discount + shipping_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        shipping_fee = Decimal("0.00")  # TODO: real shipping calculation
+        total = (
+            subtotal - discount + shipping_fee
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         if total < 0:
             total = Decimal("0.00")
 
-        # address snapshot ALWAYS saved on order
-        snap_fn = validated.get("first_name", "")
-        snap_ln = validated.get("last_name", "")
-        snap_country = validated.get("country", "")
-        snap_addr1 = validated.get("address_line1") or (
-            f"{validated.get('street_name','')} {validated.get('house_number','')}".strip()
+        # Capture shipping snapshot fields
+        snap_fn = validated.get("first_name", "").strip()
+        snap_ln = validated.get("last_name", "").strip()
+        snap_country = validated.get("country", "").strip()
+        snap_addr1 = (
+            validated.get("address_line1")
+            or f"{validated.get('street_name','')} {validated.get('house_number','')}".strip()
         )
-        snap_addr2 = validated.get("address_line2","")
-        snap_zip = validated.get("postal_code","")
-        snap_city = validated.get("city","")
-        snap_phone = validated.get("phone","")
-        snap_street_name = validated.get("street_name","")
-        snap_house_number = validated.get("house_number","")
+        snap_addr2 = validated.get("address_line2", "").strip()
+        snap_zip = validated.get("postal_code", "").strip()
+        snap_city = validated.get("city", "").strip()
+        snap_phone = validated.get("phone", "").strip()
+        snap_street_name = validated.get("street_name", "").strip()
+        snap_house_number = validated.get("house_number", "").strip()
 
-        # if logged-in -> we also keep FK to Address
-        addr_obj = self._resolve_address_for_user(req_user, validated) if is_auth else None
+        # Authenticated users can also FK the address
+        addr_obj = (
+            self._resolve_address_for_user(req_user, validated)
+            if is_auth
+            else None
+        )
 
         with transaction.atomic():
             order = Order.objects.create(
                 user=req_user if is_auth else None,
                 email=validated["email"],
+
                 status="pending",
                 payment_method=validated.get("payment_method") or "card",
+                payment_status="created",
+
                 subtotal=subtotal.quantize(Decimal("0.01")),
+                discount_amount=discount,
                 shipping_fee=shipping_fee,
                 total_price=total,
+
+                installments_months=validated.get("months"),
+
                 shipping_address=addr_obj,
                 coupon=coupon_obj,
-                discount_amount=discount,
-                installments_months=validated.get("months"),
 
                 ship_first_name=snap_fn,
                 ship_last_name=snap_ln,
@@ -863,36 +1103,69 @@ class OrderCreateSerializer(serializers.Serializer):
                 ship_street_name=snap_street_name,
                 ship_house_number=snap_house_number,
             )
+
+            # Snapshot each line item into OrderItem
             for p, qty, unit in clean_items:
-                OrderItem.objects.create(order=order, product=p, quantity=qty, unit_price=unit)
+                product_name_snapshot = (
+                    getattr(p, "title_en", None)
+                    or getattr(p, "title_de", None)
+                    or str(p)
+                )
+                vat_snapshot = getattr(p, "vat_rate", None)
+
+                OrderItem.objects.create(
+                    order=order,
+                    product=p,
+                    quantity=qty,
+                    unit_price=unit,  # gross unit price at checkout time
+                    product_name_snapshot=product_name_snapshot,
+                    vat_rate_at_purchase=vat_snapshot,
+                )
 
         return order
-        
-# ----------------- Order list/detail (legacy quick use) -----------------
+
+
+# -----------------
+# Order list/detail for simple/legacy views
+# -----------------
 
 class OrderListItemSerializer(serializers.ModelSerializer):
     product = ProductMiniSerializer()
+
     class Meta:
         model = Order
-        fields = ['id', 'quantity', 'total_price', 'product']
+        fields = ["id", "quantity", "total_price", "product"]
+
 
 class OrderDetailSerializer(serializers.ModelSerializer):
     product = ProductMiniSerializer()
     shipping_address = AddressSerializer()
+
     class Meta:
         model = Order
         fields = [
-            'id', 'created_at', 'status', 'quantity', 'total_price',
-            'product', 'shipping_address'
+            "id",
+            "created_at",
+            "status",
+            "quantity",
+            "total_price",
+            "product",
+            "shipping_address",
         ]
 
-# ----------------- Coupon preview input -----------------
+
+# -----------------
+# Coupon Preview
+# -----------------
 
 class CouponPreviewIn(serializers.Serializer):
-    code  = serializers.CharField()
+    code = serializers.CharField()
     items = OrderItemIn(many=True)
 
-# ----------------- Promotions -----------------
+
+# -----------------
+# Promotions
+# -----------------
 
 class PromotionSerializer(serializers.ModelSerializer):
     code = serializers.SerializerMethodField()
@@ -902,9 +1175,17 @@ class PromotionSerializer(serializers.ModelSerializer):
     class Meta:
         model = PromotionBanner
         fields = [
-            "id", "headline", "subheadline", "code",
-            "start_at", "end_at", "remaining_seconds",
-            "bg_color", "text_color", "link_url", "image"
+            "id",
+            "headline",
+            "subheadline",
+            "code",
+            "start_at",
+            "end_at",
+            "remaining_seconds",
+            "bg_color",
+            "text_color",
+            "link_url",
+            "image",
         ]
 
     def _abs(self, request, url: str) -> str:
@@ -933,10 +1214,15 @@ class PromotionSerializer(serializers.ModelSerializer):
         delta = obj.end_at - n
         return max(0, int(delta.total_seconds()))
 
-# ----------------- Reviews -----------------
+
+# -----------------
+# Reviews
+# -----------------
 
 class ReviewSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(source="product.title_en", read_only=True)
+    product_name = serializers.CharField(
+        source="product.title_en", read_only=True
+    )
     image = serializers.SerializerMethodField()
     author_avatar_url = serializers.SerializerMethodField()
     user_name = serializers.SerializerMethodField()
@@ -945,13 +1231,25 @@ class ReviewSerializer(serializers.ModelSerializer):
     class Meta:
         model = Review
         fields = [
-            "id", "product", "product_name",
-            "rating", "message", "image", "author_avatar_url",
+            "id",
+            "product",
+            "product_name",
+            "rating",
+            "message",
+            "image",
+            "author_avatar_url",
             "author_name",
             "created_at",
-            "user_name", "is_owner",
+            "user_name",
+            "is_owner",
         ]
-        read_only_fields = ["product", "product_name", "user_name", "is_owner", "author_avatar_url"]
+        read_only_fields = [
+            "product",
+            "product_name",
+            "user_name",
+            "is_owner",
+            "author_avatar_url",
+        ]
 
     def _abs_url(self, request, f):
         if not f:
@@ -972,13 +1270,16 @@ class ReviewSerializer(serializers.ModelSerializer):
         if obj.author_name:
             return obj.author_name
         u = obj.user
+        # prefer profile.full_name, fallback username, fallback email localpart
         if hasattr(u, "profile") and getattr(u.profile, "full_name", ""):
             return u.profile.full_name
         return u.username or (u.email.split("@")[0] if u.email else "User")
 
     def get_is_owner(self, obj):
         req = self.context.get("request")
-        return bool(req and req.user.is_authenticated and obj.user_id == req.user.id)
+        return bool(
+            req and req.user.is_authenticated and obj.user_id == req.user.id
+        )
 
 
 class ReviewWriteSerializer(serializers.ModelSerializer):
@@ -988,33 +1289,57 @@ class ReviewWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Review
-        fields = ["rating", "message", "image", "author_name", "author_avatar", "user"]
+        fields = [
+            "rating",
+            "message",
+            "image",
+            "author_name",
+            "author_avatar",
+            "user",
+        ]
 
     def validate_rating(self, v):
         if v < 1 or v > 5:
-            raise serializers.ValidationError("Rating must be between 1 and 5.")
+            raise serializers.ValidationError(
+                "Rating must be between 1 and 5."
+            )
         return v
 
- 
- # ----------------- Stock Alert -----------------
+
+# -----------------
+# Stock Alert & On-Demand Requests
+# -----------------
+
 class OnDemandOrderRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = OnDemandOrderRequest
-        fields = ["id", "product", "name", "email", "quantity", "message", "created_at"]
+        fields = [
+            "id",
+            "product",
+            "name",
+            "email",
+            "quantity",
+            "message",
+            "created_at",
+        ]
         read_only_fields = ["id", "created_at"]
 
     def validate(self, attrs):
         qty = int(attrs.get("quantity") or 0)
         if qty < 1:
-            raise serializers.ValidationError({"quantity": "Must be at least 1."})
-        # Ensure product exists (and is active if you have such a flag)
+            raise serializers.ValidationError(
+                {"quantity": "Must be at least 1."}
+            )
         product = attrs.get("product")
         if not isinstance(product, Product):
             raise serializers.ValidationError({"product": "Invalid product."})
         return attrs
-    
+
+
 class StockAlertCreateSerializer(serializers.Serializer):
-    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
+    product = serializers.PrimaryKeyRelatedField(
+        queryset=Product.objects.all()
+    )
     email = serializers.EmailField()
 
     def validate_email(self, v):

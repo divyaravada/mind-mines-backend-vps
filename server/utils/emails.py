@@ -1,4 +1,3 @@
-# server/utils/emails.py
 import re
 import logging
 from dataclasses import dataclass
@@ -22,12 +21,11 @@ MAX_ATTACH_BYTES = 14 * 1024 * 1024
 
 def order_recipient_email(order) -> Optional[str]:
     """
-    Recipient for order emails in authenticated-only flow.
+    Recipient for order emails in authenticated+guest flow.
     Priority: explicit order.email, then order.user.email.
     """
     return (getattr(order, "email", None)
             or getattr(getattr(order, "user", None), "email", None))
-
 
 def _money(v: Decimal, currency: str = "EUR") -> str:
     try:
@@ -35,10 +33,8 @@ def _money(v: Decimal, currency: str = "EUR") -> str:
     except Exception:
         return f"{v} {currency}"
 
-
 def _from_email() -> str:
     return getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@mindmines.eu")
-
 
 def _bcc_defaults() -> Sequence[str]:
     """
@@ -47,11 +43,9 @@ def _bcc_defaults() -> Sequence[str]:
     """
     return getattr(settings, "ORDER_EMAIL_BCC", [])
 
-
 def _attach_invoice_if_available(order, email_msg: EmailMultiAlternatives):
     """
-    Attach invoice PDF if present (either through related Invoice.pdf
-    or legacy Order.invoice_pdf).
+    Attach invoice PDF if present (Invoice.pdf relation or legacy Order.invoice_pdf).
     """
     try:
         inv = getattr(order, "invoice", None)
@@ -69,13 +63,11 @@ def _attach_invoice_if_available(order, email_msg: EmailMultiAlternatives):
     except Exception:
         logger.exception("Failed reading legacy invoice pdf for order %s", order.id)
 
-
 @dataclass
 class EmailBody:
     subject: str
     text: str
     html: str
-
 
 def _tr(locale: str, key: str, **vars) -> str:
     """
@@ -166,12 +158,9 @@ def _tr(locale: str, key: str, **vars) -> str:
     except Exception:
         return s
 
-
 def _bilingual_block(en: str, de: str) -> Tuple[str, str]:
-    """Return text_en, text_de with a separator for plaintext."""
     sep = "\n\n" + ("-" * 32) + "\n\n"
-    return en, de + ""  # no change; we assemble later
-
+    return en, de + ""
 
 def _base_wrapper(subject_en: str, subject_de: str, body_en_html: str, body_de_html: str) -> EmailBody:
     subject = f"{subject_en} / {subject_de}"
@@ -195,9 +184,7 @@ def _base_wrapper(subject_en: str, subject_de: str, body_en_html: str, body_de_h
     """.strip()
     return EmailBody(subject=subject, text=text, html=html)
 
-
 def _html_to_text(html: str) -> str:
-    # Keep it simple; Django's linebreaksbr for safety, then strip tags crudely
     try:
         s = html.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
         for tag in ("p", "div", "ul", "ol", "li", "strong", "em", "b", "i", "hr"):
@@ -205,7 +192,6 @@ def _html_to_text(html: str) -> str:
         return s
     except Exception:
         return html
-
 
 def _send_email(subject: str, text: str, html: str, to_email: str, bcc: Optional[Iterable[str]] = None,
                 attachments: Optional[Iterable[Tuple[str, bytes, str]]] = None) -> bool:
@@ -233,38 +219,44 @@ def _send_email(subject: str, text: str, html: str, to_email: str, bcc: Optional
         logger.exception("Failed to send email to %s (subject=%s)", to_email, subject)
         return False
 
-
 # ---------------------------------------------------------------------------
-# Email builders
+# Email content helpers
 # ---------------------------------------------------------------------------
 
 def _order_header_html(order) -> str:
     num = getattr(order, "number", None) or f"#{order.id}"
-    total = _money(getattr(order, "total_price", Decimal("0.00")))
+    total_val = getattr(order, "total_price", Decimal("0.00"))
+    total = _money(total_val)
     return f"""
       <p><strong>{_tr('en','order_label')}: {num}</strong><br />
          {_tr('en','total_label')}: {total}</p>
     """
 
-
 def _line_items_html(order) -> str:
+    """
+    Use OrderItem snapshot data (product_name, unit_price, quantity).
+    We DO NOT rely only on Product current title/price.
+    """
     try:
         rows = []
         items = getattr(order, "items", None)
-        if items is None:
+        if not items:
             return ""
-        for it in items.all().select_related("product"):
-            title = getattr(getattr(it, "product", None), "title_en", None) or \
-                    getattr(getattr(it, "product", None), "title", "") or "Item"
+        for it in items.all():
+            title = getattr(it, "product_name", None)
+            if not title:
+                # fallback if snapshot missing
+                prod = getattr(it, "product", None)
+                title = getattr(prod, "title_en", None) or getattr(prod, "title_de", None) or "Item"
             qty = getattr(it, "quantity", 1)
-            unit = _money(getattr(it, "unit_price", Decimal("0.00")))
+            unit_val = getattr(it, "unit_price", Decimal("0.00"))
+            unit = _money(unit_val)
             rows.append(f"<li>{title} &times; {qty} — {unit}</li>")
         if rows:
             return "<ul>" + "".join(rows) + "</ul>"
     except Exception:
-        logger.exception("Failed to render line items for order %s", order.id)
+        logger.exception("Failed to render line items for order %s", getattr(order, "id", "?"))
     return ""
-
 
 def _fmt(amount): return f"{float(amount):.2f} {CURRENCY}"
 
@@ -273,7 +265,7 @@ def _strip_html(s: str) -> str:
 
 def get_order_recipient(order) -> str | None:
     """
-    Authenticated-only priority: explicit order.email -> order.user.email.
+    fallback helper used below
     """
     for cand in [
         getattr(order, "email", None),
@@ -354,7 +346,7 @@ def send_return_request_emails(return_request):
     )
     _send_bilingual("Return request received / Rücksendeanfrage erhalten", customer, en, de)
 
-    # Admin
+    # Admin notice
     try:
         admin_to = getattr(settings, "ADMIN_EMAIL", None) or DEFAULT_FROM
         if admin_to:
@@ -460,12 +452,11 @@ def send_cancellation_email(order):
     _send_bilingual("Order cancelled / Bestellung storniert", to_email, en, de)
 
 # ------------- Order confirmation -------------
-
 def send_order_confirmation(order, user_locale: str = "en", to: Optional[str] = None) -> bool:
     to = to or order.email
     num = getattr(order, "number", None) or f"#{order.id}"
 
-    # keep idempotency: if already sent, don’t send again
+    # idempotency: don't resend if we already stamped
     if getattr(order, "confirmation_sent_at", None):
         return False
 
@@ -549,8 +540,6 @@ def send_bank_transfer_instructions(
 
     mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
     return _send_email(mail.subject, mail.text, mail.html, to_email)
-
-
 
 # ------------- Installments -------------
 def send_installments_started_email(
@@ -646,7 +635,6 @@ def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None)
     except Exception:
         logger.exception("Failed to send invoice email for order %s", getattr(order, "id", "?"))
         return False
-
 
 # ------------- Stock Alert -------------
 def send_stock_alert_email(product, to_email: str, unsubscribe_url: str, user_locale: str = "en"):
