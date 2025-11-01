@@ -522,10 +522,20 @@ class Order(models.Model):
         ("sepa_debit_installments", "SEPA Direct Debit (Installments)"),
         ("paypal", "PayPal"),
         ("bank_transfer", "Bank Transfer (Manual Direct Debit)"),
+        ("giropay", "Giropay"),
+        ("klarna", "Klarna"),
     ]
+    user = models.ForeignKey(
+        "server.User",
+        on_delete=models.CASCADE,
+        related_name='orders',
+        null=True,
+        blank=True
+    )
 
-    user = models.ForeignKey("server.User", on_delete=models.CASCADE, related_name='orders', null=True, blank=True)
-    email = models.EmailField()  # billing/contact email
+    # the email we will use for confirmations + invoice
+    email = models.EmailField()
+
 
     # legacy (optional single-line)
     product = models.ForeignKey("server.Product", on_delete=models.SET_NULL, null=True, blank=True)
@@ -533,23 +543,38 @@ class Order(models.Model):
 
     payment_method = models.CharField(max_length=32, choices=PAYMENT_METHODS, default="card")
     status = models.CharField(max_length=32, choices=ORDER_STATUS, default="pending")
-    payment_ref = models.CharField(max_length=128, blank=True, default="")
-    payment_id = models.CharField(max_length=128, blank=True, default="")
+
+    payment_ref = models.CharField(max_length=128, blank=True, default="")  # Stripe PI / Schedule ID / PayPal order ID
+    payment_id = models.CharField(max_length=128, blank=True, default="")   # Stripe charge ID etc.
     tracking_number = models.CharField(max_length=64, blank=True, default="")
 
-    invoice_number = models.CharField(max_length=32, blank=True, null=True, default=None)  # legacy
+    invoice_number = models.CharField(max_length=32, blank=True, null=True, default=None)
     invoice_pdf = models.FileField(upload_to="invoices/", blank=True, null=True)
 
     coupon = models.ForeignKey("server.Coupon", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders")
     discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
 
-    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))      # gross subtotal
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))      # gross
     shipping_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))  # gross
     total_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))   # gross
 
     installments_months = models.PositiveIntegerField(null=True, blank=True)
 
+    # Logged-in flow: FK to Address
     shipping_address = models.ForeignKey('server.Address', on_delete=models.SET_NULL, null=True, blank=True)
+
+    # Snapshot ALWAYS stored, incl. guests:
+    ship_first_name = models.CharField(max_length=100, blank=True, default="")
+    ship_last_name  = models.CharField(max_length=100, blank=True, default="")
+    ship_line1      = models.CharField(max_length=255, blank=True, default="")
+    ship_line2      = models.CharField(max_length=255, blank=True, default="")
+    ship_postal     = models.CharField(max_length=32, blank=True, default="")
+    ship_city       = models.CharField(max_length=100, blank=True, default="")
+    ship_country    = models.CharField(max_length=2, blank=True, default="")  # "DE", "FR", ...
+    ship_phone      = models.CharField(max_length=64, blank=True, default="")
+    ship_street_name  = models.CharField(max_length=255, blank=True, default="")
+    ship_house_number = models.CharField(max_length=64, blank=True, default="")
+
     number = models.CharField(max_length=32, unique=True, null=True, blank=True, default=None)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -562,12 +587,13 @@ class Order(models.Model):
 
     stock_locked = models.BooleanField(default=False)
     stock_released = models.BooleanField(default=False)
+
     lookup_token = models.CharField(max_length=36, blank=True, default="")
     confirmation_sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [
-            UniqueConstraint(
+            models.UniqueConstraint(
                 fields=["invoice_number"],
                 condition=Q(invoice_number__isnull=False) & ~Q(invoice_number=""),
                 name="uniq_invoice_number_nonempty",
@@ -576,7 +602,7 @@ class Order(models.Model):
 
     def __str__(self):
         return f"Order #{self.pk}"
-
+    
     def _iter_items(self):
         # Prefer related manager
         manager = getattr(self, "items", None)

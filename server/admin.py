@@ -187,15 +187,15 @@ class OrderAdmin(admin.ModelAdmin):
         "number", "subtotal", "discount_amount", "shipping_fee", "total_price",
         "payment_ref", "payment_id", "created_at", "updated_at",
         "items_readonly", "delivered_at", "cancelled_at",
-        # IMPORTANT: include any non-model “display” methods that appear in `fields`
         "customer_email",
+        "shipping_snapshot_readonly",
     )
 
     fields = (
         ("number", "user", "customer_email", "created_at", "delivered_at", "cancelled_at"),
         ("status", "payment_method", "tracking_number"),
         ("subtotal", "discount_amount", "shipping_fee", "total_price"),
-        ("shipping_address",),
+        ("shipping_address",),"shipping_snapshot_readonly",
         "items_readonly",
         ("payment_ref", "payment_id"),
     )
@@ -206,6 +206,27 @@ class OrderAdmin(admin.ModelAdmin):
     def customer_email(self, obj):
         return getattr(obj, "email", None) or getattr(getattr(obj, "user", None), "email", None) or "-"
     customer_email.short_description = "Email"
+
+    def shipping_snapshot_readonly(self, obj):
+        # nicely render guest snapshot, also visible for logged-in users (audit)
+        return format_html(
+            "<div>"
+            "<div><b>{}</b> {}</div>"
+            "<div>{}</div>"
+            "<div>{} {}</div>"
+            "<div>{} {}</div>"
+            "<div>{}</div>"
+            "</div>",
+            (obj.ship_first_name or ""),
+            (obj.ship_last_name or ""),
+            (obj.ship_address_line1 or ""),
+            (obj.ship_postal_code or ""),
+            (obj.ship_city or ""),
+            (obj.ship_country or ""),
+            (obj.ship_phone or ""),
+            (f"Street: {obj.ship_street_name} {obj.ship_house_number}" if obj.ship_street_name or obj.ship_house_number else "")
+        )
+    shipping_snapshot_readonly.short_description = "Shipping snapshot"
 
     def total_price_display(self, obj):
         val = getattr(obj, "total_price", None)

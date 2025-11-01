@@ -55,7 +55,7 @@ from .views import (
     PaypalCreateOrder, PaypalCaptureOrder,
 
     # Stripe
-    StripeCreateIntent, StripeCreateCardSetupIntent, StripeCreateSepaSetupIntent,
+    StripeCreateIntent, StripeCreateCardSetupIntent, StripeCreateSepaSetupIntent, StripeCardCreateInstallments,
     StripeCreateSepaIntent, StripeSepaCreateInstallments, SepaPostConfirmView, stripe_webhook,
 
     # Bank transfer
@@ -162,6 +162,7 @@ urlpatterns = [
     # -------- Stripe --------
     path("stripe/create-intent/card", StripeCreateIntent.as_view(), name="stripe_create_intent"),
     path("stripe/setup-intent/card/", StripeCreateCardSetupIntent.as_view(), name="stripe_setup_card"),
+    path("stripe/installments/card/", StripeCardCreateInstallments.as_view(), name="stripe_card_installments"),
     path("stripe/setup-intent/sepa/", StripeCreateSepaSetupIntent.as_view(), name="stripe_setup_sepa"),
     path("stripe/create-intent/sepa/", StripeCreateSepaIntent.as_view(), name="stripe_create_sepa_intent"),
     path("stripe/installments/sepa/", StripeSepaCreateInstallments.as_view(), name="stripe_sepa_installments"),

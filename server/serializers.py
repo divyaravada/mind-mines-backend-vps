@@ -483,11 +483,21 @@ class OrderItemReadSerializer(serializers.ModelSerializer):
         except Exception:
             return Decimal("0.00")
 
+class ShippingSnapshotSerializer(serializers.Serializer):
+    first_name = serializers.CharField()
+    last_name = serializers.CharField()
+    line1 = serializers.CharField()
+    line2 = serializers.CharField()
+    postal_code = serializers.CharField()
+    city = serializers.CharField()
+    country = serializers.CharField()
+    phone = serializers.CharField()
 
 class OrderReadSerializer(serializers.ModelSerializer):
     items = OrderItemReadSerializer(many=True, read_only=True)
     invoice_pdf = serializers.SerializerMethodField()
     shipping_address = AddressSerializer(read_only=True)
+    shipping_snapshot = serializers.SerializerMethodField()
     is_returnable = serializers.SerializerMethodField()
     return_deadline = serializers.SerializerMethodField()
     payment_method_label = serializers.SerializerMethodField()
@@ -500,8 +510,21 @@ class OrderReadSerializer(serializers.ModelSerializer):
             "subtotal", "discount_amount", "shipping_fee", "total_price",
             "created_at", "updated_at", "tracking_number",
             "items", "invoice_pdf", "is_returnable", "return_deadline",
-            "shipping_address", "coupon_code",
+            "shipping_address", "shipping_snapshot", "coupon_code",
+            "email",
         ]
+
+    def get_shipping_snapshot(self, obj):
+        return {
+            "first_name": obj.ship_first_name,
+            "last_name": obj.ship_last_name,
+            "line1": obj.ship_line1,
+            "line2": obj.ship_line2,
+            "postal_code": obj.ship_postal,
+            "city": obj.ship_city,
+            "country": obj.ship_country,
+            "phone": obj.ship_phone,
+        }
 
     def get_payment_method_label(self, obj):
         try:
@@ -518,7 +541,7 @@ class OrderReadSerializer(serializers.ModelSerializer):
 
     def get_invoice_pdf(self, obj):
         request = self.context.get("request")
-        # 1) Invoice relation
+        # 1) Invoice relation (preferred)
         try:
             inv = getattr(obj, "invoice", None)
             f = getattr(inv, "pdf", None)
@@ -534,7 +557,7 @@ class OrderReadSerializer(serializers.ModelSerializer):
         except Exception:
             pass
         return None
-
+    
     def get_is_returnable(self, obj):
         try:
             return obj.is_returnable
@@ -568,9 +591,7 @@ class OrderCreateSerializer(serializers.Serializer):
     email = serializers.EmailField(required=False, allow_blank=True)
     items = OrderItemIn(many=True)
 
-    payment_method = serializers.ChoiceField(
-        choices=[c[0] for c in Order.PAYMENT_METHODS],
-        default="card",
+    payment_method = serializers.CharField(
         required=False,
         allow_blank=True,
         allow_null=True,
@@ -578,7 +599,7 @@ class OrderCreateSerializer(serializers.Serializer):
 
     coupon_code = serializers.CharField(allow_blank=True, required=False)
 
-    # address
+    # shipping address input (always collected)
     address_id = serializers.IntegerField(required=False)
     first_name = serializers.CharField(allow_blank=True, required=False)
     last_name  = serializers.CharField(allow_blank=True, required=False)
@@ -588,27 +609,69 @@ class OrderCreateSerializer(serializers.Serializer):
     city = serializers.CharField(allow_blank=True, required=False)
     country = serializers.CharField(allow_blank=True, required=False)
     phone = serializers.CharField(allow_blank=True, required=False)
-    idempotency_key = serializers.CharField(required=False, allow_blank=True)
     is_default = serializers.BooleanField(required=False)
-    # legacy
+    # DE-style split fields from frontend (optional)
     house_number = serializers.CharField(allow_blank=True, required=False)
     street_name  = serializers.CharField(allow_blank=True, required=False)
 
     # optional installments hint
     method = serializers.ChoiceField(
-        choices=["card", "card_installments", "sepa_debit", "sepa_debit_installments", "paypal", "bank_transfer"],
+        choices=[
+            "card", "card_installments",
+            "sepa_debit", "sepa_debit_installments",
+            "paypal", "bank_transfer",
+            "giropay", "klarna",
+        ],
         required=False
     )
     months = serializers.IntegerField(required=False, min_value=2, max_value=24)
+    idempotency_key = serializers.CharField(required=False, allow_blank=True)
 
-    def validate_payment_method(self, value: str) -> str:
-        if not value:
-            return None
+    def _normalize_country(self, c: str) -> str:
+        if not c:
+            return "DE"
+        c = c.strip()
+        if len(c) == 2:
+            return c.upper()
+        mapping = {
+            "Germany": "DE",
+            "Deutschland": "DE",
+            "Austria": "AT",
+            "Österreich": "AT",
+            "Switzerland": "CH",
+            "Schweiz": "CH",
+            "Italy": "IT",
+            "Italia": "IT",
+            "France": "FR",
+            "Frankreich": "FR",
+            "Netherlands": "NL",
+            "Niederlande": "NL",
+        }
+        return mapping.get(c, "DE")
+
+    def validate(self, attrs):
+        req = self.context.get("request")
+        user = getattr(req, "user", None)
+
+        # Decide checkout mode
+        is_auth = bool(user and user.is_authenticated and getattr(user, "is_active", True))
+
+        # email requirement
+        incoming_email = (attrs.get("email") or "").strip().lower()
+        if is_auth:
+            if not incoming_email:
+                incoming_email = (getattr(user, "email", "") or "").strip().lower()
+        if not incoming_email:
+            raise serializers.ValidationError({"email": "Email is required."})
+        attrs["email"] = incoming_email
+
+        # normalize payment method / aliases
         aliases = {
             "stripe_sepa": "sepa_debit",
             "stripe_card": "card",
             "debit_card": "card",
             "card_installment": "card_installments",
+            "card_installments": "card_installments",
             "sepa_installments": "sepa_debit_installments",
             "sepa": "sepa_debit",
             "manual_dd": "bank_transfer",
@@ -616,95 +679,35 @@ class OrderCreateSerializer(serializers.Serializer):
             "bank": "bank_transfer",
             "bank_transfer": "bank_transfer",
             "paypal": "paypal",
+            "giropay": "card",   # frontend will use Stripe PaymentElement (redirect), we'll treat as card intent
+            "klarna": "card",
+            "sofort": "card",
         }
-        key = (value or "").strip().lower()
+        key = (attrs.get("payment_method") or "").strip().lower() or "card"
         mapped = aliases.get(key, key)
-        valid = {c[0] for c in Order.PAYMENT_METHODS}
-        if mapped and mapped not in valid:
-            raise serializers.ValidationError(f"'{value}' is not a valid payment method.")
-        return mapped
+        attrs["payment_method"] = mapped
 
-    def validate(self, attrs):
-        req = self.context.get("request")
-        user = getattr(req, "user", None)
-        if not (user and user.is_authenticated and getattr(user, "is_active", True)):
-            raise serializers.ValidationError({"detail": "Authentication required."})        
+        # country normalization
+        attrs["country"] = self._normalize_country(attrs.get("country") or "")
 
-        pm = attrs.get("payment_method")
-        if not pm and attrs.get("method"):
-            pm = attrs["method"]
-        pm = self.validate_payment_method(pm) if pm else None
-        attrs["payment_method"] = pm or "card"
-
-        # Example SEPA region rule: only allow DE (adjust if you want wider)
-        if attrs["payment_method"] in ("sepa_debit", "sepa_debit_installments"):
-            cc = (attrs.get("country") or "").strip().upper()[:2]
-            if cc != "DE":
+        # rules: SEPA + manual bank -> DE only
+        if attrs["payment_method"] in ("sepa_debit", "sepa_debit_installments", "bank_transfer"):
+            if attrs["country"] != "DE":
                 raise serializers.ValidationError(
-                    {"payment_method": "SEPA is available only in DE."}
+                    {"payment_method": "SEPA / Bank Transfer is only available in DE."}
                 )
 
-        # Optional: _months_ rules for card installments (tweak as needed)
+        # installments rule for card_installments (we also reuse same choices)
         months = attrs.get("months")
         if attrs["payment_method"] == "card_installments":
             if months is None or months not in (3, 6, 9):
-                raise serializers.ValidationError({"months": "Choose 3, 6, or 9 months for card installments."})
+                raise serializers.ValidationError(
+                    {"months": "Choose 3, 6, or 9 months for card installments."}
+                )
         else:
-            if months is not None:
-                # ignore months when not using card installments
-                attrs["months"] = None
+            attrs["months"] = None  # ignore months if not card_installments
 
         return attrs
-
-    def _resolve_address(self, user, validated):
-        # 🔒 only for real users
-        if not (user and user.is_authenticated and getattr(user, "is_active", True)):
-            raise serializers.ValidationError({"detail": "Authentication required."})
-
-        aid = validated.get("address_id")
-        if aid:
-            a = Address.objects.filter(user=user, id=aid).first()
-            if a:
-                return a
-
-        sig = _addr_signature_dict(validated)
-        if any(sig):
-            for a in Address.objects.filter(user=user):
-                if _addr_signature_model(a) == sig:
-                    return a
-                
-        mostly_empty = not any([
-            validated.get("address_line1"),
-            validated.get("street_name"),
-            validated.get("postal_code"),
-            validated.get("city"),
-        ])
-        if mostly_empty:
-            default = Address.objects.filter(user=user, is_default=True).first()
-            if default:
-                return default
-
-        line1 = validated.get("address_line1") or (" ".join([
-            validated.get("street_name",""), validated.get("house_number","")
-        ])).strip()
-
-   
-        addr = Address.objects.create(
-            user=user,
-            first_name=validated.get("first_name",""),
-            last_name=validated.get("last_name",""),
-            address_line1=line1,
-            apartment=validated.get("address_line2",""),
-            postal_code=validated.get("postal_code",""),
-            city=validated.get("city",""),
-            country=validated.get("country",""),
-            phone=validated.get("phone",""),
-            street_name=validated.get("street_name",""),
-            house_number=validated.get("house_number",""),
-        )
-        if not Address.objects.filter(user=user).exclude(pk=addr.pk).exists():
-            addr.set_default_for_user()
-        return addr
 
     def _apply_coupon(self, user, items, subtotal, code):
         if not code:
@@ -712,17 +715,14 @@ class OrderCreateSerializer(serializers.Serializer):
         coup = Coupon.objects.filter(code__iexact=str(code).strip()).first()
         if not coup:
             raise serializers.ValidationError({"coupon_code": "Coupon not found."})
-        ok, reason = coup.can_apply(user, items, subtotal)
+        ok, reason = coup.can_apply(user if getattr(user, "is_authenticated", False) else None, items, subtotal)
         if not ok:
             raise serializers.ValidationError({"coupon_code": reason})
-        disc = coup.discount_amount(user, items, subtotal)
+        disc = coup.discount_amount(user if getattr(user, "is_authenticated", False) else None, items, subtotal)
         return coup, disc, None
 
-    def create(self, validated):
-        req_user = self.context["request"].user
-        items_in = validated["items"]
-        addr = self._resolve_address(req_user, validated)
-
+    def _calc_prices(self, items_in):
+        """Resolve products, build clean line list, calc subtotal."""
         products = {}
         subtotal = Decimal("0.00")
         clean_items = []
@@ -740,32 +740,128 @@ class OrderCreateSerializer(serializers.Serializer):
             unit = Decimal(p.final_price_gross)
             clean_items.append((p, qty, unit))
             subtotal += (unit * qty)
+        return clean_items, subtotal
+
+    def _resolve_address_for_user(self, user, validated):
+        """
+        If user is authenticated:
+        - try address_id
+        - try dedupe existing
+        - else create Address(user=...)
+        Guests do NOT go here.
+        """
+        if not (user and user.is_authenticated and getattr(user, "is_active", True)):
+            return None
+
+        aid = validated.get("address_id")
+        if aid:
+            a = Address.objects.filter(user=user, id=aid).first()
+            if a:
+                return a
+
+        # build sig for dedupe
+        sig_fields = {
+            "first_name": validated.get("first_name", "").strip(),
+            "last_name":  validated.get("last_name", "").strip(),
+            "address_line1": validated.get("address_line1") or (
+                f"{validated.get('street_name','')} {validated.get('house_number','')}".strip()
+            ),
+            "address_line2": validated.get("address_line2",""),
+            "postal_code": validated.get("postal_code",""),
+            "city": validated.get("city",""),
+            "country": validated.get("country",""),
+            "phone": validated.get("phone",""),
+        }
+
+        # match an exact-ish address already stored
+        for a in Address.objects.filter(user=user):
+            if (
+                a.first_name == sig_fields["first_name"]
+                and a.last_name == sig_fields["last_name"]
+                and a.address_line1 == sig_fields["address_line1"]
+                and a.apartment == sig_fields["address_line2"]
+                and a.postal_code == sig_fields["postal_code"]
+                and a.city == sig_fields["city"]
+                and a.country == sig_fields["country"]
+                and a.phone == sig_fields["phone"]
+            ):
+                return a
+
+        # otherwise create new Address
+        line1 = sig_fields["address_line1"]
+        addr = Address.objects.create(
+            user=user,
+            first_name=sig_fields["first_name"],
+            last_name=sig_fields["last_name"],
+            address_line1=line1,
+            apartment=sig_fields["address_line2"],
+            postal_code=sig_fields["postal_code"],
+            city=sig_fields["city"],
+            country=sig_fields["country"],
+            phone=sig_fields["phone"],
+            street_name=validated.get("street_name",""),
+            house_number=validated.get("house_number",""),
+        )
+        # first address becomes default
+        if not Address.objects.filter(user=user).exclude(pk=addr.pk).exists():
+            addr.set_default_for_user()
+        return addr
+
+    def create(self, validated):
+        req_user = getattr(self.context["request"], "user", None)
+        is_auth = bool(req_user and req_user.is_authenticated and getattr(req_user, "is_active", True))
+
+        items_in = validated["items"]
+        clean_items, subtotal = self._calc_prices(items_in)
 
         coupon_code = (validated.get("coupon_code") or "").strip()
         coupon_obj, discount, _ = self._apply_coupon(req_user, items_in, subtotal, coupon_code)
-        shipping_fee = Decimal("0.00")
+
+        shipping_fee = Decimal("0.00")  # placeholder (you can calculate later by country/weight)
         total = (subtotal - discount + shipping_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         if total < 0:
             total = Decimal("0.00")
 
-        
-        order_email = (getattr(req_user, "email", "") or "").strip().lower()
-        if not order_email:
-            raise serializers.ValidationError({"email": "Account email missing on user."})
+        # address snapshot ALWAYS saved on order
+        snap_fn = validated.get("first_name", "")
+        snap_ln = validated.get("last_name", "")
+        snap_country = validated.get("country", "")
+        snap_addr1 = validated.get("address_line1") or (
+            f"{validated.get('street_name','')} {validated.get('house_number','')}".strip()
+        )
+        snap_addr2 = validated.get("address_line2","")
+        snap_zip = validated.get("postal_code","")
+        snap_city = validated.get("city","")
+        snap_phone = validated.get("phone","")
+        snap_street_name = validated.get("street_name","")
+        snap_house_number = validated.get("house_number","")
+
+        # if logged-in -> we also keep FK to Address
+        addr_obj = self._resolve_address_for_user(req_user, validated) if is_auth else None
 
         with transaction.atomic():
             order = Order.objects.create(
-                user=req_user,
-                email=order_email,
+                user=req_user if is_auth else None,
+                email=validated["email"],
                 status="pending",
                 payment_method=validated.get("payment_method") or "card",
                 subtotal=subtotal.quantize(Decimal("0.01")),
                 shipping_fee=shipping_fee,
                 total_price=total,
-                shipping_address=addr,
+                shipping_address=addr_obj,
                 coupon=coupon_obj,
                 discount_amount=discount,
                 installments_months=validated.get("months"),
+                ship_first_name=snap_fn,
+                ship_last_name=snap_ln,
+                ship_address_line1=snap_addr1,
+                ship_address_line2=snap_addr2,
+                ship_postal_code=snap_zip,
+                ship_city=snap_city,
+                ship_country=snap_country,
+                ship_phone=snap_phone,
+                ship_street_name=snap_street_name,
+                ship_house_number=snap_house_number,
             )
             for p, qty, unit in clean_items:
                 OrderItem.objects.create(order=order, product=p, quantity=qty, unit_price=unit)
