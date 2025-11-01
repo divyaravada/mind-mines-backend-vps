@@ -1118,18 +1118,26 @@ def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> st
 
 class StripeCreateIntent(APIView):
     """
-    Create local Order (status 'pending') and a Stripe PaymentIntent for
-    one-shot checkout (card / klarna / giropay / etc.).
+    Creates:
+    - local Order (status 'pending')
+    - Stripe PaymentIntent for immediate/redirect payment methods
+      (card, Klarna, Giropay … depending on basket size)
 
-    For very small totals we only allow 'card'. If total is below Stripe's
-    minimum chargeable amount we stop and return 400 instead of calling Stripe.
+    Frontend will render <Elements><PaymentElement/></Elements> using the
+    clientSecret we return. Then it calls stripe.confirmPayment().
+
+    After Stripe confirms (including redirect methods),
+    Stripe will call our webhook -> webhook will mark the order paid,
+    reserve stock, send invoice, etc.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
         data = request.data.copy()
 
-        # 1. Validate + build order draft via serializer
+        #
+        # 1. Validate checkout payload and build local Order (guest allowed).
+        #
         ser = OrderCreateSerializer(data=data, context={"request": request})
         try:
             ser.is_valid(raise_exception=True)
@@ -1139,81 +1147,71 @@ class StripeCreateIntent(APIView):
                 status=400,
             )
 
-        # 2. Save order in DB
         try:
             with transaction.atomic():
                 order = ser.save()
-                pm = ser.validated_data.get("payment_method") or "card"
-                order.payment_method = pm
+
+                # whatever user picked on frontend ("card", "klarna", etc.)
+                initial_pm = ser.validated_data.get("payment_method") or "card"
+
+                order.payment_method = initial_pm
                 order.status = "pending"
                 order.save(update_fields=["payment_method", "status"])
         except Exception as e:
             return Response(
-                {"detail": "Order creation failed", "error": str(e)},
+                {
+                    "detail": "Order creation failed",
+                    "error": str(e),
+                },
                 status=400,
             )
 
-        # --- derive numeric totals safely ---
-        try:
-            total_decimal = Decimal(order.total_price)
-        except Exception:
-            total_decimal = Decimal("0.00")
-
-        # Convert to cents for Stripe
-        def _amount_cents(d: Decimal) -> int:
-            return int((d * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-
-        amount_cents = _amount_cents(total_decimal)
-
-        # 3. Enforce Stripe minimum BEFORE hitting Stripe
         #
-        # Card in EUR can be ~50 cents minimum. We'll just enforce 100 cents (1.00 €)
-        # to be safe. If you're doing coupons that reduce to 0.00 €, that will hit here.
-        if amount_cents < 100:
-            # Mark order as failed, release stock is not needed yet because we haven't reserved.
+        # 2. Decide which payment_method_types to tell Stripe.
+        #    - Stripe enforces minimum amounts for some redirect methods
+        #      like Klarna, Giropay, Sofort, etc.
+        #    - Card has a much smaller minimum (usually ~0.50 EUR live).
+        #
+        #    Logic:
+        #      - If total <= 0.00  -> reject (cannot charge 0€)
+        #      - If total < 10.00  -> allow ONLY "card"
+        #      - Else             -> allow "card", "klarna", "giropay"
+        #
+        total_decimal = Decimal(order.total_price or "0.00")
+
+        if total_decimal <= Decimal("0.00"):
+            # This usually means 100% coupon or something broken.
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response(
                 {
-                    "detail": "Order total too low to charge online. "
-                              "Please increase quantity or remove 100% discount.",
+                    "detail": "Your total is 0.00 € after discounts. We can't create an online payment for 0 €. Please remove the full discount or add another item.",
                     "order_id": order.id,
                     "total_price": str(order.total_price),
                 },
                 status=400,
             )
 
-        # 4. Choose which payment_method_types to allow
-        #
-        # Always allow card.
-        # Only allow the redirect / pay-later methods (klarna, giropay, etc.)
-        # if total is >= 10.00 EUR. Below that, Stripe may reject Klarna etc.
+        # base: card always allowed
         payment_method_types = ["card"]
 
+        # only enable Klarna / Giropay style redirect/pay-later if >= 10 €
         if total_decimal >= Decimal("10.00"):
-            payment_method_types += [
-                "klarna",
-                "giropay",
-                # add bancontact/eps/sofort later if you want,
-                # but only if you're sure about their minimums.
-                # "bancontact",
-                # "eps",
-                # "sofort",
-            ]
+            payment_method_types += ["klarna", "giropay"]
+        # NOTE: we do NOT add "sepa_debit" here.
+        # SEPA Direct Debit is handled by the dedicated SEPA flow (StripeSepa component).
 
-        # NOTE: we are NOT including "sepa_debit" here.
-        # You already have StripeSepa for SEPA direct debit.
-
-        # 5. Get/create Stripe customer (optional for guests)
+        #
+        # 3. Get/create Stripe Customer if logged in, otherwise guest stays anonymous
+        #
         try:
-            maybe_user = (
-                request.user
-                if getattr(request, "user", None)
-                and request.user.is_authenticated
-                else None
-            )
+            if getattr(request, "user", None) and request.user.is_authenticated:
+                user_for_customer = request.user
+            else:
+                user_for_customer = None
+
             customer_id = _get_or_create_stripe_customer(
-                maybe_user,
+                user_for_customer,
                 email=ser.validated_data.get("email", ""),
             )
         except stripe_error.StripeError as e:
@@ -1224,18 +1222,25 @@ class StripeCreateIntent(APIView):
                 status=502,
             )
 
-        # 6. Create the PaymentIntent
+        #
+        # 4. Create Stripe PaymentIntent.
+        #    IMPORTANT:
+        #    - metadata MUST include order_id so webhook can find the Order
+        #    - amount must be in cents
+        #
         try:
             intent = stripe.PaymentIntent.create(
-                amount=amount_cents,
+                amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                 payment_method_types=payment_method_types,
-                metadata={"order_id": str(order.id)},
+                metadata={"order_id": str(order.id)},  # <-- critical for webhook
                 customer=customer_id or None,
                 description=f"Order {order.number or order.id} — MindMines",
                 receipt_email=ser.validated_data.get("email") or None,
             )
         except stripe_error.StripeError as e:
+            # Stripe refused e.g. amount below their min for ALL methods we allowed.
+            # Mark order failed here.
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response(
@@ -1250,21 +1255,23 @@ class StripeCreateIntent(APIView):
                 status=500,
             )
 
-        # 7. Persist PI reference on order
+        #
+        # 5. Save reference to PaymentIntent on the order
+        #
         order.payment_ref = intent.id
         order.stripe_pi = intent.id
         order.save(update_fields=["payment_ref", "stripe_pi"])
 
+        #
+        # 6. Send clientSecret + order_id back to frontend
+        #
         return Response(
             {
                 "clientSecret": intent.client_secret,
                 "order_id": order.id,
-                "amount_cents": amount_cents,
-                "methods_used": payment_method_types,
             },
             status=201,
         )
-
 
 # ============================================================================
 # 1b) Save card for later (authenticated)
