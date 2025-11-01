@@ -1118,102 +1118,139 @@ def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> st
 
 class StripeCreateIntent(APIView):
     """
-    Creates:
-    - local Order (pending)
-    - Stripe PaymentIntent with automatic_payment_methods enabled
-      This supports card, Klarna, Giropay, Sofort, etc.
-    Frontend will mount <Elements><PaymentElement/></Elements>
-    and then call stripe.confirmPayment().
+    Create local Order (status 'pending') and a Stripe PaymentIntent for
+    one-shot checkout (card / klarna / giropay / etc.).
 
-    After successful confirm (including redirect),
-    Stripe will hit webhook -> mark paid -> generate invoice.
+    For very small totals we only allow 'card'. If total is below Stripe's
+    minimum chargeable amount we stop and return 400 instead of calling Stripe.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
         data = request.data.copy()
 
-        # 1. Create local order using unified serializer (guest allowed)
+        # 1. Validate + build order draft via serializer
         ser = OrderCreateSerializer(data=data, context={"request": request})
         try:
             ser.is_valid(raise_exception=True)
         except serializers.ValidationError as ve:
-            return Response({"detail": "Order validation failed", "errors": ve.detail}, status=400)
-        
+            return Response(
+                {"detail": "Order validation failed", "errors": ve.detail},
+                status=400,
+            )
+
+        # 2. Save order in DB
         try:
             with transaction.atomic():
                 order = ser.save()
-                # ensure payment_method stored (card, klarna, etc)
                 pm = ser.validated_data.get("payment_method") or "card"
                 order.payment_method = pm
                 order.status = "pending"
                 order.save(update_fields=["payment_method", "status"])
         except Exception as e:
-            return Response({"detail": "Order creation failed", "error": str(e)}, status=400)
+            return Response(
+                {"detail": "Order creation failed", "error": str(e)},
+                status=400,
+            )
 
-        # 2. pick which Stripe methods to allow based on total
-        total_amount = order.total_price  # Decimal
+        # --- derive numeric totals safely ---
         try:
-            total_decimal = Decimal(total_amount)
+            total_decimal = Decimal(order.total_price)
         except Exception:
             total_decimal = Decimal("0.00")
 
-        # base methods: card ALWAYS allowed
+        # Convert to cents for Stripe
+        def _amount_cents(d: Decimal) -> int:
+            return int((d * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+        amount_cents = _amount_cents(total_decimal)
+
+        # 3. Enforce Stripe minimum BEFORE hitting Stripe
+        #
+        # Card in EUR can be ~50 cents minimum. We'll just enforce 100 cents (1.00 €)
+        # to be safe. If you're doing coupons that reduce to 0.00 €, that will hit here.
+        if amount_cents < 100:
+            # Mark order as failed, release stock is not needed yet because we haven't reserved.
+            order.status = "failed"
+            order.save(update_fields=["status"])
+            return Response(
+                {
+                    "detail": "Order total too low to charge online. "
+                              "Please increase quantity or remove 100% discount.",
+                    "order_id": order.id,
+                    "total_price": str(order.total_price),
+                },
+                status=400,
+            )
+
+        # 4. Choose which payment_method_types to allow
+        #
+        # Always allow card.
+        # Only allow the redirect / pay-later methods (klarna, giropay, etc.)
+        # if total is >= 10.00 EUR. Below that, Stripe may reject Klarna etc.
         payment_method_types = ["card"]
 
-        # allow the redirect/pay-later methods only if basket is big enough
-        # (because Klarna / Sofort / etc. have minimum order amounts)
         if total_decimal >= Decimal("10.00"):
             payment_method_types += [
                 "klarna",
                 "giropay",
+                # add bancontact/eps/sofort later if you want,
+                # but only if you're sure about their minimums.
+                # "bancontact",
+                # "eps",
+                # "sofort",
             ]
 
-        # NOTE: we are intentionally NOT including "sepa_debit" here
-        # because SEPA debit is handled by your dedicated SEPA flow.
+        # NOTE: we are NOT including "sepa_debit" here.
+        # You already have StripeSepa for SEPA direct debit.
 
-        # 3. create or reuse Stripe customer (optional for guests)
+        # 5. Get/create Stripe customer (optional for guests)
         try:
+            maybe_user = (
+                request.user
+                if getattr(request, "user", None)
+                and request.user.is_authenticated
+                else None
+            )
             customer_id = _get_or_create_stripe_customer(
-                request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
-                email=ser.validated_data.get("email", "")
+                maybe_user,
+                email=ser.validated_data.get("email", ""),
             )
         except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response(
                 {"detail": f"Stripe customer error: {str(e)}"},
-                status=502
+                status=502,
             )
-        
-        # 4. create PaymentIntent ONE time
+
+        # 6. Create the PaymentIntent
         try:
             intent = stripe.PaymentIntent.create(
-                amount=_amount_cents(order.total_price),
+                amount=amount_cents,
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                 payment_method_types=payment_method_types,
                 metadata={"order_id": str(order.id)},
                 customer=customer_id or None,
                 description=f"Order {order.number or order.id} — MindMines",
-                receipt_email=ser.validated_data.get("email", None) or None,
+                receipt_email=ser.validated_data.get("email") or None,
             )
         except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response(
                 {"detail": f"Stripe error: {str(e)}"},
-                status=502
+                status=502,
             )
         except Exception as e:
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response(
                 {"detail": f"Server error: {str(e)}"},
-                status=500
+                status=500,
             )
 
-
-         # 5. save PI id on order
+        # 7. Persist PI reference on order
         order.payment_ref = intent.id
         order.stripe_pi = intent.id
         order.save(update_fields=["payment_ref", "stripe_pi"])
@@ -1222,6 +1259,8 @@ class StripeCreateIntent(APIView):
             {
                 "clientSecret": intent.client_secret,
                 "order_id": order.id,
+                "amount_cents": amount_cents,
+                "methods_used": payment_method_types,
             },
             status=201,
         )
@@ -1722,6 +1761,10 @@ class SepaPostConfirmView(APIView):
         try:
             order.reserve_stock()
         except Exception as e:
+            logger.exception(
+                "reserve_stock failed in SepaPostConfirmView for order %s: %s",
+                order.id,
+                e,)
             pass
 
         # Send the email now
