@@ -41,7 +41,7 @@ from dateutil.relativedelta import relativedelta
 
 # --- local imports (models/serializers/utils) ---
 from .models import (
-    Address, Product, Review, Order,
+    Address, Product, Review, Order, Wishlist,
     OnDemandOrderRequest, NewsletterSubscriber, ContactMessage,
     PromotionBanner, StockAlert, ReturnRequest, ReturnAttachment,
     NaturalStone, NaturalStoneImage
