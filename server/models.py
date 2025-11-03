@@ -602,6 +602,9 @@ class Order(models.Model):
     ship_country = models.CharField(max_length=2, default="DE")
     ship_phone = models.CharField(max_length=64, blank=True)
 
+    ship_street_name  = models.CharField(max_length=255, blank=True, default="")
+    ship_house_number = models.CharField(max_length=64,  blank=True, default="")
+
     total_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     payment_method = models.CharField(max_length=32, choices=PAYMENT_METHODS, blank=True)
     installments_months = models.PositiveIntegerField(null=True, blank=True)
