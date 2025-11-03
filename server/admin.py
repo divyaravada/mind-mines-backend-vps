@@ -2,16 +2,16 @@
 from typing import Any, Optional
 from decimal import Decimal, InvalidOperation
 
-from django import forms
 from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
-from django.contrib.auth.forms import ReadOnlyPasswordHashField
-from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.db.models.deletion import ProtectedError
 from django.utils.html import format_html_join, format_html
 from django.utils.translation import gettext_lazy as _
-from django.urls import reverse
+from django.db.models import Q
+from .utils.invoices import generate_invoice_pdf as _gen_inv_pdf
+from django.utils import timezone
+
 
 from .models import (
     Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage, OnDemandOrderRequest,
@@ -35,7 +35,7 @@ def send_cancellation_email(*args, **kwargs):
     return None  # default no-op
 
 try:
-    from .utils.invoices import generate_invoice_pdf as _gen_inv_pdf
+   
     generate_invoice_pdf = _gen_inv_pdf
 except Exception:
     pass
@@ -58,7 +58,7 @@ except Exception:
 def shipping_fee(self, obj):
     try: return f"{Decimal(getattr(obj, 'shipping_price', 0) or 0):.2f} €"
     except (InvalidOperation, TypeError, ValueError): return "0.00 €"
-    
+
 def fmt_eur(v: Optional[Any]) -> str:
     try:
         return f"{float(v):.2f} €"
@@ -92,7 +92,6 @@ def mark_paid(modeladmin, request, queryset):
         setattr(order, "payment_status", "paid")
         # prefer setting paid_at if model has it
         if hasattr(order, "paid_at"):
-            from django.utils import timezone
             order.paid_at = timezone.now()
             order.save(update_fields=["status", "payment_status", "paid_at"])
         else:
@@ -118,7 +117,7 @@ def mark_paid(modeladmin, request, queryset):
 
 @admin.action(description="Mark selected orders as SHIPPED (+ email)")
 def mark_shipped(modeladmin, request, queryset):
-    from django.utils import timezone
+    
     n = 0
     for order in queryset:
         order.status = "shipped"
@@ -412,7 +411,6 @@ class CustomUserAdmin(DjangoUserAdmin):
         if Order.objects.filter(user=user).exists():
             return True
         if hasattr(Order, "shipping_address"):
-            from django.db.models import Q
             return Order.objects.filter(Q(shipping_address__user=user)).exists()
         return False
 
@@ -521,10 +519,14 @@ class AddressAdmin(admin.ModelAdmin):
         "postal_code", "city", "country", "is_default", "created_at",
     )
     list_filter = ("country", "is_default", "created_at")
-    search_fields = (
+
+    # Only include search fields that exist on the model
+    _possible_search = (
         "user__email", "first_name", "last_name", "full_name",
         "address_line1", "street_name", "postal_code", "city",
     )
+    search_fields = tuple(f for f in _possible_search if hasattr(Address, f.split("__")[0]))
+
     list_select_related = ("user",)
 
 # --------------------------------------------------------------------------------------
