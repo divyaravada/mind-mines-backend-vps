@@ -65,6 +65,8 @@ from .utils.emails import (
     send_stock_alert_email, send_installments_started_email,
 )
 
+
+
 import stripe
 try:
     stripe_error = stripe.error
