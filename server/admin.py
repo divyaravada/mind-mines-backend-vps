@@ -170,15 +170,16 @@ class OrderAdmin(admin.ModelAdmin):
     actions = [mark_paid, mark_shipped, mark_cancelled]
 
     readonly_fields = (
-        "number","subtotal","discount_amount","shipping_fee","total_price",
-        "payment_ref","payment_id","created_at","updated_at",
-        "items_readonly","delivered_at","cancelled_at",
-        "customer_email","shipping_snapshot_readonly",
+        "number", "total_price",
+        "payment_ref", "payment_id", "created_at", "updated_at",
+        "items_readonly", "delivered_at", "cancelled_at",
+        "customer_email", "shipping_snapshot_readonly",
     )
+
     fieldsets = (
         (None, {"fields": ("number","user","customer_email","created_at","delivered_at","cancelled_at")}),
-        ("Status & Payment", {"fields": ("status","payment_method")}),  # <- no tracking_number here
-        ("Totals", {"fields": ("subtotal","discount_amount","shipping_fee","total_price")}),
+        ("Status & Payment", {"fields": ("status","payment_method")}),
+        ("Totals", {"fields": ("total_price",)}),
         ("Shipping snapshot", {"fields": ("shipping_snapshot_readonly",)}),
         ("Items", {"fields": ("items_readonly",)}),
         ("Payment refs", {"fields": ("payment_ref","payment_id")}),
