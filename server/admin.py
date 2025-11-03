@@ -520,14 +520,38 @@ class AddressAdmin(admin.ModelAdmin):
     )
     list_filter = ("country", "is_default", "created_at")
 
-    # Only include search fields that exist on the model
     _possible_search = (
         "user__email", "first_name", "last_name", "full_name",
         "address_line1", "street_name", "postal_code", "city",
     )
     search_fields = tuple(f for f in _possible_search if hasattr(Address, f.split("__")[0]))
-
     list_select_related = ("user",)
+
+    def delete_model(self, request, obj):
+        try:
+            super().delete_model(request, obj)
+        except (ProtectedError, IntegrityError):
+            self.message_user(
+                request,
+                _("Cannot delete this address because one or more orders reference it."),
+                level=messages.ERROR,
+            )
+
+    def delete_queryset(self, request, queryset):
+        ok_ids = []
+        blocked = 0
+        for addr in queryset:
+            try:
+                super(AddressAdmin, self).delete_model(request, addr)
+                ok_ids.append(addr.pk)
+            except (ProtectedError, IntegrityError):
+                blocked += 1
+        if blocked:
+            self.message_user(
+                request,
+                _("%d address(es) not deleted because orders reference them.") % blocked,
+                level=messages.WARNING,
+            )
 
 # --------------------------------------------------------------------------------------
 # Returns
