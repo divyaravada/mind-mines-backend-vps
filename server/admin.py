@@ -55,6 +55,10 @@ except Exception:
 # --------------------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------------------
+def shipping_fee(self, obj):
+    try: return f"{Decimal(getattr(obj, 'shipping_price', 0) or 0):.2f} €"
+    except (InvalidOperation, TypeError, ValueError): return "0.00 €"
+    
 def fmt_eur(v: Optional[Any]) -> str:
     try:
         return f"{float(v):.2f} €"

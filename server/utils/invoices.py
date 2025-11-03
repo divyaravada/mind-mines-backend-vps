@@ -141,7 +141,7 @@ def _build_invoice_content(order) -> bytes:
     elems.append(Spacer(1, 10))
 
     # Totals box
-    ship_display = "Free" if not order.shipping_fee or Decimal(order.shipping_fee) == 0 else _eur(order.shipping_fee)
+    ship_display = "Free" if not getattr(order, "shipping_price", None) or Decimal(order.shipping_price) == 0 else _eur(order.shipping_price)
     def bold(text):
         return f'''{text}'''
 
