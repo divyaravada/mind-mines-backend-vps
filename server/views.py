@@ -945,7 +945,7 @@ class PaypalBase(APIView):
 
         if r.status_code != 200:
             body = {}
-                       try:
+            try:
                 body = r.json()
             except Exception:
                 pass
