@@ -63,6 +63,7 @@ DEFAULT_VAT_RATE = Decimal("0.19")
 def _q2(d: Decimal) -> Decimal:
     return Decimal(d).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
+D0 = Decimal("0.00")
 
 # ----------------- Users -----------------
 
@@ -563,7 +564,6 @@ class Order(models.Model):
         ("sepa_installments", "SEPA Direct Debit Installments"),
         ("klarna", "Klarna (Stripe Klarna)"),
         ("paypal", "PayPal / PayPal Pay Later"),
-        ("bank", "Bank Transfer"),
     ]
 
     STATUS_CHOICES = [
@@ -590,7 +590,12 @@ class Order(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="orders"
     )
-    email = models.EmailField()
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=D0)
+    discount_total = models.DecimalField(max_digits=10, decimal_places=2, default=D0)
+    shipping_total = models.DecimalField(max_digits=10, decimal_places=2, default=D0)
+    tax_total = models.DecimalField(max_digits=10, decimal_places=2, default=D0)
+    total_price = models.DecimalField(max_digits=10, decimal_places=2, default=D0)
+    email = models.EmailField(null=True, blank=True)
 
     # snapshot shipping at checkout time
     ship_first_name = models.CharField(max_length=120, blank=True)
@@ -601,8 +606,7 @@ class Order(models.Model):
     ship_city = models.CharField(max_length=120, blank=True)
     ship_country = models.CharField(max_length=2, default="DE")
     ship_phone = models.CharField(max_length=64, blank=True)
-
-    total_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    payment_method = models.CharField(max_length=32, choices=PAYMENT_METHODS)
     payment_method = models.CharField(max_length=32, choices=PAYMENT_METHODS, blank=True)
     installments_months = models.PositiveIntegerField(null=True, blank=True)
 
@@ -693,12 +697,41 @@ class Order(models.Model):
 
     # ---- lifecycle ----
 
+    def compute_totals(self):
+        """
+        Sum line totals and set subtotal/discount/shipping/tax/total.
+        Keeps None from ever leaking into DB.
+        """
+        subtotal = D0
+        for it in self.items.all():
+            # expect each item has unit_price and qty
+            line = (it.unit_price or D0) * (it.qty or 0)
+            subtotal += line
+
+        discount = self.discount_total or D0
+        shipping = self.shipping_total or D0
+        tax = self.tax_total or D0
+
+        # If you compute VAT separately, do it here. Example (simple):
+        # tax = (subtotal - discount) * Decimal("0.19")
+
+        total = subtotal - discount + shipping + tax
+        if total < D0:
+            total = D0
+
+        self.subtotal = subtotal
+        self.discount_total = discount
+        self.shipping_total = shipping
+        self.tax_total = tax
+        self.total_price = total
+
     def save(self, *args, **kwargs):
-        creating = self.pk is None
+        # Ensure money fields are never None at save time
+        for f in ("subtotal", "discount_total", "shipping_total", "tax_total", "total_price"):
+            if getattr(self, f) is None:
+                setattr(self, f, D0)
         super().save(*args, **kwargs)
-        if creating:
-            # now we have a pk -> set MM######## number
-            self.ensure_number()
+
 
     @property
     def payment_method_label(self):
@@ -725,7 +758,7 @@ class OrderItem(models.Model):
 
     # Snapshot name at the time of ordering (avoid future title changes)
     product_name_snapshot = models.CharField(max_length=255)
-    quantity = models.PositiveIntegerField(default=1)
+    qty = models.PositiveIntegerField(default=1)
     unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
 
     def line_total(self):
