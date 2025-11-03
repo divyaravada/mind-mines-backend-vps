@@ -7,6 +7,7 @@ from django.utils.html import format_html_join, format_html
 from django.urls import reverse
 from django.contrib.auth.forms import ReadOnlyPasswordHashField
 from django.core.exceptions import ValidationError
+from decimal import Decimal, InvalidOperation
 from django.utils.translation import gettext_lazy as _
 
 from .models import (
@@ -168,22 +169,36 @@ class OrderAdmin(admin.ModelAdmin):
     search_fields = ("number", "user__email", "email")
     actions = [mark_paid, mark_shipped, mark_cancelled]
 
+    # All computed fields must live here
     readonly_fields = (
         "number", "subtotal", "discount_amount", "shipping_fee", "total_price",
         "payment_ref", "payment_id", "created_at", "updated_at",
         "items_readonly", "delivered_at", "cancelled_at",
-        "customer_email",
-        "shipping_snapshot_readonly",
+        "customer_email", "shipping_snapshot_readonly",
     )
 
-    # NOTE: removed non-existent "shipping_address" from fields
-    fields = (
-        ("number", "user", "customer_email", "created_at", "delivered_at", "cancelled_at"),
-        ("status", "payment_method", "tracking_number"),
-        ("subtotal", "discount_amount", "shipping_fee", "total_price"),
-        "shipping_snapshot_readonly",
-        "items_readonly",
-        ("payment_ref", "payment_id"),
+    # IMPORTANT: do NOT use `fields` here.
+    fieldsets = (
+        (None, {
+            "fields": ("number", "user", "customer_email", "created_at", "delivered_at", "cancelled_at")
+        }),
+        ("Status & Shipping", {
+            # show only REAL model fields here (adjust names to your model)
+            "fields": ("status", "payment_method", "tracking_number")
+            # if your model does NOT have tracking_number, drop it from here
+        }),
+        ("Totals", {
+            "fields": ("subtotal", "discount_amount", "shipping_fee", "total_price")
+        }),
+        ("Shipping snapshot", {
+            "fields": ("shipping_snapshot_readonly",)
+        }),
+        ("Items", {
+            "fields": ("items_readonly",)
+        }),
+        ("Payment refs", {
+            "fields": ("payment_ref", "payment_id")
+        }),
     )
 
     inlines = [OrderItemInline]
@@ -200,42 +215,28 @@ class OrderAdmin(admin.ModelAdmin):
         except (InvalidOperation, TypeError, ValueError):
             return "-"
 
-    # ---- readonly_fields helpers ----
+    # ---- readonly_fields renderers ----
     def subtotal(self, obj):
-        try:
-            return f"{Decimal(getattr(obj, 'subtotal', 0) or 0):.2f} €"
-        except (InvalidOperation, TypeError, ValueError):
-            return "0.00 €"
+        try: return f"{Decimal(getattr(obj, 'subtotal', 0) or 0):.2f} €"
+        except (InvalidOperation, TypeError, ValueError): return "0.00 €"
 
     def discount_amount(self, obj):
-        try:
-            return f"{Decimal(getattr(obj, 'discount_amount', 0) or 0):.2f} €"
-        except (InvalidOperation, TypeError, ValueError):
-            return "0.00 €"
+        try: return f"{Decimal(getattr(obj, 'discount_amount', 0) or 0):.2f} €"
+        except (InvalidOperation, TypeError, ValueError): return "0.00 €"
 
     def shipping_fee(self, obj):
-        try:
-            return f"{Decimal(getattr(obj, 'shipping_fee', 0) or 0):.2f} €"
-        except (InvalidOperation, TypeError, ValueError):
-            return "0.00 €"
+        try: return f"{Decimal(getattr(obj, 'shipping_fee', 0) or 0):.2f} €"
+        except (InvalidOperation, TypeError, ValueError): return "0.00 €"
 
     def total_price(self, obj):
-        try:
-            return f"{Decimal(getattr(obj, 'total_price', 0) or 0):.2f} €"
-        except (InvalidOperation, TypeError, ValueError):
-            return "0.00 €"
+        try: return f"{Decimal(getattr(obj, 'total_price', 0) or 0):.2f} €"
+        except (InvalidOperation, TypeError, ValueError): return "0.00 €"
 
-    def payment_ref(self, obj):
-        return getattr(obj, "payment_ref", "") or "-"
+    def payment_ref(self, obj): return getattr(obj, "payment_ref", "") or "-"
+    def payment_id(self, obj):  return getattr(obj, "payment_id", "") or "-"
 
-    def payment_id(self, obj):
-        return getattr(obj, "payment_id", "") or "-"
-
-    def delivered_at(self, obj):
-        return getattr(obj, "delivered_at", None)
-
-    def cancelled_at(self, obj):
-        return getattr(obj, "cancelled_at", None)
+    def delivered_at(self, obj):  return getattr(obj, "delivered_at", None)
+    def cancelled_at(self, obj):  return getattr(obj, "cancelled_at", None)
 
     def shipping_snapshot_readonly(self, obj):
         fn = getattr(obj, "ship_first_name", "") or ""
@@ -248,7 +249,6 @@ class OrderAdmin(admin.ModelAdmin):
         phone = getattr(obj, "ship_phone", "") or ""
         street_name = getattr(obj, "ship_street_name", "") or ""
         house_number = getattr(obj, "ship_house_number", "") or ""
-
         return format_html(
             "<div>"
             "<div><b>{fn}</b> {ln}</div>"
@@ -278,14 +278,12 @@ class OrderAdmin(admin.ModelAdmin):
                         (str(prod) if prod else "-"))
             qty = getattr(it, "quantity", 1) or 1
             unit = getattr(it, "unit_price", None)
-            # try unit_price_gross fallback
             if unit is None:
                 unit = getattr(it, "unit_price_gross", None)
             try:
                 unit_fmt = f"{Decimal(unit):.2f} €" if unit is not None else "-"
             except (InvalidOperation, TypeError, ValueError):
                 unit_fmt = "-"
-
             # line total
             total_val = None
             try:
@@ -299,12 +297,10 @@ class OrderAdmin(admin.ModelAdmin):
                 total_fmt = f"{Decimal(total_val):.2f} €" if total_val is not None else "-"
             except (InvalidOperation, TypeError, ValueError):
                 total_fmt = "-"
-
             rows.append((f"{name} × {qty}", unit_fmt, total_fmt))
 
         if not rows:
             return "-"
-
         return format_html(
             "<table style='width:100%'><tr><th align='left'>Item</th>"
             "<th align='right'>Unit</th><th align='right'>Total</th></tr>{}</table>",
@@ -340,36 +336,62 @@ class CustomUserAdmin(DjangoUserAdmin):
         ("Important dates", {"fields": ("last_login", "date_joined")}),
     )
     add_fieldsets = (
-        (None, {
-            "classes": ("wide",),
-            "fields": ("email", "username", "password1", "password2", "is_staff", "is_active"),
-        }),
+        (None, {"classes": ("wide",), "fields": ("email", "username", "password1", "password2", "is_staff", "is_active")}),
     )
     search_fields = ("email", "username")
 
-    # Prevent 500 when related objects PROTECT deletion
+    def _has_order_links(self, user):
+        from .models import Order, Address
+        # any order directly tied to user?
+        if Order.objects.filter(user=user).exists():
+            return True
+        # any order referencing an address of this user?
+        if Order.objects.filter(shipping_address__user=user).exists():
+            return True
+        return False
+
     def delete_model(self, request, obj):
-        try:
-            super().delete_model(request, obj)
-        except ProtectedError as e:
+        if self._has_order_links(obj):
             self.message_user(
                 request,
-                _("Cannot delete this user because related objects exist (e.g., orders, invoices, reviews). "
-                  "Please reassign or delete related objects first.\nDetails: %s") % (e,),
-                level=messages.ERROR,
+                _("Cannot delete this user because related orders reference the user or their addresses. "
+                  "Deactivate the user instead."), level=messages.ERROR
+            )
+            return
+        try:
+            super().delete_model(request, obj)
+        except (ProtectedError, IntegrityError) as e:
+            self.message_user(
+                request,
+                _("Deletion blocked by related data (orders/addresses). Details: %s") % (e,),
+                level=messages.ERROR
             )
 
     def delete_queryset(self, request, queryset):
+        from .models import Order
+        blocked = []
+        ok = []
         for obj in queryset:
+            if self._has_order_links(obj):
+                blocked.append(obj)
+            else:
+                ok.append(obj)
+        if ok:
             try:
-                obj.delete()
-            except ProtectedError as e:
+                super().delete_queryset(request, queryset.model.objects.filter(pk__in=[o.pk for o in ok]))
+            except (ProtectedError, IntegrityError) as e:
                 self.message_user(
                     request,
-                    _("Cannot delete user %(email)s due to related objects. Details: %(details)s") %
-                    {"email": getattr(obj, "email", obj.pk), "details": e},
-                    level=messages.ERROR,
+                    _("Some deletions were blocked by related data. Details: %s") % (e,),
+                    level=messages.ERROR
                 )
+        if blocked:
+            self.message_user(
+                request,
+                _("%d user(s) not deleted because orders reference them or their addresses. "
+                  "Deactivate instead.") % len(blocked),
+                level=messages.WARNING
+            )
 
 @admin.register(Profile)
 class ProfileAdmin(admin.ModelAdmin):
