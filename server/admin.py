@@ -163,20 +163,20 @@ class OrderItemInline(admin.TabularInline):
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
-    list_display = ("number", "user", "customer_email", "status", "total_price_col", "created_at", "invoice_link")
+    list_display = ("number", "user", "customer_email", "status", "total_price_display", "created_at")
     list_filter = ("status", "created_at")
     search_fields = ("number", "user__email", "email")
     actions = [mark_paid, mark_shipped, mark_cancelled]
-    list_select_related = ("user",)
-    inlines = [OrderItemInline]
 
     readonly_fields = (
-        "number", "subtotal_col", "discount_col", "shipping_fee_col", "total_price_col",
-        "payment_ref_col", "payment_id_col", "created_at", "updated_at",
+        "number", "subtotal", "discount_amount", "shipping_fee", "total_price",
+        "payment_ref", "payment_id", "created_at", "updated_at",
         "items_readonly", "delivered_at", "cancelled_at",
-        "customer_email", "shipping_snapshot_readonly",
+        "customer_email",
+        "shipping_snapshot_readonly",
     )
 
+    # NOTE: removed non-existent "shipping_address" from fields
     fields = (
         ("number", "user", "customer_email", "created_at", "delivered_at", "cancelled_at"),
         ("status", "payment_method", "tracking_number"),
@@ -186,73 +186,56 @@ class OrderAdmin(admin.ModelAdmin):
         ("payment_ref", "payment_id"),
     )
 
-    def get_queryset(self, request):
-        qs = super().get_queryset(request)
-        return qs.select_related("user").prefetch_related("items", "items__product")
+    inlines = [OrderItemInline]
 
     # ---- list_display helpers ----
     def customer_email(self, obj):
         return getattr(obj, "email", None) or getattr(getattr(obj, "user", None), "email", None) or "-"
     customer_email.short_description = "Email"
 
-    def total_price_col(self, obj):
+    def total_price_display(self, obj):
         val = getattr(obj, "total_price", None)
-        if val is None:
-            # compute from items as fallback
-            total = 0
-            items = getattr(obj, "items", None)
-            if hasattr(items, "all"):
-                for it in items.all():
-                    try:
-                        total += float(getattr(it, "line_total")() if callable(getattr(it, "line_total", None)) else (it.unit_price or 0) * (it.quantity or 1))
-                    except Exception:
-                        pass
-            return fmt_eur(total)
-        return fmt_eur(val)
-    total_price_col.short_description = "Total"
-
-    def invoice_link(self, obj):
-        inv = getattr(obj, "invoice", None)
-        pdf = getattr(inv, "pdf", None)
-        if inv and pdf and getattr(pdf, "url", None):
-            try:
-                url = pdf.url
-                return format_html("<a href='{}' target='_blank'>PDF</a>", url)
-            except Exception:
-                return "-"
-        return "-"
-    invoice_link.short_description = "Invoice"
+        try:
+            return f"{Decimal(val):.2f} €" if val is not None else "-"
+        except (InvalidOperation, TypeError, ValueError):
+            return "-"
 
     # ---- readonly_fields helpers ----
-    def subtotal_col(self, obj):      return fmt_eur(getattr(obj, "subtotal", 0))
-    def discount_col(self, obj):      return fmt_eur(getattr(obj, "discount_amount", 0))
-    def shipping_fee_col(self, obj):  return fmt_eur(getattr(obj, "shipping_fee", 0))
-    def payment_ref_col(self, obj):   return getattr(obj, "payment_ref", "") or "-"
-    def payment_id_col(self, obj):    return getattr(obj, "payment_id", "") or "-"
+    def subtotal(self, obj):
+        try:
+            return f"{Decimal(getattr(obj, 'subtotal', 0) or 0):.2f} €"
+        except (InvalidOperation, TypeError, ValueError):
+            return "0.00 €"
 
-    def delivered_at(self, obj):      return getattr(obj, "delivered_at", None)
-    def cancelled_at(self, obj):      return getattr(obj, "cancelled_at", None)
+    def discount_amount(self, obj):
+        try:
+            return f"{Decimal(getattr(obj, 'discount_amount', 0) or 0):.2f} €"
+        except (InvalidOperation, TypeError, ValueError):
+            return "0.00 €"
 
-    def items_readonly(self, obj):
-        rows = []
-        items = getattr(obj, "items", None)
-        if hasattr(items, "all"):
-            for it in items.all():
-                name = getattr(it, "product_name", None) or "-"
-                unit_fmt = fmt_eur(getattr(it, "unit_price", None))
-                try:
-                    total_fmt = fmt_eur(it.line_total()) if callable(getattr(it, "line_total", None)) else fmt_eur((getattr(it, "unit_price", 0) or 0) * (getattr(it, "quantity", 1) or 1))
-                except Exception:
-                    total_fmt = "-"
-                rows.append((f"{name} × {getattr(it, 'quantity', 1) or 1}", unit_fmt, total_fmt))
-        if not rows:
-            return "-"
-        return format_html(
-            "<table style='width:100%'><tr><th align='left'>Item</th>"
-            "<th align='right'>Unit</th><th align='right'>Total</th></tr>{}</table>",
-            format_html_join("", "<tr><td>{}</td><td align='right'>{}</td><td align='right'>{}</td></tr>", rows)
-        )
-    items_readonly.short_description = "Items"
+    def shipping_fee(self, obj):
+        try:
+            return f"{Decimal(getattr(obj, 'shipping_fee', 0) or 0):.2f} €"
+        except (InvalidOperation, TypeError, ValueError):
+            return "0.00 €"
+
+    def total_price(self, obj):
+        try:
+            return f"{Decimal(getattr(obj, 'total_price', 0) or 0):.2f} €"
+        except (InvalidOperation, TypeError, ValueError):
+            return "0.00 €"
+
+    def payment_ref(self, obj):
+        return getattr(obj, "payment_ref", "") or "-"
+
+    def payment_id(self, obj):
+        return getattr(obj, "payment_id", "") or "-"
+
+    def delivered_at(self, obj):
+        return getattr(obj, "delivered_at", None)
+
+    def cancelled_at(self, obj):
+        return getattr(obj, "cancelled_at", None)
 
     def shipping_snapshot_readonly(self, obj):
         fn = getattr(obj, "ship_first_name", "") or ""
@@ -265,6 +248,7 @@ class OrderAdmin(admin.ModelAdmin):
         phone = getattr(obj, "ship_phone", "") or ""
         street_name = getattr(obj, "ship_street_name", "") or ""
         house_number = getattr(obj, "ship_house_number", "") or ""
+
         return format_html(
             "<div>"
             "<div><b>{fn}</b> {ln}</div>"
@@ -273,12 +257,64 @@ class OrderAdmin(admin.ModelAdmin):
             "<div>{postal} {city}</div>"
             "<div>{country}</div>"
             "<div>{phone}</div>"
-            "<div>{street}</div>"
+            "<div>Street: {street} {house}</div>"
             "</div>",
             fn=fn, ln=ln, line1=line1, line2=line2, postal=postal, city=city,
-            country=country, phone=phone, street=f"Street: {street_name} {house_number}".strip(),
+            country=country, phone=phone, street=street_name, house=house_number
         )
     shipping_snapshot_readonly.short_description = "Shipping snapshot"
+
+    def items_readonly(self, obj):
+        items = getattr(obj, "items", None)
+        if not hasattr(items, "all"):
+            return "-"
+        rows = []
+        for it in items.all():
+            name = getattr(it, "product_name", None)
+            if not name:
+                prod = getattr(it, "product", None)
+                name = (getattr(prod, "title_en", None) or
+                        getattr(prod, "title_de", None) or
+                        (str(prod) if prod else "-"))
+            qty = getattr(it, "quantity", 1) or 1
+            unit = getattr(it, "unit_price", None)
+            # try unit_price_gross fallback
+            if unit is None:
+                unit = getattr(it, "unit_price_gross", None)
+            try:
+                unit_fmt = f"{Decimal(unit):.2f} €" if unit is not None else "-"
+            except (InvalidOperation, TypeError, ValueError):
+                unit_fmt = "-"
+
+            # line total
+            total_val = None
+            try:
+                if hasattr(it, "line_total") and callable(it.line_total):
+                    total_val = it.line_total()
+                else:
+                    total_val = (Decimal(unit or 0) * qty)
+            except Exception:
+                total_val = None
+            try:
+                total_fmt = f"{Decimal(total_val):.2f} €" if total_val is not None else "-"
+            except (InvalidOperation, TypeError, ValueError):
+                total_fmt = "-"
+
+            rows.append((f"{name} × {qty}", unit_fmt, total_fmt))
+
+        if not rows:
+            return "-"
+
+        return format_html(
+            "<table style='width:100%'><tr><th align='left'>Item</th>"
+            "<th align='right'>Unit</th><th align='right'>Total</th></tr>{}</table>",
+            format_html_join(
+                "",
+                "<tr><td>{}</td><td align='right'>{}</td><td align='right'>{}</td></tr>",
+                rows
+            )
+        )
+    items_readonly.short_description = "Items"
 
 # --------------------------------------------------------------------------------------
 # Invoice
@@ -293,82 +329,47 @@ class InvoiceAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 # User & Profile
 # --------------------------------------------------------------------------------------
-class CustomUserCreationForm(forms.ModelForm):
-    """
-    Admin 'Add user' form: asks for email, optional username, and two passwords.
-    """
-    password1 = forms.CharField(label=_("Password"), widget=forms.PasswordInput)
-    password2 = forms.CharField(label=_("Password confirmation"), widget=forms.PasswordInput)
-
-    class Meta:
-        model = User
-        fields = ("email", "username")
-
-    def clean_password2(self):
-        p1 = self.cleaned_data.get("password1")
-        p2 = self.cleaned_data.get("password2")
-        if p1 and p2 and p1 != p2:
-            raise ValidationError(_("Passwords don't match"))
-        return p2
-
-    def save(self, commit=True):
-        user = super().save(commit=False)
-        user.set_password(self.cleaned_data["password1"])
-        # Ensure is_active default stays as model default; don’t force-verify here.
-        if commit:
-            user.save()
-        return user
-
-
-class CustomUserChangeForm(forms.ModelForm):
-    """
-    Admin 'Change user' form: shows hashed password read-only field.
-    """
-    password = ReadOnlyPasswordHashField(
-        label=_("Password"),
-        help_text=_("Raw passwords are not stored, so there is no way to see "
-                    "this user’s password, but you can change the password "
-                    "using <a href=\"../password/\">this form</a>.")
-    )
-
-    class Meta:
-        model = User
-        fields = ("email", "username", "password", "is_active", "is_staff", "is_superuser", "groups", "user_permissions")
-
-    def clean_password(self):
-        # Regardless of what the user provides, return the initial value.
-        return self.initial.get("password")
-
-
 @admin.register(User)
 class CustomUserAdmin(DjangoUserAdmin):
-    """
-    Safe admin for our custom User model (email login).
-    """
-    add_form = CustomUserCreationForm
-    form = CustomUserChangeForm
     model = User
-
-    # What appears in the list view:
-    list_display = ("email", "username", "is_active", "is_staff")
-    list_filter = ("is_active", "is_staff", "is_superuser", "groups")
-    ordering = ("email",)
-    search_fields = ("email", "username")
-
-    # Field groups on the "change" page
+    list_display = ["email", "username", "is_active", "is_staff"]
+    ordering = ["email"]
     fieldsets = (
         (None, {"fields": ("email", "password", "username")}),
-        (_("Permissions"), {"fields": ("is_active", "is_staff", "is_superuser", "groups", "user_permissions")}),
-        (_("Important dates"), {"fields": ("last_login", "date_joined")}),
+        ("Permissions", {"fields": ("is_active", "is_staff", "is_superuser", "groups", "user_permissions")}),
+        ("Important dates", {"fields": ("last_login", "date_joined")}),
     )
-
-    # Field groups on the "add" page
     add_fieldsets = (
         (None, {
             "classes": ("wide",),
-            "fields": ("email", "username", "password1", "password2", "is_active", "is_staff"),
+            "fields": ("email", "username", "password1", "password2", "is_staff", "is_active"),
         }),
     )
+    search_fields = ("email", "username")
+
+    # Prevent 500 when related objects PROTECT deletion
+    def delete_model(self, request, obj):
+        try:
+            super().delete_model(request, obj)
+        except ProtectedError as e:
+            self.message_user(
+                request,
+                _("Cannot delete this user because related objects exist (e.g., orders, invoices, reviews). "
+                  "Please reassign or delete related objects first.\nDetails: %s") % (e,),
+                level=messages.ERROR,
+            )
+
+    def delete_queryset(self, request, queryset):
+        for obj in queryset:
+            try:
+                obj.delete()
+            except ProtectedError as e:
+                self.message_user(
+                    request,
+                    _("Cannot delete user %(email)s due to related objects. Details: %(details)s") %
+                    {"email": getattr(obj, "email", obj.pk), "details": e},
+                    level=messages.ERROR,
+                )
 
 @admin.register(Profile)
 class ProfileAdmin(admin.ModelAdmin):
@@ -486,64 +487,32 @@ class OnDemandOrderRequestAdmin(admin.ModelAdmin):
 #-----------------Coupon------------------
 @admin.register(Coupon)
 class CouponAdmin(admin.ModelAdmin):
-    """
-    Minimal, safe fields only — avoids calling any risky properties.
-    Adjust field names if your model differs.
-    """
-    list_display = ("code", "kind", "value", "active", "starts_at", "ends_at", "min_subtotal")
-    list_filter = ("active", "kind", "starts_at", "ends_at")
-    search_fields = ("code",)
-    ordering = ("-starts_at", "-id")
+    # only include attributes that truly exist
+    list_display = tuple([f for f in ["code", "active", "discount_percent", "valid_from", "valid_to", "usage_limit", "times_used"] if hasattr(Coupon, f)])
+    list_filter  = tuple([f for f in ["active", "valid_from", "valid_to"] if hasattr(Coupon, f)])
+    search_fields = tuple([f for f in ["code"] if hasattr(Coupon, f)])
+    fields       = list(list_display)  # show the same fields on the form
 
-    # Make 'value' nice, but safe (if value is numeric)
-    def get_queryset(self, request):
-        # Avoid unexpected annotations/properties blowing up
-        return super().get_queryset(request).defer() 
+    def get_readonly_fields(self, request, obj=None):
+        ro = []
+        if hasattr(Coupon, "times_used"):
+            ro.append("times_used")
+        return ro 
 
 #--------------------------Prmotion Banner------------
 @admin.register(PromotionBanner)
 class PromotionBannerAdmin(admin.ModelAdmin):
-    """
-    Minimal explicit admin to avoid calling risky properties on change page.
-    List only real DB fields; don't call any computed code in list_display.
-    """
-    # Adjust this list to match your actual model fields. Based on your serializer & views:
-    # - is_enabled, start_at, end_at, priority are used in queries
-    # - headline, subheadline, bg_color, text_color, link_url, image, country_whitelist exist in serializer/context
-    list_display = ("id", "headline", "is_enabled", "start_at", "end_at", "priority")
-    list_filter = ("is_enabled", "start_at", "end_at")
-    search_fields = ("headline", "subheadline")
-    ordering = ("-priority", "-updated_at") if hasattr(PromotionBanner, "updated_at") else ("-start_at", "-id")
+    list_display = tuple([f for f in ["id", "headline", "is_enabled", "start_at", "end_at", "priority"] if hasattr(PromotionBanner, f)])
+    list_filter  = tuple([f for f in ["is_enabled", "start_at", "end_at"] if hasattr(PromotionBanner, f)])
+    search_fields = tuple([f for f in ["headline", "subheadline"] if hasattr(PromotionBanner, f)])
 
-    # Use only actual fields to render the form. Do NOT include any computed property here.
-    fields = [f for f in (
-        "headline",
-        "subheadline",
-        "is_enabled",
-        "priority",
-        "start_at",
-        "end_at",
-        "bg_color",
-        "text_color",
-        "link_url",
-        "country_whitelist",   # ArrayField (Postgres); Django admin handles this fine.
-        "image",
-    ) if hasattr(PromotionBanner, f)]
-
-    # If you want to show a readonly preview of “current code”, add a safe method:
-    readonly_fields = []
-
-    # Example of a safe optional readonly field (only if your model has current_code()):
-    if hasattr(PromotionBanner, "current_code"):
-        def current_code_admin(self, obj):
-            try:
-                return obj.current_code()
-            except Exception:
-                return "-"
-        current_code_admin.short_description = "Current code"
-        readonly_fields.append("current_code_admin")
-        fields.append("current_code_admin")
-        
+    base_fields = [
+        "headline", "subheadline", "is_enabled", "priority",
+        "start_at", "end_at", "bg_color", "text_color",
+        "link_url", "country_whitelist", "image"
+    ]
+    fields = [f for f in base_fields if hasattr(PromotionBanner, f)]
+    readonly_fields = []        
 
 # Keep the simple registers
 admin.site.register(ContactMessage)
