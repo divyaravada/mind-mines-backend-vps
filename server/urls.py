@@ -55,8 +55,8 @@ from .views import (
     PaypalCreateOrder, PaypalCaptureOrder,
 
     # Stripe
-    StripeCreateIntent, StripeCreateCardSetupIntent, StripeCreateSepaSetupIntent, StripeCardCreateInstallments,
-    StripeCreateSepaIntent, StripeSepaCreateInstallments, SepaPostConfirmView, stripe_webhook, OrderPaymentStatusUpdateAPIView,
+    StripeCreateIntent, StripeCardInstallmentsView,
+    StripeCreateSepaIntent, StripeSepaInstallmentsView, SepaPostConfirmView, stripe_webhook, OrderPaymentStatusUpdateAPIView,
 
 
     # Returns / Cancellations
@@ -162,11 +162,10 @@ urlpatterns = [
 
     # -------- Stripe --------
     path("stripe/create-intent/", StripeCreateIntent.as_view(), name="stripe_create_intent"),
-    path("stripe/setup-intent/card/", StripeCreateCardSetupIntent.as_view(), name="stripe_setup_card"),
-    path("stripe/installments/card/", StripeCardCreateInstallments.as_view(), name="stripe_card_installments"),
-    path("stripe/setup-intent/sepa/", StripeCreateSepaSetupIntent.as_view(), name="stripe_setup_sepa"),
+    path("stripe/installments/card/", StripeCardInstallmentsView.as_view(), name="stripe_installments_card"),
     path("stripe/create-intent/sepa/", StripeCreateSepaIntent.as_view(), name="stripe_create_sepa_intent"),
-    path("stripe/installments/sepa/", StripeSepaCreateInstallments.as_view(), name="stripe_sepa_installments"),
+    path("stripe/installments/sepa/", StripeSepaInstallmentsView.as_view(), name="stripe_installments_sepa"),
+
     path("payments/sepa-post-confirm/", SepaPostConfirmView.as_view(), name="sepa-post-confirm"),
     path("stripe/webhook/", stripe_webhook, name="stripe_webhook"),
 

@@ -158,10 +158,6 @@ def _tr(locale: str, key: str, **vars) -> str:
     except Exception:
         return s
 
-def _bilingual_block(en: str, de: str) -> Tuple[str, str]:
-    sep = "\n\n" + ("-" * 32) + "\n\n"
-    return en, de + ""
-
 def _base_wrapper(subject_en: str, subject_de: str, body_en_html: str, body_de_html: str) -> EmailBody:
     subject = f"{subject_en} / {subject_de}"
 
@@ -257,8 +253,6 @@ def _line_items_html(order) -> str:
     except Exception:
         logger.exception("Failed to render line items for order %s", getattr(order, "id", "?"))
     return ""
-
-def _fmt(amount): return f"{float(amount):.2f} {CURRENCY}"
 
 def _strip_html(s: str) -> str:
     return re.sub(r"<[^>]+>", "", s or "").strip()

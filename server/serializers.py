@@ -607,55 +607,23 @@ class ShippingSnapshotSerializer(serializers.Serializer):
 
 
 class OrderReadSerializer(serializers.ModelSerializer):
-    """
-    Serializer for /account/orders and order detail page.
-    Includes:
-    - items (snapshot pricing)
-    - billing/shipping info
-    - invoice download link
-    - payment_status, paid_at
-    - installments_months
-    - return_deadline + is_returnable
-    """
-    items = OrderItemReadSerializer(many=True, read_only=True)
-    invoice_pdf = serializers.SerializerMethodField()
-    shipping_address = AddressSerializer(read_only=True)
-    shipping_snapshot = serializers.SerializerMethodField()
-    is_returnable = serializers.SerializerMethodField()
-    return_deadline = serializers.SerializerMethodField()
-    payment_method_label = serializers.SerializerMethodField()
-    coupon_code = serializers.SerializerMethodField()
-    payment_status = serializers.SerializerMethodField()
-    paid_at = serializers.DateTimeField(read_only=True)
-    installments_months = serializers.IntegerField(read_only=True)
+    class ItemOut(serializers.ModelSerializer):
+        line_total = serializers.SerializerMethodField()
+        class Meta:
+            model = OrderItem
+            fields = ("product_id","product_name","quantity","unit_price","line_total")
+        def get_line_total(self, obj):
+            return f"{obj.line_total():.2f}"
 
+    items = ItemOut(source="items.all", many=True, read_only=True)
     class Meta:
         model = Order
-        fields = [
-            "id",
-            "number",
-            "status",
-            "payment_method",
-            "payment_method_label",
-            "payment_status",
-            "paid_at",
-            "installments_months",
-            "subtotal",
-            "discount_amount",
-            "shipping_fee",
-            "total_price",
-            "created_at",
-            "updated_at",
-            "tracking_number",
-            "items",
-            "invoice_pdf",
-            "is_returnable",
-            "return_deadline",
-            "shipping_address",
-            "shipping_snapshot",
-            "coupon_code",
-            "email",
-        ]
+        fields = (
+            "id","number","status","payment_method","installments_months",
+            "email","total_price","ship_first_name","ship_last_name",
+            "ship_line1","ship_line2","ship_postal","ship_city","ship_country",
+            "ship_phone","created_at","items"
+        )
 
     def get_shipping_snapshot(self, obj):
         return {
@@ -736,69 +704,47 @@ class ReturnRequestSerializer(serializers.ModelSerializer):
 # Checkout / create order
 # -----------------
 
+
+
+def quant2(val: Decimal) -> Decimal:
+    return val.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+class ShippingInSerializer(serializers.Serializer):
+    first_name = serializers.CharField(max_length=120)
+    last_name = serializers.CharField(max_length=120, allow_blank=True)
+    line1 = serializers.CharField(max_length=255)
+    line2 = serializers.CharField(max_length=255, allow_blank=True, required=False)
+    postal_code = serializers.CharField(max_length=50)
+    city = serializers.CharField(max_length=120)
+    country = serializers.CharField(max_length=2)
+    phone = serializers.CharField(max_length=64, allow_blank=True, required=False)
+
 class OrderItemIn(serializers.Serializer):
     product_id = serializers.IntegerField()
-    qty = serializers.IntegerField(min_value=1)
-
+    qty = serializers.IntegerField(min_value=1, max_value=99)
 
 class OrderCreateSerializer(serializers.Serializer):
-    """
-    This is called by checkout.
-    It creates an Order with status 'pending' and payment_status 'created'.
-    We:
-    - snapshot shipping details
-    - snapshot line items (name, VAT, gross unit price)
-    - attach coupon if valid
-    - compute totals
-    """
-    email = serializers.EmailField(required=False, allow_blank=True)
+    email = serializers.EmailField()
     items = OrderItemIn(many=True)
+    shipping = ShippingInSerializer()
+    coupon_code = serializers.CharField(max_length=64, allow_blank=True, required=False)
 
-    payment_method = serializers.CharField(
-        required=False,
-        allow_blank=True,
-        allow_null=True,
+    # payment selection
+    payment_method = serializers.CharField(max_length=64)
+
+    # installments inputs
+    installments_months = serializers.IntegerField(
+        required=False, allow_null=True
+    )
+    payment_method_id = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True
     )
 
-    coupon_code = serializers.CharField(allow_blank=True, required=False)
-
-    # shipping address input
-    address_id = serializers.IntegerField(required=False)
-    first_name = serializers.CharField(allow_blank=True, required=False)
-    last_name = serializers.CharField(allow_blank=True, required=False)
-    address_line1 = serializers.CharField(allow_blank=True, required=False)
-    address_line2 = serializers.CharField(allow_blank=True, required=False)
-    postal_code = serializers.CharField(allow_blank=True, required=False)
-    city = serializers.CharField(allow_blank=True, required=False)
-    country = serializers.CharField(allow_blank=True, required=False)
-    phone = serializers.CharField(allow_blank=True, required=False)
-    is_default = serializers.BooleanField(required=False)
-
-    # DE-style split fields from frontend (optional)
-    house_number = serializers.CharField(allow_blank=True, required=False)
-    street_name = serializers.CharField(allow_blank=True, required=False)
-
-    # installments / alt methods
-    method = serializers.ChoiceField(
-        choices=[
-            "card",
-            "card_installments",
-            "sepa_debit",
-            "sepa_debit_installments",
-            "paypal",
-            "bank_transfer",
-            "giropay",
-            "klarna",
-        ],
-        required=False,
-    )
-    months = serializers.IntegerField(
-        required=False, min_value=2, max_value=24
-    )
+    # optional for idempotency (frontend cart signature)
     idempotency_key = serializers.CharField(
         required=False, allow_blank=True
     )
-
+        
     def _normalize_country(self, c: str) -> str:
         if not c:
             return "DE"
@@ -887,31 +833,7 @@ class OrderCreateSerializer(serializers.Serializer):
 
         return attrs
 
-    def _apply_coupon(self, user, items, subtotal, code):
-        """
-        Check coupon validity and compute discount.
-        """
-        if not code:
-            return None, Decimal("0.00"), None
-
-        coup = Coupon.objects.filter(code__iexact=str(code).strip()).first()
-        if not coup:
-            raise serializers.ValidationError({"coupon_code": "Coupon not found."})
-
-        ok, reason = coup.can_apply(
-            user if getattr(user, "is_authenticated", False) else None,
-            items,
-            subtotal,
-        )
-        if not ok:
-            raise serializers.ValidationError({"coupon_code": reason})
-
-        disc = coup.discount_amount(
-            user if getattr(user, "is_authenticated", False) else None,
-            items,
-            subtotal,
-        )
-        return coup, disc, None
+   
 
     def _calc_prices(self, items_in):
         """
@@ -1020,109 +942,79 @@ class OrderCreateSerializer(serializers.Serializer):
 
         return addr
 
-    def create(self, validated):
-        """
-        Build a pending Order with:
-        - contact email
-        - shipping snapshot stored on the order
-        - item snapshots (price, name, VAT at purchase)
-        - coupon + totals
-        - payment_status='created', status='pending'
-        """
-        req_user = getattr(self.context["request"], "user", None)
-        is_auth = bool(
-            req_user
-            and req_user.is_authenticated
-            and getattr(req_user, "is_active", True)
-        )
+    def _calc_subtotal(self, items_validated):
+        total = Decimal("0.00")
+        for it in items_validated:
+            prod = Product.objects.get(pk=it["product_id"])
+            unit = Decimal(str(getattr(prod, "final_price_gross", None) or prod.price_gross))
+            total += unit * it["qty"]
+        return quant2(total)
 
-        items_in = validated["items"]
-        clean_items, subtotal = self._calc_prices(items_in)
-
-        coupon_code = (validated.get("coupon_code") or "").strip()
-        coupon_obj, discount, _ = self._apply_coupon(
-            req_user, items_in, subtotal, coupon_code
-        )
-
-        shipping_fee = Decimal("0.00")  # TODO: real shipping calculation
-        total = (
-            subtotal - discount + shipping_fee
-        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if total < 0:
+    def _apply_coupon(self, subtotal, code, user):
+        if not code:
+            return subtotal, Decimal("0.00")
+        # hook your Coupon model logic. We'll fake -10% for demo.
+        discount = (subtotal * Decimal("0.10")).quantize(Decimal("0.01"))
+        total = subtotal - discount
+        if total < Decimal("0.00"):
             total = Decimal("0.00")
+        return total, discount
 
-        # Capture shipping snapshot fields
-        snap_fn = validated.get("first_name", "").strip()
-        snap_ln = validated.get("last_name", "").strip()
-        snap_country = validated.get("country", "").strip()
-        snap_addr1 = (
-            validated.get("address_line1")
-            or f"{validated.get('street_name','')} {validated.get('house_number','')}".strip()
-        )
-        snap_addr2 = validated.get("address_line2", "").strip()
-        snap_zip = validated.get("postal_code", "").strip()
-        snap_city = validated.get("city", "").strip()
-        snap_phone = validated.get("phone", "").strip()
-        snap_street_name = validated.get("street_name", "").strip()
-        snap_house_number = validated.get("house_number", "").strip()
+    def create(self, validated_data):
+        request = self.context.get("request")
+        user = request.user if request and request.user.is_authenticated else None
 
-        # Authenticated users can also FK the address
-        addr_obj = (
-            self._resolve_address_for_user(req_user, validated)
-            if is_auth
-            else None
-        )
+        items_data = validated_data["items"]
+        shipping_data = validated_data["shipping"]
+        coupon_code = validated_data.get("coupon_code", "").strip()
+        payment_method = validated_data.get("payment_method")
+        installments_months = validated_data.get("installments_months")
+        idempotency_key = validated_data.get("idempotency_key", "").strip() or None
+
+        # 1. compute totals
+        subtotal = self._calc_subtotal(items_data)
+        total_price, discount = self._apply_coupon(subtotal, coupon_code, user)
+
+        # safety: Stripe/PayPal cannot charge 0 €
+        if total_price <= Decimal("0.00"):
+            raise serializers.ValidationError({
+                "detail": "Cart total is 0.00 €. Cannot create online payment."
+            })
 
         with transaction.atomic():
+            # OPTIONAL: if you want idempotency: try to find existing 'pending' order with same idem key
+            # Skipping here for clarity — you can implement if you store idempotency_key in Order.
+
             order = Order.objects.create(
-                user=req_user if is_auth else None,
-                email=validated["email"],
-
+                user=user if user else None,
+                email=validated_data["email"].strip().lower(),
+                total_price=total_price,
+                payment_method=payment_method,
+                installments_months=installments_months if installments_months else None,
                 status="pending",
-                payment_method=validated.get("payment_method") or "card",
-                payment_status="created",
-
-                subtotal=subtotal.quantize(Decimal("0.01")),
-                discount_amount=discount,
-                shipping_fee=shipping_fee,
-                total_price=total,
-
-                installments_months=validated.get("months"),
-
-                shipping_address=addr_obj,
-                coupon=coupon_obj,
-
-                ship_first_name=snap_fn,
-                ship_last_name=snap_ln,
-                ship_line1=snap_addr1,
-                ship_line2=snap_addr2,
-                ship_postal=snap_zip,
-                ship_city=snap_city,
-                ship_country=snap_country,
-                ship_phone=snap_phone,
-                ship_street_name=snap_street_name,
-                ship_house_number=snap_house_number,
+                ship_first_name=shipping_data["first_name"],
+                ship_last_name=shipping_data["last_name"],
+                ship_line1=shipping_data["line1"],
+                ship_line2=shipping_data.get("line2", ""),
+                ship_postal=shipping_data["postal_code"],
+                ship_city=shipping_data["city"],
+                ship_country=shipping_data["country"],
+                ship_phone=shipping_data.get("phone", ""),
             )
 
-            # Snapshot each line item into OrderItem
-            for p, qty, unit in clean_items:
-                product_name_snapshot = (
-                    getattr(p, "title_en", None)
-                    or getattr(p, "title_de", None)
-                    or str(p)
-                )
-                vat_snapshot = getattr(p, "vat_rate", None)
-
+            for it in items_data:
+                prod = Product.objects.get(pk=it["product_id"])
+                unit = Decimal(str(getattr(prod, "final_price_gross", None) or prod.price_gross))
                 OrderItem.objects.create(
                     order=order,
-                    product=p,
-                    quantity=qty,
-                    unit_price=unit,  # gross unit price at checkout time
-                    product_name_snapshot=product_name_snapshot,
-                    vat_rate_at_purchase=vat_snapshot,
+                    product=prod,
+                    product_name=prod.title_en or prod.title_de or str(prod),
+                    quantity=it["qty"],
+                    unit_price=unit,
                 )
 
         return order
+    
 
 
 # -----------------

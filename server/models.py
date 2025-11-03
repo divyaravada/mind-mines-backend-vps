@@ -687,180 +687,102 @@ class NewsletterSubscriber(models.Model):
 
 # ----------------- Orders, Items, Returns -----------------
 
-ORDER_STATUS = [
-    ("pending", "Pending"),
-    ("processing", "Processing"),
-    ("paid", "Paid"),
-    ("shipped", "Shipped"),
-    ("delivered", "Delivered"),
-    ("cancelled", "Cancelled"),
-    ("failed", "Failed"),
-    ("refunded", "Refunded"),
-]
-
-
 class Order(models.Model):
     PAYMENT_METHODS = [
         ("card", "Card"),
-        ("card_installments", "Card Installments"),
+        ("card_installments", "Card installments"),
         ("sepa_debit", "SEPA Direct Debit"),
-        ("sepa_debit_installments", "SEPA Direct Debit (Installments)"),
-        ("paypal", "PayPal"),
-        ("giropay", "Giropay"),
-        ("klarna", "Klarna"),
-        ("bank_transfer", "Bank Transfer (SEPA)"),
+        ("sepa_installments", "SEPA Direct Debit Installments"),
+        ("klarna", "Klarna (Stripe Klarna)"),
+        ("paypal", "PayPal / PayPal Pay Later"),
+        ("bank", "Bank Transfer"),  # optional if you still allow manual SEPA
     ]
 
-    user = models.ForeignKey(
-        "server.User",
-        on_delete=models.CASCADE,
-        related_name="orders",
-        null=True,
-        blank=True,
-    )
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("processing", "Processing"),
+        ("paid", "Paid"),
+        ("failed", "Failed"),
+        ("shipped", "Shipped"),
+        ("delivered", "Delivered"),
+        ("cancelled", "Cancelled"),
+    ]
 
-    # email we will use for confirmations + invoice
+    id = models.AutoField(primary_key=True)
+    number = models.CharField(max_length=32, unique=True, blank=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name="orders"
+    )
     email = models.EmailField()
 
-    # legacy single-line order (backward compatibility for old orders)
-    product = models.ForeignKey(
-        "server.Product",
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-    )
-    quantity = models.PositiveIntegerField(null=True, blank=True)
+    # snapshot shipping at checkout time
+    ship_first_name = models.CharField(max_length=120, blank=True)
+    ship_last_name = models.CharField(max_length=120, blank=True)
+    ship_line1 = models.CharField(max_length=255, blank=True)
+    ship_line2 = models.CharField(max_length=255, blank=True)
+    ship_postal = models.CharField(max_length=50, blank=True)
+    ship_city = models.CharField(max_length=120, blank=True)
+    ship_country = models.CharField(max_length=2, default="DE")
+    ship_phone = models.CharField(max_length=64, blank=True)
 
-    payment_method = models.CharField(
-        max_length=32,
-        choices=PAYMENT_METHODS,
-        default="card",
-    )
-    status = models.CharField(
-        max_length=32,
-        choices=ORDER_STATUS,
-        default="pending",
-    )
-    payment_status = models.CharField(
-        max_length=64,
-        blank=True,
-        default="",
-        help_text="Gateway status text like 'succeeded', 'requires_action', 'failed'",
-    )
-    payment_ref = models.CharField(
-        max_length=128,
-        blank=True,
-        default="",
-        help_text="Stripe PI / Schedule ID / PayPal order ID",
-    )
-    payment_id = models.CharField(
-        max_length=128,
-        blank=True,
-        default="",
-        help_text="Stripe charge ID etc.",
-    )
-    tracking_number = models.CharField(max_length=64, blank=True, default="")
+    total_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    payment_method = models.CharField(max_length=32, choices=PAYMENT_METHODS, blank=True)
+    installments_months = models.PositiveIntegerField(null=True, blank=True)
 
-    invoice_number = models.CharField(
-        max_length=32,
-        blank=True,
-        null=True,
-        default=None,
-    )
-    invoice_pdf = models.FileField(
-        upload_to="invoices/",
-        blank=True,
-        null=True,
-    )
-
-    coupon = models.ForeignKey(
-        "server.Coupon",
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="orders",
-    )
-    discount_amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=Decimal("0.00"),
-    )
-
-    subtotal = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=Decimal("0.00"),
-        help_text="Gross subtotal (incl. VAT) before shipping/discount",
-    )
-    shipping_fee = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=Decimal("0.00"),
-        help_text="Gross shipping cost incl. VAT",
-    )
-    total_price = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=Decimal("0.00"),
-        help_text="Grand total gross incl. VAT, after discounts",
-    )
-
-    installments_months = models.PositiveIntegerField(
-        null=True,
-        blank=True,
-    )
-
-    # FK to saved Address for logged-in users
-    shipping_address = models.ForeignKey(
-        "server.Address",
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-    )
-
-    # Snapshot ALWAYS stored (for guests too)
-    ship_first_name = models.CharField(max_length=100, blank=True, default="")
-    ship_last_name = models.CharField(max_length=100, blank=True, default="")
-    ship_line1 = models.CharField(max_length=255, blank=True, default="")
-    ship_line2 = models.CharField(max_length=255, blank=True, default="")
-    ship_postal = models.CharField(max_length=32, blank=True, default="")
-    ship_city = models.CharField(max_length=100, blank=True, default="")
-    ship_country = models.CharField(
-        max_length=2,
-        blank=True,
-        default="",
-        help_text='ISO code like "DE", "FR"',
-    )
-    ship_phone = models.CharField(max_length=64, blank=True, default="")
-
-    # legacy snapshot pieces
-    ship_street_name = models.CharField(max_length=255, blank=True, default="")
-    ship_house_number = models.CharField(max_length=64, blank=True, default="")
-
-    number = models.CharField(
-        max_length=32,
-        unique=True,
-        null=True,
-        blank=True,
-        default=None,
-    )
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    delivered_at = models.DateTimeField(null=True, blank=True)
-    cancelled_at = models.DateTimeField(null=True, blank=True)
-
-    stripe_pi = models.CharField(max_length=255, blank=True, null=True)
-    stripe_si = models.CharField(max_length=255, blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    payment_status = models.CharField(max_length=30, blank=True)
+    payment_ref = models.CharField(max_length=128, blank=True)  # Stripe PI id, PayPal order id, schedule id, etc.
+    payment_id = models.CharField(max_length=128, blank=True)   # final captured charge id etc.
 
     paid_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True) 
+    delivered_at = models.DateTimeField(null=True, blank=True)
 
-    stock_locked = models.BooleanField(default=False)
-    stock_released = models.BooleanField(default=False)
-
-    lookup_token = models.CharField(max_length=36, blank=True, default="")
+    # bookkeeping
+    stripe_pi = models.CharField(max_length=128, blank=True)  # PaymentIntent id
+    invoice_number = models.CharField(max_length=64, blank=True)
     confirmation_sent_at = models.DateTimeField(null=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        # assign a human number like "MM00001234"
+        if not self.number:
+            self.number = self._gen_number()
+        super().save(*args, **kwargs)
+
+    def _gen_number(self):
+        # example format: MM + zero-padded pk-like timestamp chunk
+        return f"MM{timezone.now().strftime('%m')}{uuid.uuid4().hex[:8].upper()}"
+
+    # item iterator helper for emails / invoice
+    def _iter_items(self):
+        return self.items.all()
+
+    def line_total(self):
+        return sum([it.line_total() for it in self._iter_items()], Decimal("0.00"))
+
+    def reserve_stock(self):
+        # subtract stock from each item.product
+        for it in self._iter_items():
+            if hasattr(it.product, "quantity"):
+                it.product.quantity = max(0, (it.product.quantity or 0) - it.quantity)
+                it.product.save(update_fields=["quantity"])
+
+    def release_stock(self):
+        # put stock back
+        for it in self._iter_items():
+            if hasattr(it.product, "quantity"):
+                it.product.quantity = (it.product.quantity or 0) + it.quantity
+                it.product.save(update_fields=["quantity"])
+
+    def assign_unique_invoice_number(self):
+        if self.invoice_number:
+            return
+        self.invoice_number = f"INV-{self.number}"
+        self.save(update_fields=["invoice_number"])
 
     class Meta:
         constraints = [
@@ -874,42 +796,7 @@ class Order(models.Model):
     def __str__(self):
         return f"Order #{self.pk}"
 
-    def _iter_items(self):
-        """
-        Iterate the "order lines" of this order.
-        1. Prefer related manager self.items (modern multi-item carts).
-        2. Fallback to querying OrderItem manually.
-        3. Final fallback: legacy single-line order (product + quantity).
-        """
-        manager = getattr(self, "items", None)
-        if manager is not None:
-            yielded = False
-            for it in manager.all().select_related("product"):
-                yielded = True
-                yield it
-            if yielded:
-                return
-
-        yielded2 = False
-        for it in OrderItem.objects.filter(order=self).select_related("product"):
-            yielded2 = True
-            yield it
-        if yielded2:
-            return
-
-        # Legacy single-line
-        if self.product_id and self.quantity:
-            yield OrderItem(
-                order=self,
-                product=self.product,
-                quantity=self.quantity,
-                unit_price=getattr(
-                    self.product,
-                    "final_price_gross",
-                    getattr(self.product, "price_gross", Decimal("0.00")),
-                ),
-            )
-
+    
     @property
     def ordered_at(self):
         return self.created_at
@@ -1009,74 +896,17 @@ class Order(models.Model):
             return False
         return timezone.now() <= (self.delivered_at + timedelta(days=15))
 
-    @transaction.atomic
-    def reserve_stock(self):
-        """
-        Decrease stock for all items after payment succeeds exactly once.
-        """
-        if self.stock_locked:
-            return
-        for it in self._iter_items():
-            p = Product.objects.select_for_update().get(pk=it.product_id)
-            if p.quantity < it.quantity:
-                raise ValueError(
-                    f"Insufficient stock for {p} (have {p.quantity}, need {it.quantity})"
-                )
-            p.quantity = F("quantity") - it.quantity
-            p.save(update_fields=["quantity"])
-        self.stock_locked = True
-        self.save(update_fields=["stock_locked"])
-
-    @transaction.atomic
-    def release_stock(self):
-        """
-        Add back Product.quantity for all items if not already released.
-        Safe to call from cancel/fail flow.
-        """
-        if not self.stock_locked or self.stock_released:
-            return
-        for it in self._iter_items():
-            p = Product.objects.select_for_update().get(pk=it.product_id)
-            p.quantity = F("quantity") + it.quantity
-            p.save(update_fields=["quantity"])
-        self.stock_released = True
-        self.save(update_fields=["stock_released"])
-
+    
 
 class OrderItem(models.Model):
-    order = models.ForeignKey(
-        Order,
-        related_name="items",
-        on_delete=models.CASCADE,
-    )
-    product = models.ForeignKey(
-        Product,
-        related_name="order_items",
-        on_delete=models.PROTECT,
-    )
-    quantity = models.PositiveIntegerField()
-    unit_price = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        help_text="Gross price per unit at purchase time",
-    )
-
-    product_name_snapshot = models.CharField(
-        max_length=255,
-        blank=True,
-        default="",
-        help_text="Product name as displayed at purchase time",
-    )
-    vat_rate_at_purchase = models.DecimalField(
-        max_digits=4,
-        decimal_places=4,
-        null=True,
-        blank=True,
-        help_text="VAT fraction like 0.19 at purchase time",
-    )
+    order = models.ForeignKey(Order, related_name="items", on_delete=models.CASCADE)
+    product = models.ForeignKey("server.Product", null=True, blank=True, on_delete=models.SET_NULL)
+    product_name = models.CharField(max_length=255)
+    quantity = models.PositiveIntegerField(default=1)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
 
     def line_total(self):
-        return _q2(Decimal(self.unit_price) * self.quantity)
+        return (self.unit_price * self.quantity).quantize(Decimal("0.01"))
 
     @property
     def product_name(self):
