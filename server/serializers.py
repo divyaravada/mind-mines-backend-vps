@@ -721,14 +721,17 @@ def quant2(val: Decimal) -> Decimal:
 
 class ShippingInSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=120)
-    last_name = serializers.CharField(max_length=120, allow_blank=True)
-    line1 = serializers.CharField(max_length=255)
-    line2 = serializers.CharField(max_length=255, allow_blank=True, required=False)
-    postal_code = serializers.CharField(max_length=50)
-    city = serializers.CharField(max_length=120)
-    country = serializers.CharField(max_length=2)
-    phone = serializers.CharField(max_length=64, allow_blank=True, required=False)
-
+    last_name  = serializers.CharField(max_length=120, allow_blank=True)
+    line1      = serializers.CharField(max_length=255)
+    line2      = serializers.CharField(max_length=255, allow_blank=True, required=False)
+    postal_code= serializers.CharField(max_length=50)
+    city       = serializers.CharField(max_length=120)
+    country    = serializers.CharField(max_length=2)
+    phone      = serializers.CharField(max_length=64, allow_blank=True, required=False)
+    # NEW (optional, shown in admin if available)
+    street_name = serializers.CharField(max_length=255, allow_blank=True, required=False)
+    house_number = serializers.CharField(max_length=64,  allow_blank=True, required=False)
+    
 class OrderItemIn(serializers.Serializer):
     product_id = serializers.IntegerField()
     qty = serializers.IntegerField(min_value=1, max_value=99)
@@ -916,6 +919,8 @@ class OrderCreateSerializer(serializers.Serializer):
                 ship_city=shipping_data["city"],
                 ship_country=shipping_data["country"],
                 ship_phone=shipping_data.get("phone", ""),
+                ship_street_name=shipping_data.get("street_name", ""),
+                ship_house_number=shipping_data.get("house_number", ""),
             )
 
             for it in items_data:
