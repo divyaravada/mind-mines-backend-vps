@@ -1,14 +1,17 @@
 # server/admin.py
 from typing import Any, Optional
+from decimal import Decimal, InvalidOperation
+
 from django import forms
 from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
-from django.utils.html import format_html_join, format_html
-from django.urls import reverse
 from django.contrib.auth.forms import ReadOnlyPasswordHashField
 from django.core.exceptions import ValidationError
-from decimal import Decimal, InvalidOperation
+from django.db import IntegrityError
+from django.db.models.deletion import ProtectedError
+from django.utils.html import format_html_join, format_html
 from django.utils.translation import gettext_lazy as _
+from django.urls import reverse
 
 from .models import (
     Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage, OnDemandOrderRequest,
@@ -58,16 +61,42 @@ def fmt_eur(v: Optional[Any]) -> str:
     except Exception:
         return "-"
 
+def _reserve_stock(order: Order):
+    fn = getattr(order, "reserve_stock_atomic", None) or getattr(order, "reserve_stock", None)
+    if callable(fn):
+        try:
+            fn()
+        except Exception:
+            pass
+
+def _release_stock(order: Order):
+    fn = getattr(order, "release_stock_atomic", None) or getattr(order, "release_stock", None)
+    if callable(fn):
+        try:
+            fn()
+        except Exception:
+            pass
+
 # ----- admin actions -----
 @admin.action(description="Mark selected orders as PAID (+ generate/send invoice)")
 def mark_paid(modeladmin, request, queryset):
     updated = 0
-    for order in queryset:
+    for order in queryset.select_related("user"):
         if getattr(order, "status", None) == "paid":
             continue
         order.status = "paid"
         setattr(order, "payment_status", "paid")
-        order.save(update_fields=["status", "payment_status"])
+        # prefer setting paid_at if model has it
+        if hasattr(order, "paid_at"):
+            from django.utils import timezone
+            order.paid_at = timezone.now()
+            order.save(update_fields=["status", "payment_status", "paid_at"])
+        else:
+            order.save(update_fields=["status", "payment_status"])
+
+        _reserve_stock(order)
+
+        # invoice + email
         try:
             generate_invoice_pdf(order)
         except Exception:
@@ -79,15 +108,21 @@ def mark_paid(modeladmin, request, queryset):
             pass
         updated += 1
     modeladmin.message_user(
-        request, f"Marked {updated} order(s) as paid and attempted to send invoice.", level=messages.SUCCESS
+        request, f"Marked {updated} order(s) as paid, reserved stock, and attempted to send invoice.",
+        level=messages.SUCCESS
     )
 
 @admin.action(description="Mark selected orders as SHIPPED (+ email)")
 def mark_shipped(modeladmin, request, queryset):
+    from django.utils import timezone
     n = 0
     for order in queryset:
         order.status = "shipped"
-        order.save(update_fields=["status"])
+        if hasattr(order, "shipped_at") and not order.shipped_at:
+            order.shipped_at = timezone.now()
+            order.save(update_fields=["status", "shipped_at"])
+        else:
+            order.save(update_fields=["status"])
         try:
             send_shipping_update(order, tracking=getattr(order, "tracking_number", "") or "")
         except Exception:
@@ -101,13 +136,13 @@ def mark_cancelled(modeladmin, request, queryset):
     for order in queryset:
         prev = getattr(order, "status", None)
         order.status = "cancelled"
-        setattr(order, "payment_status", "cancelled")
-        order.save(update_fields=["status", "payment_status"])
-        if prev != "cancelled" and hasattr(order, "release_stock") and callable(order.release_stock):
-            try:
-                order.release_stock()
-            except Exception:
-                pass
+        if hasattr(order, "payment_status"):
+            setattr(order, "payment_status", "cancelled")
+            order.save(update_fields=["status", "payment_status"])
+        else:
+            order.save(update_fields=["status"])
+        if prev != "cancelled":
+            _release_stock(order)
         try:
             send_cancellation_email(order)
         except Exception:
@@ -130,8 +165,10 @@ class OrderItemInline(admin.TabularInline):
         return False
 
     def item_name(self, obj):
-        if getattr(obj, "product_name", None):
-            return obj.product_name
+        # prefer stored snapshot
+        name = getattr(obj, "product_name", None) or getattr(obj, "product_name_snapshot", None)
+        if name:
+            return name
         prod = getattr(obj, "product", None)
         if prod:
             return getattr(prod, "title_en", None) or getattr(prod, "title_de", None) or str(prod)
@@ -164,13 +201,18 @@ class OrderItemInline(admin.TabularInline):
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
-    list_display = ("number", "user", "customer_email", "status", "total_price_display", "created_at")
+    list_display = (
+        "number", "user", "customer_email", "status",
+        "total_price_display", "created_at",
+        "tracking_number", "tracking_carrier",
+    )
     list_filter = ("status", "created_at")
-    search_fields = ("number", "user__email", "email")
+    search_fields = ("number", "user__email", "email", "tracking_number")
     actions = [mark_paid, mark_shipped, mark_cancelled]
 
     readonly_fields = (
-        "number", "total_price",
+        "number",
+        "subtotal_readonly", "discount_readonly", "shipping_fee_readonly", "vat_readonly", "total_price_readonly",
         "payment_ref", "payment_id", "created_at", "updated_at",
         "items_readonly", "delivered_at", "cancelled_at",
         "customer_email", "shipping_snapshot_readonly",
@@ -178,11 +220,11 @@ class OrderAdmin(admin.ModelAdmin):
 
     fieldsets = (
         (None, {"fields": ("number","user","customer_email","created_at","delivered_at","cancelled_at")}),
-        ("Status & Payment", {"fields": ("status","payment_method")}),
-        ("Totals", {"fields": ("total_price",)}),
+        ("Status & Payment", {"fields": ("status","payment_method","payment_ref","payment_id")}),
+        ("Tracking", {"fields": ("tracking_number","tracking_carrier","tracking_url","shipped_at")}),
+        ("Totals (read-only)", {"fields": ("subtotal_readonly","discount_readonly","shipping_fee_readonly","vat_readonly","total_price_readonly")}),
         ("Shipping snapshot", {"fields": ("shipping_snapshot_readonly",)}),
         ("Items", {"fields": ("items_readonly",)}),
-        ("Payment refs", {"fields": ("payment_ref","payment_id")}),
     )
 
     inlines = [OrderItemInline]
@@ -199,29 +241,43 @@ class OrderAdmin(admin.ModelAdmin):
         except (InvalidOperation, TypeError, ValueError):
             return "-"
 
-    # ---- readonly_fields renderers ----
-    def subtotal(self, obj):
+    # ---- totals (readonly) ----
+    def subtotal_readonly(self, obj):
         try: return f"{Decimal(getattr(obj, 'subtotal', 0) or 0):.2f} €"
         except (InvalidOperation, TypeError, ValueError): return "0.00 €"
+    subtotal_readonly.short_description = "Subtotal"
 
-    def discount_amount(self, obj):
-        try: return f"{Decimal(getattr(obj, 'discount_amount', 0) or 0):.2f} €"
+    def discount_readonly(self, obj):
+        try: return f"-{Decimal(getattr(obj, 'discount_amount', 0) or 0):.2f} €"
         except (InvalidOperation, TypeError, ValueError): return "0.00 €"
+    discount_readonly.short_description = "Discount"
 
-    def shipping_fee(self, obj):
+    def shipping_fee_readonly(self, obj):
         try: return f"{Decimal(getattr(obj, 'shipping_fee', 0) or 0):.2f} €"
         except (InvalidOperation, TypeError, ValueError): return "0.00 €"
+    shipping_fee_readonly.short_description = "Shipping"
 
-    def total_price(self, obj):
+    def vat_readonly(self, obj):
+        vat = getattr(obj, "vat_amount", None)
+        if vat is None:
+            vat = getattr(obj, "tax_amount", 0)
+        try: return f"{Decimal(vat or 0):.2f} €"
+        except (InvalidOperation, TypeError, ValueError): return "0.00 €"
+    vat_readonly.short_description = "VAT"
+
+    def total_price_readonly(self, obj):
         try: return f"{Decimal(getattr(obj, 'total_price', 0) or 0):.2f} €"
         except (InvalidOperation, TypeError, ValueError): return "0.00 €"
+    total_price_readonly.short_description = "Grand total"
 
+    # ---- payment/refs read-only helpers (exist as model fields) ----
     def payment_ref(self, obj): return getattr(obj, "payment_ref", "") or "-"
     def payment_id(self, obj):  return getattr(obj, "payment_id", "") or "-"
 
     def delivered_at(self, obj):  return getattr(obj, "delivered_at", None)
     def cancelled_at(self, obj):  return getattr(obj, "cancelled_at", None)
 
+    # ---- pretty shipping snapshot ----
     def shipping_snapshot_readonly(self, obj):
         fn  = (getattr(obj, "ship_first_name", "") or "").strip()
         ln  = (getattr(obj, "ship_last_name", "") or "").strip()
@@ -236,9 +292,9 @@ class OrderAdmin(admin.ModelAdmin):
         # detect if snapshot is basically empty
         snapshot_missing = not any([fn, ln, l1, l2, pc, city, cty, ph, stn, hno])
 
-        # 2) Fallback to related Address (legacy flow)
-        if snapshot_missing:
-            addr = getattr(obj, "shipping_address", None)  # FK on older schema
+        # fallback to related Address (legacy)
+        if snapshot_missing and hasattr(obj, "shipping_address"):
+            addr = getattr(obj, "shipping_address", None)
             if addr:
                 fn  = (getattr(addr, "first_name", "") or "").strip()
                 ln  = (getattr(addr, "last_name", "") or "").strip()
@@ -251,8 +307,6 @@ class OrderAdmin(admin.ModelAdmin):
                 stn  = (getattr(addr, "street_name", "") or "").strip()
                 hno  = (getattr(addr, "house_number", "") or "").strip()
 
-        # 3) Render
-        from django.utils.html import format_html
         if not any([fn, ln, l1, l2, pc, city, cty, ph, stn, hno]):
             return "-"
 
@@ -272,22 +326,23 @@ class OrderAdmin(admin.ModelAdmin):
         )
     shipping_snapshot_readonly.short_description = "Shipping snapshot"
 
+    # ---- items pretty table ----
     def items_readonly(self, obj):
         items = getattr(obj, "items", None)
         if not hasattr(items, "all"):
             return "-"
         rows = []
         for it in items.all():
-            name = getattr(it, "product_name", None)
+            name = getattr(it, "product_name", None) or getattr(it, "product_name_snapshot", None)
             if not name:
                 prod = getattr(it, "product", None)
                 name = (getattr(prod, "title_en", None) or
                         getattr(prod, "title_de", None) or
                         (str(prod) if prod else "-"))
             qty = getattr(it, "quantity", 1) or 1
-            unit = getattr(it, "unit_price", None)
+            unit = getattr(it, "unit_price_gross", None)
             if unit is None:
-                unit = getattr(it, "unit_price_gross", None)
+                unit = getattr(it, "unit_price", None)
             try:
                 unit_fmt = f"{Decimal(unit):.2f} €" if unit is not None else "-"
             except (InvalidOperation, TypeError, ValueError):
@@ -347,30 +402,23 @@ class CustomUserAdmin(DjangoUserAdmin):
         (None, {"classes": ("wide",), "fields": ("email", "username", "password1", "password2", "is_staff", "is_active")}),
     )
     search_fields = ("email", "username")
-    
-    def _user_addresses_referenced(self, user_id: int) -> bool:
-        with connection.cursor() as cur:
-            cur.execute("""
-                SELECT 1
-                FROM server_order o
-                JOIN server_address a ON a.id = o.shipping_address_id
-                WHERE a.user_id = %s
-                LIMIT 1
-            """, [user_id])
-            return cur.fetchone() is not None
 
     def _has_order_links(self, user):
-        from .models import Order
+        # Any order directly referencing this user, or (legacy) via shipping_address FK
         if Order.objects.filter(user=user).exists():
             return True
-        return self._user_addresses_referenced(user.id)
+        if hasattr(Order, "shipping_address"):
+            from django.db.models import Q
+            return Order.objects.filter(Q(shipping_address__user=user)).exists()
+        return False
 
     def delete_model(self, request, obj):
         if self._has_order_links(obj):
             self.message_user(
                 request,
                 _("Cannot delete this user because related orders reference the user or their addresses. "
-                  "Deactivate the user instead."), level=messages.ERROR
+                  "Deactivate the user instead."),
+                level=messages.ERROR,
             )
             return
         try:
@@ -379,18 +427,13 @@ class CustomUserAdmin(DjangoUserAdmin):
             self.message_user(
                 request,
                 _("Deletion blocked by related data (orders/addresses). Details: %s") % (e,),
-                level=messages.ERROR
+                level=messages.ERROR,
             )
 
     def delete_queryset(self, request, queryset):
-        from .models import Order
-        blocked = []
-        ok = []
+        blocked, ok = [], []
         for obj in queryset:
-            if self._has_order_links(obj):
-                blocked.append(obj)
-            else:
-                ok.append(obj)
+            (blocked if self._has_order_links(obj) else ok).append(obj)
         if ok:
             try:
                 super().delete_queryset(request, queryset.model.objects.filter(pk__in=[o.pk for o in ok]))
@@ -398,14 +441,14 @@ class CustomUserAdmin(DjangoUserAdmin):
                 self.message_user(
                     request,
                     _("Some deletions were blocked by related data. Details: %s") % (e,),
-                    level=messages.ERROR
+                    level=messages.ERROR,
                 )
         if blocked:
             self.message_user(
                 request,
                 _("%d user(s) not deleted because orders reference them or their addresses. "
                   "Deactivate instead.") % len(blocked),
-                level=messages.WARNING
+                level=messages.WARNING,
             )
 
 @admin.register(Profile)
@@ -436,9 +479,10 @@ class ProductAdmin(admin.ModelAdmin):
     search_fields = ("title_en", "title_de", "category")
 
     def price_col(self, obj):
-        val = getattr(obj, "price", None)
+        # prefer gross if present
+        val = getattr(obj, "price_gross", None)
         if val is None:
-            val = getattr(obj, "price_gross", None)
+            val = getattr(obj, "price", None)
         return fmt_eur(val)
     price_col.short_description = "Price"
 
@@ -496,7 +540,7 @@ class ReturnRequestAdmin(admin.ModelAdmin):
     inlines = [ReturnAttachmentInline]
 
 # --------------------------------------------------------------------------------------
-# Misc simple models
+# Stock alert & On-demand
 # --------------------------------------------------------------------------------------
 @admin.register(StockAlert)
 class StockAlertAdmin(admin.ModelAdmin):
@@ -521,22 +565,33 @@ class OnDemandOrderRequestAdmin(admin.ModelAdmin):
         return f"{title} ({obj.product_id})"
     product_display.short_description = "Product"
 
-#-----------------Coupon------------------
+# --------------------------------------------------------------------------------------
+# Coupon
+# --------------------------------------------------------------------------------------
 @admin.register(Coupon)
 class CouponAdmin(admin.ModelAdmin):
-    # only include attributes that truly exist
-    list_display = tuple([f for f in ["code", "active", "discount_percent", "valid_from", "valid_to", "usage_limit", "times_used"] if hasattr(Coupon, f)])
-    list_filter  = tuple([f for f in ["active", "valid_from", "valid_to"] if hasattr(Coupon, f)])
+    """
+    Support the new Coupon fields used in views:
+    - code, kind, value, active, starts_at, ends_at, is_birthday
+    Optionally show usage_limit/times_used if present.
+    """
+    base_fields = ["code", "kind", "value", "active", "starts_at", "ends_at", "is_birthday", "usage_limit", "times_used"]
+    def _has(model, f): return hasattr(model, f)
+
+    fields = [f for f in base_fields if hasattr(Coupon, f)]
+    list_display = tuple([f for f in ["code", "kind", "value", "active", "starts_at", "ends_at", "is_birthday", "times_used"] if hasattr(Coupon, f)])
+    list_filter  = tuple([f for f in ["active", "is_birthday", "starts_at", "ends_at", "kind"] if hasattr(Coupon, f)])
     search_fields = tuple([f for f in ["code"] if hasattr(Coupon, f)])
-    fields       = list(list_display)  # show the same fields on the form
 
     def get_readonly_fields(self, request, obj=None):
         ro = []
         if hasattr(Coupon, "times_used"):
             ro.append("times_used")
-        return ro 
+        return ro
 
-#--------------------------Prmotion Banner------------
+# --------------------------------------------------------------------------------------
+# Promotion banner
+# --------------------------------------------------------------------------------------
 @admin.register(PromotionBanner)
 class PromotionBannerAdmin(admin.ModelAdmin):
     list_display = tuple([f for f in ["id", "headline", "is_enabled", "start_at", "end_at", "priority"] if hasattr(PromotionBanner, f)])
@@ -549,9 +604,11 @@ class PromotionBannerAdmin(admin.ModelAdmin):
         "link_url", "country_whitelist", "image"
     ]
     fields = [f for f in base_fields if hasattr(PromotionBanner, f)]
-    readonly_fields = []        
+    readonly_fields = []
 
-# Keep the simple registers
+# --------------------------------------------------------------------------------------
+# Simple registers
+# --------------------------------------------------------------------------------------
 admin.site.register(ContactMessage)
 admin.site.register(NewsletterSubscriber)
 admin.site.register(Review)

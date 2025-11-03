@@ -168,7 +168,7 @@ urlpatterns = [
     path("stripe/installments/sepa/", StripeSepaInstallmentsView.as_view(), name="stripe_installments_sepa"),
     path("payments/sepa-post-confirm/", SepaPostConfirmView.as_view(), name="sepa-post-confirm"),
     path("stripe/webhook/", stripe_webhook, name="stripe_webhook"),
-    path("stripe/webhook", stripe_webhook, name="stripe_webhook_no_slash"),  # optional alias
+    path("stripe/webhook", stripe_webhook, name="stripe_webhook_no_slash"),
     path("orders/<int:pk>/payment-status/", OrderPaymentStatusUpdateAPIView.as_view(), name="order_payment_status"),
 
     # -------- Returns / Cancellations --------
@@ -192,6 +192,7 @@ urlpatterns = [
     path("guest/invoice/download/", GuestInvoiceDownloadView.as_view(), name="guest_invoice_download"),
 ]
 
+# Static/media only during development
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 

@@ -1,38 +1,59 @@
 # server/tasks.py
 """
-Lightweight task stubs. If you use Celery/RQ, replace the bodies with @shared_task tasks.
+Lightweight async helpers that the views import:
+- fire_and_forget(func, *args, **kwargs): run something off-thread
+- post_payment_pipeline(order_id): placeholder pipeline you can expand
+If you use Celery/RQ later, you can swap these with real tasks.
 """
 from __future__ import annotations
-from .utils.invoices import generate_invoice_pdf
-from .utils.emails import send_invoice_email, send_order_confirmation
-from .models import Order
 
+import threading
+import logging
+from typing import Callable, Any
 
-def post_payment_pipeline(order_id: int):
+from django.utils import timezone
+
+logger = logging.getLogger(__name__)
+
+def fire_and_forget(func: Callable[..., Any], *args, **kwargs) -> None:
     """
-    Called after a successful payment (Stripe webhook / PayPal capture / admin mark paid).
-    Keep idempotent.
+    Run a callable in a background thread (non-blocking).
     """
     try:
-        order = Order.objects.get(pk=order_id)
-    except Order.DoesNotExist:
-        return
-
-    # Generate/ensure invoice
-    inv = generate_invoice_pdf(order)
-
-    # Send invoice + confirmation (safe if sent twice — but we try to be gentle)
-    try:
-        send_invoice_email(order)
+        t = threading.Thread(target=_safe_wrapper, args=(func, args, kwargs), daemon=True)
+        t.start()
     except Exception:
-        pass
+        logger.exception("fire_and_forget: failed to start thread for %s", getattr(func, "__name__", func))
 
+def _safe_wrapper(func: Callable[..., Any], args, kwargs):
     try:
-        send_order_confirmation(order)
+        func(*args, **kwargs)
     except Exception:
-        pass
+        logger.exception("fire_and_forget: error running %s", getattr(func, "__name__", func))
 
-    # You could add: notify warehouse, analytics, etc.
-    return {"ok": True, "order": order.id, "invoice": getattr(inv, "number", None)}
+def post_payment_pipeline(order_id: int) -> None:
+    """
+    Placeholder for a post-payment pipeline. Expand as needed (e.g., analytics, fulfillment).
+    Kept minimal so importing it in views doesn't explode if you don't wire a worker.
+    """
+    try:
+        from .models import Order
+        from .utils.invoices import generate_invoice_pdf
+        from .utils.emails import send_invoice_email, send_order_confirmation
 
+        order = Order.objects.filter(pk=order_id).first()
+        if not order:
+            return
 
+        # Ensure invoice exists (idempotent)
+        generate_invoice_pdf(order)
+
+        # Email notifications (best-effort)
+        try:
+            locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+            send_invoice_email(order, user_locale=locale)
+            send_order_confirmation(order, user_locale=locale)
+        except Exception:
+            logger.exception("post_payment_pipeline: email sending failed for order %s", order_id)
+    except Exception:
+        logger.exception("post_payment_pipeline: failed for order %s", order_id)

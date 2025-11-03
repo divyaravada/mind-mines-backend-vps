@@ -9,12 +9,14 @@ def fire_and_forget(func: Callable[..., Any], *args, **kwargs) -> None:
     """
     Run a callable in a daemon thread and return immediately.
     """
-    t = threading.Thread(target=_safe_wrap, args=(func, args, kwargs), daemon=True)
-    t.start()
+    try:
+        t = threading.Thread(target=_safe_wrap, args=(func, args, kwargs), daemon=True)
+        t.start()
+    except Exception:
+        logger.exception("fire_and_forget: failed to start thread: %s", getattr(func, "__name__", func))
 
 def _safe_wrap(func, args, kwargs):
     try:
         func(*args, **kwargs)
     except Exception:
-        logger.exception("fire_and_forget task failed: %s", func)
-
+        logger.exception("fire_and_forget task failed: %s", getattr(func, "__name__", func))

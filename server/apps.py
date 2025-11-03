@@ -11,7 +11,10 @@ class ServerConfig(AppConfig):
     path = str(Path(__file__).resolve().parent)
 
     def ready(self):
-        # Use an instance-level flag; fresh AppConfig in tests shouldn't inherit prior state.
+        """
+        Hook up signal handlers once per process.
+        Guarded by an instance flag to avoid double-wiring (e.g., in tests or autoreload).
+        """
         if getattr(self, "_signals_connected", False):
             return
         try:

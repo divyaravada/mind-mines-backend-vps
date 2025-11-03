@@ -3,7 +3,7 @@ from django.template.loader import render_to_string, TemplateDoesNotExist
 
 def render_bilingual(template_en: str, template_de: str, ctx: dict) -> tuple[str, str]:
     """
-    Try to render per-locale templates; if missing, return empty strings for that locale.
+    Render EN/DE templates if available; otherwise return empty string for that locale.
     """
     html_en = ""
     html_de = ""

@@ -1,3 +1,4 @@
+# server/utils/emails.py
 import re
 import logging
 from dataclasses import dataclass
@@ -11,19 +12,12 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 CURRENCY = "€"
 
-ADMIN_EMAIL = getattr(settings, "SUPPORT_EMAIL", "info@mindmines.eu")
 DEFAULT_FROM = getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com")
-ORDERS_ADMIN_EMAIL = getattr(settings, "ORDERS_ADMIN_EMAIL", "info@mindmines.eu")
 SITE_URL = getattr(settings, "FRONTEND_URL", "https://mindmines.eu").rstrip("/")
 FRONTEND_ORDERS_URL = f"{SITE_URL}/account/orders"
 
-MAX_ATTACH_BYTES = 14 * 1024 * 1024
-
 def order_recipient_email(order) -> Optional[str]:
-    """
-    Recipient for order emails in authenticated+guest flow.
-    Priority: explicit order.email, then order.user.email.
-    """
+    """Recipient for order emails (guest + authed)."""
     return (getattr(order, "email", None)
             or getattr(getattr(order, "user", None), "email", None))
 
@@ -34,24 +28,25 @@ def _money(v: Decimal, currency: str = "EUR") -> str:
         return f"{v} {currency}"
 
 def _from_email() -> str:
-    return getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@mindmines.eu")
+    return getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com")
 
 def _bcc_defaults() -> Sequence[str]:
-    """
-    Optional: set in settings.py
-      ORDER_EMAIL_BCC = ["orders@mindmines.eu"]
-    """
     return getattr(settings, "ORDER_EMAIL_BCC", [])
 
 def _attach_invoice_if_available(order, email_msg: EmailMultiAlternatives):
-    """
-    Attach invoice PDF if present (Invoice.pdf relation or legacy Order.invoice_pdf).
-    """
+    """Attach invoice PDF if present (Invoice.pdf or legacy attribute)."""
     try:
         inv = getattr(order, "invoice", None)
         if inv and getattr(inv, "pdf", None) and inv.pdf:
             name = f"{getattr(inv, 'number', f'invoice_{order.id}')}.pdf"
-            email_msg.attach(name, inv.pdf.read(), "application/pdf")
+            # ensure fresh file handle each send
+            try:
+                email_msg.attach(name, inv.pdf.open("rb").read(), "application/pdf")
+            finally:
+                try:
+                    inv.pdf.close()
+                except Exception:
+                    pass
             return
     except Exception:
         logger.exception("Failed reading related invoice pdf for order %s", order.id)
@@ -70,9 +65,7 @@ class EmailBody:
     html: str
 
 def _tr(locale: str, key: str, **vars) -> str:
-    """
-    Tiny inline i18n. locale in {'en','de'}.
-    """
+    """Tiny inline i18n. locale in {'en','de'}."""
     loc = (locale or "en").split("-")[0].lower()
     t = {
         "subject_sepa_pending": {
@@ -95,26 +88,11 @@ def _tr(locale: str, key: str, **vars) -> str:
             "en": "Installment plan started for Order {num}",
             "de": "Ratenplan gestartet für Bestellung {num}",
         },
-        "salute": {
-            "en": "Hello",
-            "de": "Hallo",
-        },
-        "thanks": {
-            "en": "Thank you for shopping with MindMines.",
-            "de": "Vielen Dank für Ihren Einkauf bei MindMines.",
-        },
-        "brand": {
-            "en": "MindMines",
-            "de": "MindMines",
-        },
-        "order_label": {
-            "en": "Order",
-            "de": "Bestellung",
-        },
-        "total_label": {
-            "en": "Total",
-            "de": "Gesamtsumme",
-        },
+        "salute": {"en": "Hello", "de": "Hallo"},
+        "thanks": {"en": "Thank you for shopping with MindMines.", "de": "Vielen Dank für Ihren Einkauf bei MindMines."},
+        "brand": {"en": "MindMines", "de": "MindMines"},
+        "order_label": {"en": "Order", "de": "Bestellung"},
+        "total_label": {"en": "Total", "de": "Gesamtsumme"},
         "sepa_pending_intro": {
             "en": "We received your SEPA Direct Debit authorization. Your payment is being processed (can take 1–3 business days).",
             "de": "Wir haben Ihre SEPA-Lastschriftmandat erhalten. Ihre Zahlung wird verarbeitet (dies kann 1–3 Werktage dauern).",
@@ -147,10 +125,7 @@ def _tr(locale: str, key: str, **vars) -> str:
             "en": "Your installment plan has been set up. Below is the expected schedule and amounts.",
             "de": "Ihr Ratenplan wurde eingerichtet. Unten sehen Sie die erwarteten Termine und Beträge.",
         },
-        "kind_regards": {
-            "en": "Kind regards",
-            "de": "Mit freundlichen Grüßen",
-        },
+        "kind_regards": {"en": "Kind regards", "de": "Mit freundlichen Grüßen"},
     }
     s = t[key]["en" if loc not in ("en", "de") else loc]
     try:
@@ -160,8 +135,6 @@ def _tr(locale: str, key: str, **vars) -> str:
 
 def _base_wrapper(subject_en: str, subject_de: str, body_en_html: str, body_de_html: str) -> EmailBody:
     subject = f"{subject_en} / {subject_de}"
-
-    # Plain text fallback
     text_en = _html_to_text(body_en_html)
     text_de = _html_to_text(body_de_html)
     text = f"{text_en}\n\n{'-'*40}\n\n{text_de}"
@@ -189,12 +162,12 @@ def _html_to_text(html: str) -> str:
     except Exception:
         return html
 
-def _send_email(subject: str, text: str, html: str, to_email: str, bcc: Optional[Iterable[str]] = None,
+def _send_email(subject: str, text: str, html: str, to_email: str,
+                bcc: Optional[Iterable[str]] = None,
                 attachments: Optional[Iterable[Tuple[str, bytes, str]]] = None) -> bool:
     if not to_email:
         logger.warning("No recipient provided; skipping email: %s", subject)
         return False
-
     try:
         with get_connection() as conn:
             msg = EmailMultiAlternatives(
@@ -215,10 +188,7 @@ def _send_email(subject: str, text: str, html: str, to_email: str, bcc: Optional
         logger.exception("Failed to send email to %s (subject=%s)", to_email, subject)
         return False
 
-# ---------------------------------------------------------------------------
-# Email content helpers
-# ---------------------------------------------------------------------------
-
+# ---------- shared content helpers ----------
 def _order_header_html(order) -> str:
     num = getattr(order, "number", None) or f"#{order.id}"
     total_val = getattr(order, "total_price", Decimal("0.00"))
@@ -229,10 +199,6 @@ def _order_header_html(order) -> str:
     """
 
 def _line_items_html(order) -> str:
-    """
-    Use OrderItem snapshot data (product_name, unit_price, quantity).
-    We DO NOT rely only on Product current title/price.
-    """
     try:
         rows = []
         items = getattr(order, "items", None)
@@ -241,37 +207,25 @@ def _line_items_html(order) -> str:
         for it in items.all():
             title = getattr(it, "product_name", None)
             if not title:
-                # fallback if snapshot missing
                 prod = getattr(it, "product", None)
                 title = getattr(prod, "title_en", None) or getattr(prod, "title_de", None) or "Item"
             qty = getattr(it, "quantity", 1)
             unit_val = getattr(it, "unit_price", Decimal("0.00"))
+            if unit_val is None:
+                unit_val = getattr(it, "unit_price_gross", Decimal("0.00"))
             unit = _money(unit_val)
             rows.append(f"<li>{title} &times; {qty} — {unit}</li>")
-        if rows:
-            return "<ul>" + "".join(rows) + "</ul>"
+        return "<ul>" + "".join(rows) + "</ul>" if rows else ""
     except Exception:
         logger.exception("Failed to render line items for order %s", getattr(order, "id", "?"))
-    return ""
+        return ""
 
 def _strip_html(s: str) -> str:
     return re.sub(r"<[^>]+>", "", s or "").strip()
 
-def get_order_recipient(order) -> str | None:
-    """
-    fallback helper used below
-    """
-    for cand in [
-        getattr(order, "email", None),
-        getattr(getattr(order, "user", None), "email", None),
-    ]:
-        if cand:
-            return cand
-    return None
-
 def _send_bilingual(subject: str, to_email: str, en_html: str, de_html: str, text_fallback: str | None = None):
     if not to_email:
-        return
+        return False
     html = (
         "<div style='font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif'>"
         "<h3>ENGLISH</h3>"
@@ -281,26 +235,26 @@ def _send_bilingual(subject: str, to_email: str, en_html: str, de_html: str, tex
         f"{de_html}"
         "</div>"
     )
-    text = text_fallback or (
-        "ENGLISH\n" + _strip_html(en_html) + "\n\nDEUTSCH\n" + _strip_html(de_html)
-    )
-    msg = EmailMultiAlternatives(
-        subject=subject,
-        body=text,
-        from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
-        to=[to_email],
-    )
-    msg.attach_alternative(html, "text/html")
-    msg.send(fail_silently=not settings.DEBUG)
+    text = text_fallback or ("ENGLISH\n" + _strip_html(en_html) + "\n\nDEUTSCH\n" + _strip_html(de_html))
+    try:
+        msg = EmailMultiAlternatives(
+            subject=subject,
+            body=text,
+            from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
+            to=[to_email],
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send(fail_silently=not settings.DEBUG)
+        return True
+    except Exception:
+        logger.exception("Failed to send bilingual email to %s", to_email)
+        return False
 
 # ---------------- SEPA ----------------
 def send_sepa_pending_email(order, user_locale: str = "en", to: Optional[str] = None) -> bool:
     to_email = to or order_recipient_email(order)
-    num = getattr(order, "number", None) or f"#{order.id}"
-
     subject_en = _tr("en", "subject_sepa_pending")
     subject_de = _tr("de", "subject_sepa_pending")
-
     body_en = f"""
       <p>{_tr('en','salute')},</p>
       <p>{_tr('en','sepa_pending_intro')}</p>
@@ -309,7 +263,6 @@ def send_sepa_pending_email(order, user_locale: str = "en", to: Optional[str] = 
       <p>{_tr('en','we_will_email_updates')}</p>
       <p>{_tr('en','thanks')}<br />{_tr('en','brand')}</p>
     """
-
     body_de = f"""
       <p>{_tr('de','salute')},</p>
       <p>{_tr('de','sepa_pending_intro')}</p>
@@ -318,18 +271,13 @@ def send_sepa_pending_email(order, user_locale: str = "en", to: Optional[str] = 
       <p>{_tr('de','we_will_email_updates')}</p>
       <p>{_tr('de','thanks')}<br />{_tr('de','brand')}</p>
     """
-
     mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
     return _send_email(mail.subject, mail.text, mail.html, to_email)
 
 # ------------- Return requests -------------
 def send_return_request_emails(return_request):
-    """
-    Sends customer confirmation (bilingual) and a simple admin notification.
-    """
     order = return_request.order
-    customer = get_order_recipient(order)
-
+    customer = order_recipient_email(order)
     en = (
         f"<p>We received your return request for order <b>{order.number}</b>.</p>"
         f"<p>Message:</p><blockquote>{_strip_html(return_request.message)}</blockquote>"
@@ -359,14 +307,10 @@ def send_return_request_emails(return_request):
     except Exception:
         logger.exception("Admin return request email failed")
 
-#---------------------- Cancel Request------------------
+# ------------- Cancel requests -------------
 def send_cancel_request_emails(return_request):
-    """
-    Sends customer confirmation (bilingual) and a simple admin notification.
-    """
     order = return_request.order
-    customer = get_order_recipient(order)
-
+    customer = order_recipient_email(order)
     en = (
         f"<p>We received your cancellation request for order <b>{order.number}</b>.</p>"
         f"<p>Message:</p><blockquote>{_strip_html(return_request.message)}</blockquote>"
@@ -397,10 +341,9 @@ def send_cancel_request_emails(return_request):
 
 # ------------- Shipping / Cancel updates -------------
 def send_shipping_update(order, tracking: str | None = None):
-    to_email = get_order_recipient(order)
+    to_email = order_recipient_email(order)
     if not to_email:
         return
-
     ctx = {"order": order, "tracking": tracking}
     try:
         html = render_to_string("emails/shipping_update.html", ctx)
@@ -415,17 +358,14 @@ def send_shipping_update(order, tracking: str | None = None):
         return
     except TemplateDoesNotExist:
         pass
-
     en = f"<p>Your order <b>{order.number}</b> is on the way.</p>" + (f"<p>Tracking: {tracking}</p>" if tracking else "")
     de = f"<p>Ihre Bestellung <b>{order.number}</b> ist unterwegs.</p>" + (f"<p>Sendungsverfolgung: {tracking}</p>" if tracking else "")
     _send_bilingual("Order shipped / Bestellung versendet", to_email, en, de)
 
-# ------------------ ORDER CANCELLED ------------------
 def send_cancellation_email(order):
-    to_email = get_order_recipient(order)
+    to_email = order_recipient_email(order)
     if not to_email:
         return
-
     ctx = {"order": order}
     try:
         html = render_to_string("emails/order_cancelled.html", ctx)
@@ -440,20 +380,20 @@ def send_cancellation_email(order):
         return
     except TemplateDoesNotExist:
         pass
-
     en = f"<p>Your order <b>{order.number}</b> has been cancelled.</p>"
     de = f"<p>Ihre Bestellung <b>{order.number}</b> wurde storniert.</p>"
     _send_bilingual("Order cancelled / Bestellung storniert", to_email, en, de)
 
 # ------------- Order confirmation -------------
 def send_order_confirmation(order, user_locale: str = "en", to: Optional[str] = None) -> bool:
-    to = to or order.email
-    num = getattr(order, "number", None) or f"#{order.id}"
-
-    # idempotency: don't resend if we already stamped
+    to = to or order_recipient_email(order)
+    if not to:
+        return False
+    # idempotency: skip if already sent
     if getattr(order, "confirmation_sent_at", None):
         return False
 
+    num = getattr(order, "number", None) or f"#{order.id}"
     subject_en = _tr("en", "subject_order_confirm", num=num)
     subject_de = _tr("de", "subject_order_confirm", num=num)
 
@@ -464,7 +404,6 @@ def send_order_confirmation(order, user_locale: str = "en", to: Optional[str] = 
       {_line_items_html(order)}
       <p>{_tr('en','thanks')}<br />{_tr('en','brand')}</p>
     """
-
     body_de = f"""
       <p>{_tr('de','salute')},</p>
       <p>{_tr('de','order_confirm_intro')}</p>
@@ -490,10 +429,10 @@ def send_bank_transfer_instructions(
     due_hours: int = 48,
     to: Optional[str] = None,
 ) -> bool:
-    """
-    bank_details = {"iban": "...", "bic": "...", "account_name": "..."}
-    """
     to_email = to or order_recipient_email(order)
+    if not to_email:
+        return False
+
     num = getattr(order, "number", None) or f"#{order.id}"
     amt = _money(getattr(order, "total_price", Decimal("0.00")))
     iban = (bank_details or {}).get("iban", "")
@@ -517,7 +456,6 @@ def send_bank_transfer_instructions(
       <p><em>{_tr('en','reference_note')}</em></p>
       <p>{_tr('en','kind_regards')}<br />{_tr('en','brand')}</p>
     """
-
     body_de = f"""
       <p>{_tr('de','salute')},</p>
       <p>{_tr('de','bank_transfer_intro')}</p>
@@ -538,31 +476,40 @@ def send_bank_transfer_instructions(
 # ------------- Installments -------------
 def send_installments_started_email(
     order,
-    months: int,
-    amounts_eur: Sequence[Decimal],
-    dates: Sequence[timezone.datetime],
+    months: Optional[int] = None,
+    amounts_eur: Optional[Sequence[Decimal]] = None,
+    dates: Optional[Sequence[timezone.datetime]] = None,
     user_locale: str = "en",
     to: Optional[str] = None,
 ) -> bool:
+    """
+    Compatible with both signatures:
+      - send_installments_started_email(order, to=...)
+      - send_installments_started_email(order, months, amounts_eur, dates, to=...)
+    If schedule data is missing, send a simple confirmation email.
+    """
     to_email = to or order_recipient_email(order)
-    num = getattr(order, "number", None) or f"#{order.id}"
+    if not to_email:
+        return False
 
+    num = getattr(order, "number", None) or f"#{order.id}"
     subject_en = _tr("en", "subject_installments_started", num=num)
     subject_de = _tr("de", "subject_installments_started", num=num)
 
-    # Build schedule table
-    try:
-        rows_en = []
-        rows_de = []
-        for amt, dt in zip(amounts_eur, dates):
-            when = timezone.localtime(dt).strftime("%Y-%m-%d")
-            rows_en.append(f"<tr><td>{when}</td><td>{_money(amt)}</td></tr>")
-            rows_de.append(f"<tr><td>{when}</td><td>{_money(amt)}</td></tr>")
-        table_en = "<table cellpadding='6' cellspacing='0' border='1'><tr><th>Date</th><th>Amount</th></tr>" + "".join(rows_en) + "</table>"
-        table_de = "<table cellpadding='6' cellspacing='0' border='1'><tr><th>Datum</th><th>Betrag</th></tr>" + "".join(rows_de) + "</table>"
-    except Exception:
-        logger.exception("Failed to render installments schedule for order %s", order.id)
-        table_en = table_de = ""
+    table_en = table_de = ""
+    if months and amounts_eur and dates:
+        try:
+            rows_en = []
+            rows_de = []
+            for amt, dt in zip(amounts_eur, dates):
+                when = timezone.localtime(dt).strftime("%Y-%m-%d")
+                rows_en.append(f"<tr><td>{when}</td><td>{_money(amt)}</td></tr>")
+                rows_de.append(f"<tr><td>{when}</td><td>{_money(amt)}</td></tr>")
+            table_en = "<table cellpadding='6' cellspacing='0' border='1'><tr><th>Date</th><th>Amount</th></tr>" + "".join(rows_en) + "</table>"
+            table_de = "<table cellpadding='6' cellspacing='0' border='1'><tr><th>Datum</th><th>Betrag</th></tr>" + "".join(rows_de) + "</table>"
+        except Exception:
+            logger.exception("Failed to render installments schedule for order %s", order.id)
+            table_en = table_de = ""
 
     body_en = f"""
       <p>{_tr('en','salute')},</p>
@@ -582,11 +529,13 @@ def send_installments_started_email(
     mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
     return _send_email(mail.subject, mail.text, mail.html, to_email)
 
-# ------------- Invoice email -------------
+# ------------- Invoice email (attaches PDF if present) -------------
 def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None) -> bool:
     to_email = to or order_recipient_email(order)
-    num = getattr(order, "number", None) or f"#{order.id}"
+    if not to_email:
+        return False
 
+    num = getattr(order, "number", None) or f"#{order.id}"
     subject_en = _tr("en", "subject_invoice", num=num)
     subject_de = _tr("de", "subject_invoice", num=num)
 
@@ -597,7 +546,6 @@ def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None)
       {_line_items_html(order)}
       <p>{_tr('en','thanks')}<br />{_tr('en','brand')}</p>
     """
-
     body_de = f"""
       <p>{_tr('de','salute')},</p>
       <p>{_tr('de','invoice_ready_intro')}</p>
@@ -608,22 +556,18 @@ def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None)
 
     mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
 
-    # Build and send with invoice attachment
     try:
         with get_connection() as conn:
             msg = EmailMultiAlternatives(
                 subject=mail.subject,
                 body=mail.text,
                 from_email=_from_email(),
-                to=[to_email] if to_email else [],
+                to=[to_email],
                 bcc=list(_bcc_defaults()),
                 connection=conn,
             )
             msg.attach_alternative(mail.html, "text/html")
             _attach_invoice_if_available(order, msg)
-            if not msg.to:
-                logger.warning("No recipient for invoice email on order %s", order.id)
-                return False
             msg.send()
         return True
     except Exception:

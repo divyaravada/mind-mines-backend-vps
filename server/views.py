@@ -65,8 +65,6 @@ from .utils.emails import (
     send_stock_alert_email, send_installments_started_email,
 )
 
-
-
 import stripe
 try:
     stripe_error = stripe.error
@@ -90,10 +88,7 @@ SIGNER_SALT = "invoice-public-download-v1"
 INVOICE_TOKEN_MAX_AGE = 60 * 60 * 2
 
 def _get_signer():
-    """
-    Returns a TimestampSigner tied to our SECRET_KEY and salt.
-    Used for guest invoice download tokens.
-    """
+    """TimestampSigner tied to SECRET_KEY and salt."""
     return TimestampSigner(key=settings.SECRET_KEY, salt=SIGNER_SALT)
 
 # Returns window default: 15 days
@@ -134,7 +129,7 @@ def build_guest_invoice_download_url(order) -> Optional[str]:
     if not inv or not inv.pdf:
         return None
     payload = {"order_id": order.id, "invoice": inv.number}
-    signer = _get_signer()  # <-- add this
+    signer = _get_signer()
     token = signer.sign(json.dumps(payload))
     base = getattr(settings, "FRONTEND_URL", "https://mindmines.eu").rstrip("/")
     api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
@@ -731,7 +726,7 @@ class OrderAdminUpdateAPIView(APIView):
     permission_classes = [IsAdminUser]
     def patch(self, request, pk):
         order = get_object_or_404(Order, pk=pk)
-        allowed = {"status", "tracking_number"}
+        allowed = {"status", "tracking_number", "tracking_carrier", "tracking_url", "shipped_at", "delivered_at"}
         prev_status = order.status
         updated = False
         for field in allowed:
@@ -742,6 +737,7 @@ class OrderAdminUpdateAPIView(APIView):
             return Response({"detail": "No updatable fields provided."}, status=400)
         order.save()
 
+        # status transitions -> emails and stock/invoice handling
         if prev_status != "paid" and order.status == "paid":
             inv = generate_invoice_pdf(order)
             _safe(order.reserve_stock_atomic)
@@ -750,12 +746,13 @@ class OrderAdminUpdateAPIView(APIView):
                 send_invoice_email(order, user_locale=user_locale, to=_order_to(order))
             except Exception:
                 pass
+        elif prev_status != "processing" and order.status == "processing":
             try:
                 locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
                 send_order_confirmation(order, user_locale=locale, to=_order_to(order))
             except Exception:
                 pass
-        if prev_status != "cancelled" and order.status == "cancelled":
+        elif prev_status != "failed" and order.status == "failed":
             _safe(order.release_stock_atomic)
 
         return Response(OrderReadSerializer(order, context={"request": request}).data, status=200)
@@ -763,11 +760,13 @@ class OrderAdminUpdateAPIView(APIView):
 class SetTrackingAPIView(APIView):
     permission_classes = [IsAdminUser]
     def post(self, request, pk):
-        tracking = (request.data.get("tracking_number") or "").strip()
         order = get_object_or_404(Order, pk=pk)
-        if hasattr(order, "tracking_number"):
-            order.tracking_number = tracking
-            order.save(update_fields=["tracking_number"])
+        order.tracking_number = (request.data.get("tracking_number") or "").strip()
+        order.tracking_carrier = (request.data.get("tracking_carrier") or "").strip()
+        order.tracking_url = (request.data.get("tracking_url") or "").strip()
+        if not order.shipped_at:
+            order.shipped_at = timezone.now()
+        order.save(update_fields=["tracking_number","tracking_carrier","tracking_url","shipped_at"])
         inv = generate_invoice_pdf(order)
         user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
         send_invoice_email(order, user_locale=user_locale)
@@ -959,7 +958,6 @@ class PaypalCreateOrder(PaypalBase):
     1. Create local Order(status=pending, payment_method='paypal').
     2. Call PayPal /v2/checkout/orders with intent CAPTURE.
     3. Return {id: paypal_id, order_id: local_order_id} to frontend.
-       PayPal Pay Later is also just "paypal" from our side — PayPal decides.
     """
 
     def post(self, request):
@@ -1083,9 +1081,9 @@ class PaypalCaptureOrder(PaypalBase):
             # stock reservation
             _safe(order.reserve_stock_atomic)
 
-            # generate invoice etc. (deferred to pipeline or here)
+            # invoice & numbering
             order.assign_unique_invoice_number()
-            # generate_invoice_pdf(order); send emails if you want immediate dispatch
+            # generate_invoice_pdf(order)  # generate in pipeline/webhook if preferred
 
         return Response({"status": "COMPLETED"}, status=200)
 
@@ -1188,6 +1186,13 @@ class StripeCreateIntent(APIView):
 
         # create PaymentIntent
         try:
+            intent = stripe.PaymentIntent.create(
+                amount=_amount_cents(order.total_price),
+                currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
+                payment_method_types=pm_types,
+                metadata={"order_id": str(order.id)}),
+        except TypeError:
+            # handle trailing comma above (tuple) in some environments
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
@@ -1568,7 +1573,10 @@ def stripe_webhook(request):
         # stock, invoice, email
         _safe(order.reserve_stock_atomic)
         order.assign_unique_invoice_number()
-        # generate_invoice_pdf(order); send emails (optional here)
+        # Invoice + email (per requirements)
+        generate_invoice_pdf(order)
+        user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+        _safe(send_invoice_email, order, user_locale=user_locale, to=_order_to(order))
 
     # payment_intent.succeeded => normal card, klarna, sofort, giropay
     if etype == "payment_intent.succeeded":
@@ -1831,11 +1839,7 @@ class SendBirthdayCouponAPIView(APIView):
             prof = getattr(u, "profile", None)
             if not (email and prof):
                 continue
-            bday = None
-            for fname in ["birth_date", "birthday", "dob", "date_of_birth"]:
-                if hasattr(prof, fname):
-                    bday = getattr(prof, fname)
-                    break
+            bday = getattr(prof, "date_of_birth", None)
             try:
                 if bday and getattr(bday, "month", None) and getattr(bday, "day", None):
                     if bday.month == run_dt.month and bday.day == run_dt.day:
@@ -1935,7 +1939,7 @@ class GuestOrderLookupAPIView(APIView):
         for it in order.items.all():
             items_data.append({
                 "product_id": it.product_id,
-                "name": it.product_name,
+                "name": it.product_name,  # uses snapshot property
                 "quantity": it.quantity,
                 "unit_price": f"{it.unit_price:.2f}",
                 "line_total": f"{it.line_total():.2f}",
@@ -2060,6 +2064,8 @@ class OrderPaymentStatusUpdateAPIView(APIView):
                 order.status = "processing"
                 updates.append("status")
                 order.save(update_fields=list(set(updates)))
+                # send "order created / pending" confirmation (Processing)
+                _safe(send_order_confirmation, order, user_locale=getattr(getattr(order.user, "profile", None), "language", "en") or "en", to=_order_to(order))
             else:
                 order.save(update_fields=list(set(updates)) or ["payment_status"])
         else:

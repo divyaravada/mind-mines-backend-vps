@@ -1,8 +1,9 @@
+# server/signals.py
 from __future__ import annotations
 
-from django.db.models.signals import post_save, pre_save
-from django.contrib.auth import get_user_model
 from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.utils import timezone
 
@@ -15,13 +16,13 @@ from .utils.emails import (
 )
 
 # --------------------------------------------------------------------
-# Helpers for Order status tracking and notifications
+# Order status tracking and notifications
 # --------------------------------------------------------------------
 
-def _capture_prev_status(sender, instance, **kwargs):
+def _capture_prev_status(sender, instance: Order, **kwargs):
     """
-    Store previous status on instance._prev_status before save,
-    so we can detect transitions (e.g. pending -> paid).
+    Stash previous status on instance._prev_status before save,
+    so we can detect transitions (e.g., pending -> paid).
     """
     if instance.pk:
         try:
@@ -41,10 +42,9 @@ def create_or_update_user_profile(sender, instance, created, **kwargs):
     else:
         Profile.objects.get_or_create(user=instance)
 
-def remember_old_status(sender, instance, **kwargs):
+def remember_old_status(sender, instance: Order, **kwargs):
     """
-    Stash old status on instance._old_status before saving.
-    We'll compare in post_save.
+    Store old status on instance._old_status before saving. Compared in post_save.
     """
     if not instance.pk:
         instance._old_status = None
@@ -55,10 +55,10 @@ def remember_old_status(sender, instance, **kwargs):
     except Order.DoesNotExist:
         instance._old_status = None
 
-def on_paid_generate_and_mail(sender, instance, created, **kwargs):
+def on_paid_generate_and_mail(sender, instance: Order, created, **kwargs):
     """
     After an Order is saved:
-    - if it just became paid, generate invoice and send invoice + confirmation.
+      - if it just became paid, generate invoice and send invoice + confirmation.
     """
     if created:
         return
@@ -70,16 +70,19 @@ def on_paid_generate_and_mail(sender, instance, created, **kwargs):
     if not became_paid:
         return
 
-    # Generate invoice PDF (idempotent)
+    # Generate invoice (idempotent)
     generate_invoice_pdf(instance)
 
     # Send invoice email
     try:
-        send_invoice_email(instance)
+        # If your send_invoice_email supports a locale param, pass it;
+        # otherwise the helper will choose defaults.
+        user_locale = getattr(getattr(instance.user, "profile", None), "language", "en") or "en"
+        send_invoice_email(instance, user_locale=user_locale)
     except Exception:
         pass
 
-    # Send confirmation email (bilingual, idempotent via confirmation_sent_at)
+    # Send confirmation
     try:
         locale = getattr(getattr(instance.user, "profile", None), "language", "en") or "en"
         send_order_confirmation(instance, user_locale=locale)
@@ -96,11 +99,11 @@ def ensure_order_number(sender, instance: Order, created, **kwargs):
             instance.assign_unique_order_number()
         except AttributeError:
             instance.number = f"MM{instance.pk:08d}"
-        instance.save(update_fields=["number"])
+        type(instance).objects.filter(pk=instance.pk).update(number=instance.number)
 
-def stamp_status_times(sender, instance, created, **kwargs):
+def stamp_status_times(sender, instance: Order, created, **kwargs):
     """
-    Add delivered_at / cancelled_at timestamps the moment status flips.
+    Add delivered_at / cancelled_at timestamps when status flips.
     """
     old = getattr(instance, "_old_status", None)
     updates = {}
@@ -130,18 +133,20 @@ def _stash_old_qty(sender, instance: Product, **kwargs):
 
 def _build_unsub_url(alert: StockAlert) -> str:
     base = getattr(settings, "FRONTEND_URL", "").rstrip("/")
-    return f"{base}/unsubscribe/{alert.unsubscribe_token}/"
+    api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
+    # Keep parity with StockAlertUnsubscribeView
+    return f"{base}{api_base}/stock-alerts/unsubscribe/{alert.unsubscribe_token}/"
 
 def _notify_restock(sender, instance: Product, created, **kwargs):
     """
     After saving a Product:
-    If stock goes from <=0 to >0, email everyone with stock alerts for this product.
+    If stock goes from <=0 to >0, email everyone with active stock alerts for this product.
     """
     try:
         old_qty = getattr(instance, "_old_qty", None)
         new_qty = int(getattr(instance, "quantity", 0) or 0)
         if old_qty is None:
-            # new product, don't spam
+            # new product, do not notify on initial create
             return
         if (old_qty <= 0) and (new_qty > 0):
             alerts = StockAlert.objects.filter(product=instance, is_active=True).order_by("created_at")
@@ -153,13 +158,12 @@ def _notify_restock(sender, instance: Product, created, **kwargs):
                     continue
                 alert.mark_notified()
     except Exception:
-        # never crash request due to email issues
+        # email or data issues should not crash request
         pass
 
 # --------------------------------------------------------------------
 # Public entry point called by apps.py
 # --------------------------------------------------------------------
-
 def connect_signals():
     """
     Attach all signal handlers with dispatch_uids to avoid duplicate connects.

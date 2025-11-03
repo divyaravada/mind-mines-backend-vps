@@ -1,3 +1,4 @@
+#server/models.py
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.contrib.postgres.fields import ArrayField
 from django.db import models, transaction
@@ -94,7 +95,7 @@ class CustomUserManager(BaseUserManager):
 
 
 class User(AbstractUser):
-    # username becomes optional; email is the login identifier
+    # username optional; email is the login identifier
     email = models.EmailField(unique=True)
     username = models.CharField(max_length=100, blank=True, null=True)
 
@@ -118,13 +119,15 @@ class Profile(models.Model):
     stripe_customer_id = models.CharField(max_length=64, blank=True, null=True)
 
     # Birthday coupon logic
-    date_of_birth = models.DateField(null=True, blank=True, help_text="Used for birthday coupon emails")
+    date_of_birth = models.DateField(null=True, blank=True, db_index=True,
+                                     help_text="Used for birthday coupon emails")
 
     # Preferred language for emails/content
     language = models.CharField(max_length=5, default="en", help_text="Preferred language code ('en' or 'de').")
 
     def __str__(self):
         return f"{self.user.email} profile"
+
 
 
 # ----------------- Addresses -----------------
@@ -141,8 +144,8 @@ class Address(models.Model):
     # Checkout-friendly fields
     first_name = models.CharField(max_length=100, blank=True)
     last_name = models.CharField(max_length=100, blank=True)
-    address_line1 = models.Char_length = models.CharField(max_length=255, blank=True)  # street + house no.
-    apartment = models.CharField(max_length=100, blank=True)                           # Address supplement
+    address_line1 = models.CharField(max_length=255, blank=True)  # street + house no. (FIXED)
+    apartment = models.CharField(max_length=100, blank=True)      # Address supplement
     postal_code = models.CharField(max_length=20, blank=True)
     city = models.CharField(max_length=100, blank=True)
     country = models.CharField(max_length=100, blank=True)
@@ -162,7 +165,11 @@ class Address(models.Model):
 
     class Meta:
         constraints = [
-            UniqueConstraint(fields=["user"], condition=Q(is_default=True), name="one_default_address_per_user"),
+            UniqueConstraint(fields=["user"], condition=Q(is_default=True),
+                             name="one_default_address_per_user"),
+        ]
+        indexes = [
+            models.Index(fields=["user", "is_default"]),
         ]
 
     def save(self, *args, **kwargs):
@@ -172,8 +179,6 @@ class Address(models.Model):
         - When creating with is_default=True, save as non-default, then atomically set default.
         """
         if self._state.adding and self.is_default:
-            make_default_after_create = True
-            self.is_default = False
             super().save(*args, **kwargs)
             self.set_default_for_user()
             return
@@ -272,8 +277,8 @@ class StoneEnquiry(models.Model):
 
 class Product(models.Model):
     # Titles
-    title_en = models.CharField(max_length=255, default="Default Title")
-    title_de = models.CharField(max_length=255, default="Default Title")
+    title_en = models.CharField(max_length=255, default="")
+    title_de = models.CharField(max_length=255, default="")
 
     # 3 short bullet-style lines (USPs)
     short_description1_en = models.CharField(max_length=255, blank=True)
@@ -339,6 +344,10 @@ class Product(models.Model):
         ordering = ["-created_at"]
         constraints = [
             CheckConstraint(check=Q(quantity__gte=0), name="product_quantity_nonnegative"),
+        ]
+        indexes = [
+            models.Index(fields=["category"]),
+            models.Index(fields=["created_at"]),
         ]
 
     def clean(self):
@@ -528,6 +537,10 @@ class Wishlist(models.Model):
     class Meta:
         ordering = ["-id"]
         unique_together = ("user", "product")
+        indexes = [
+            models.Index(fields=["user"]),
+            models.Index(fields=["product"]),
+        ]
 
 
 # ----------------- Contact & Newsletter -----------------
@@ -563,8 +576,7 @@ class Order(models.Model):
         ("sepa_installments", "SEPA Direct Debit Installments"),
         ("klarna", "Klarna (Stripe Klarna)"),
         ("paypal", "PayPal / PayPal Pay Later"),
-        ("bank", "Bank Transfer"),
-    ]
+            ]
 
     STATUS_CHOICES = [
         ("pending", "Pending"),
@@ -601,28 +613,38 @@ class Order(models.Model):
     ship_city = models.CharField(max_length=120, blank=True)
     ship_country = models.CharField(max_length=2, default="DE")
     ship_phone = models.CharField(max_length=64, blank=True)
-
     ship_street_name  = models.CharField(max_length=255, blank=True, default="")
     ship_house_number = models.CharField(max_length=64,  blank=True, default="")
 
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    discount_total = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    shipping_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    vat_total = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     total_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+
     payment_method = models.CharField(max_length=32, choices=PAYMENT_METHODS, blank=True)
     installments_months = models.PositiveIntegerField(null=True, blank=True)
 
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
-    payment_status = models.CharField(max_length=30, choices=PAYMENT_STATUS_CHOICES, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True)
+    payment_status = models.CharField(max_length=30, choices=PAYMENT_STATUS_CHOICES, default="", db_index=True)
     payment_ref = models.CharField(max_length=128, blank=True)  # Stripe PI id, PayPal order id, schedule id, etc.
     payment_id = models.CharField(max_length=128, blank=True)   # final captured charge id etc.
+
+    shipped_at = models.DateTimeField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    tracking_number = models.CharField(max_length=64, blank=True, default="")
+    tracking_carrier = models.CharField(max_length=64, blank=True, default="")
+    tracking_url = models.URLField(blank=True, default="")
 
     paid_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    delivered_at = models.DateTimeField(null=True, blank=True)
-
     # bookkeeping
     stripe_pi = models.CharField(max_length=128, blank=True)  # PaymentIntent id
     invoice_number = models.CharField(max_length=64, blank=True)
     confirmation_sent_at = models.DateTimeField(null=True, blank=True)
+    invoice_sent_at = models.DateTimeField(null=True, blank=True)
+    failed_email_sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [
@@ -631,6 +653,11 @@ class Order(models.Model):
                 condition=Q(invoice_number__isnull=False) & ~Q(invoice_number=""),
                 name="uniq_invoice_number_nonempty",
             ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["payment_status"]),
+            models.Index(fields=["email"]),
         ]
 
     def __str__(self):
@@ -653,6 +680,43 @@ class Order(models.Model):
         for it in self.items.all():
             total += it.line_total()
         return _q2(total)
+
+    def compute_totals(self, shipping_price: Decimal = None, vat_rate: Decimal = DEFAULT_VAT_RATE):
+        """
+        Recalculate subtotal/discount/vat/total based on items and any attached coupon.
+        Store results on the model (does not save).
+        """
+        items_qs = list(self.items.select_related("product"))
+        # items subtotal uses each item's unit_price (already gross) * qty
+        subtotal = Decimal("0.00")
+        for it in items_qs:
+            subtotal += it.line_total()
+        subtotal = _q2(subtotal)
+
+        # coupon discount (if present)
+        discount = Decimal("0.00")
+        try:
+            if hasattr(self, "coupon_redemption") and self.coupon_redemption:
+                coupon = self.coupon_redemption.coupon
+                discount = coupon.discount_amount(self.user, items_qs, subtotal)
+        except Exception:
+            discount = Decimal("0.00")
+
+        # shipping
+        ship = _q2(Decimal(shipping_price) if shipping_price is not None else Decimal(self.shipping_price or 0))
+
+        # VAT portion informative (gross pricing): vat = (gross / (1+rate)) * rate
+        gross_after_discount = max(Decimal("0.00"), subtotal - discount)
+        vat_total = _q2((gross_after_discount / (Decimal(1) + Decimal(vat_rate))) * Decimal(vat_rate))
+
+        total = _q2(gross_after_discount + ship)
+
+        self.subtotal = _q2(subtotal)
+        self.discount_total = _q2(discount)
+        self.shipping_price = ship
+        self.vat_total = vat_total
+        self.total_price = total
+        return total
 
     # ---- stock helpers (to be called from service layer) ----
 

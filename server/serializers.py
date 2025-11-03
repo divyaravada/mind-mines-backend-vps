@@ -54,10 +54,6 @@ class UserSerializer(serializers.ModelSerializer):
 class ProfileSerializer(serializers.ModelSerializer):
     """
     Profile surface for 'My Account' settings.
-
-    Includes:
-    - language (so we know which locale to prefer in emails)
-    - date_of_birth (for birthday coupon logic)
     """
     class Meta:
         model = Profile
@@ -518,7 +514,7 @@ class ProductMiniSerializer(serializers.ModelSerializer):
     def get_thumbnail_url(self, obj):
         request = self.context.get("request")
         try:
-            thumb = getattr(obj, "thumbnail", None)
+            thumb = getattr(obj, "thumbnail", None)  # optional
             if thumb and getattr(thumb, "url", None):
                 return self._abs(request, thumb.url)
             if getattr(obj, "image", None) and getattr(obj.image, "url", None):
@@ -561,20 +557,12 @@ class NewsletterSubscriberSerializer(serializers.ModelSerializer):
 
 
 # -----------------
-# Basic legacy order (single-line style) — (kept for compatibility)
-# -----------------
-
-class OrderSerializer(serializers.ModelSerializer):
-    product = ProductSerializer()
-
-    class Meta:
-        model = Order
-        fields = ["id", "product", "quantity", "created_at"]
-
-
-# -----------------
 # Order detail / items
 # -----------------
+
+def quant2(val: Decimal) -> Decimal:
+    return Decimal(val).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
 
 class OrderItemReadSerializer(serializers.ModelSerializer):
     product = ProductMiniSerializer()
@@ -586,55 +574,55 @@ class OrderItemReadSerializer(serializers.ModelSerializer):
 
     def get_line_total(self, obj):
         try:
-            return (
-                Decimal(obj.unit_price) * obj.quantity
-            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            return quant2(Decimal(obj.unit_price) * obj.quantity)
         except Exception:
             return Decimal("0.00")
 
 
-class ShippingSnapshotSerializer(serializers.Serializer):
-    first_name = serializers.CharField()
-    last_name = serializers.CharField()
-    line1 = serializers.CharField()
-    line2 = serializers.CharField()
-    postal_code = serializers.CharField()
-    city = serializers.CharField()
-    country = serializers.CharField()
-    phone = serializers.CharField()
-    street_name = serializers.CharField(required=False, allow_blank=True)
-    house_number = serializers.CharField(required=False, allow_blank=True)
-
-
 class OrderReadSerializer(serializers.ModelSerializer):
     class ItemOut(serializers.ModelSerializer):
+        product_name = serializers.SerializerMethodField()
         line_total = serializers.SerializerMethodField()
+
         class Meta:
             model = OrderItem
-            fields = ("product_id","product_name","quantity","unit_price","line_total")
+            fields = ("product_id", "product_name", "quantity", "unit_price", "line_total")
+
+        def get_product_name(self, obj):
+            return obj.product_name  # uses property to prefer snapshot
+
         def get_line_total(self, obj):
             return f"{obj.line_total():.2f}"
 
     items = ItemOut(source="items.all", many=True, read_only=True)
 
-    # Newly exposed helper fields
+    # helper fields
     shipping_snapshot = serializers.SerializerMethodField()
     payment_method_label = serializers.SerializerMethodField()
     invoice_pdf = serializers.SerializerMethodField()
     is_returnable = serializers.SerializerMethodField()
     return_deadline = serializers.SerializerMethodField()
     coupon_code = serializers.SerializerMethodField()
-    payment_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = (
-            "id","number","status","payment_status","payment_method","payment_method_label",
-            "installments_months","email","total_price",
-            "ship_first_name","ship_last_name","ship_line1","ship_line2",
-            "ship_postal","ship_city","ship_country","ship_phone",
-            "created_at","items","shipping_snapshot","invoice_pdf",
-            "is_returnable","return_deadline","coupon_code"
+            "id", "number",
+            "status", "payment_status",
+            "payment_method", "payment_method_label",
+            "installments_months",
+            "email",
+            # money breakdown
+            "subtotal", "discount_total", "shipping_price", "vat_total", "total_price",
+            # shipping snapshot fields
+            "ship_first_name", "ship_last_name", "ship_line1", "ship_line2",
+            "ship_postal", "ship_city", "ship_country", "ship_phone",
+            # logistics
+            "tracking_number", "tracking_carrier", "tracking_url",
+            "created_at", "shipped_at", "delivered_at",
+            # derived / nested
+            "items", "shipping_snapshot", "invoice_pdf",
+            "is_returnable", "return_deadline", "coupon_code",
         )
 
     def get_shipping_snapshot(self, obj):
@@ -674,7 +662,7 @@ class OrderReadSerializer(serializers.ModelSerializer):
                 return self._abs(request, f.url)
         except Exception:
             pass
-        # Fallback: legacy FileField on Order
+        # Fallback: legacy FileField on Order (if ever existed)
         try:
             f = getattr(obj, "invoice_pdf", None)
             if f and getattr(f, "url", None):
@@ -697,13 +685,13 @@ class OrderReadSerializer(serializers.ModelSerializer):
             return None
 
     def get_coupon_code(self, obj):
-        return getattr(obj.coupon, "code", None)
-
-    def get_payment_status(self, obj):
-        # explicit payment_status if set, else infer from status
-        return getattr(obj, "payment_status", "") or (
-            "paid" if obj.status == "paid" else obj.status
-        )
+        try:
+            red = getattr(obj, "coupon_redemption", None)
+            if red and red.coupon:
+                return red.coupon.code
+        except Exception:
+            pass
+        return None
 
 
 class ReturnRequestSerializer(serializers.ModelSerializer):
@@ -716,9 +704,6 @@ class ReturnRequestSerializer(serializers.ModelSerializer):
 # Checkout / create order
 # -----------------
 
-def quant2(val: Decimal) -> Decimal:
-    return val.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
 class ShippingInSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=120)
     last_name  = serializers.CharField(max_length=120, allow_blank=True)
@@ -728,13 +713,15 @@ class ShippingInSerializer(serializers.Serializer):
     city       = serializers.CharField(max_length=120)
     country    = serializers.CharField(max_length=2)
     phone      = serializers.CharField(max_length=64, allow_blank=True, required=False)
-    # NEW (optional, shown in admin if available)
+    # Optional (shown in admin if available)
     street_name = serializers.CharField(max_length=255, allow_blank=True, required=False)
     house_number = serializers.CharField(max_length=64,  allow_blank=True, required=False)
-    
+
+
 class OrderItemIn(serializers.Serializer):
     product_id = serializers.IntegerField()
     qty = serializers.IntegerField(min_value=1, max_value=99)
+
 
 class OrderCreateSerializer(serializers.Serializer):
     email = serializers.EmailField()
@@ -746,17 +733,11 @@ class OrderCreateSerializer(serializers.Serializer):
     payment_method = serializers.CharField(max_length=64)
 
     # installments inputs
-    installments_months = serializers.IntegerField(
-        required=False, allow_null=True
-    )
-    payment_method_id = serializers.CharField(
-        required=False, allow_blank=True, allow_null=True
-    )
+    installments_months = serializers.IntegerField(required=False, allow_null=True)
+    payment_method_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     # optional for idempotency (frontend cart signature)
-    idempotency_key = serializers.CharField(
-        required=False, allow_blank=True
-    )
+    idempotency_key = serializers.CharField(required=False, allow_blank=True)
 
     # --- helpers ---
 
@@ -827,7 +808,7 @@ class OrderCreateSerializer(serializers.Serializer):
         shipping["country"] = country_norm
         attrs["shipping"] = shipping
 
-        # methods restricted to DE
+        # methods restricted to DE (tune as needed)
         if attrs["payment_method"] in ("sepa_debit", "sepa_installments", "bank_transfer"):
             if country_norm != "DE":
                 raise serializers.ValidationError({
@@ -859,25 +840,25 @@ class OrderCreateSerializer(serializers.Serializer):
 
     def _apply_coupon(self, subtotal: Decimal, code: str, user):
         """
-        Apply your real Coupon model logic.
-        Returns (total_after_discount, discount_amount)
+        Apply Coupon model logic.
+        Returns (total_after_discount, discount_amount, coupon_instance_or_None)
         """
         if not code:
-            return subtotal, Decimal("0.00")
+            return subtotal, Decimal("0.00"), None
 
         coup = Coupon.objects.filter(code__iexact=code.strip()).first()
         if not coup or not coup.active:
-            return subtotal, Decimal("0.00")
+            return subtotal, Decimal("0.00"), None
 
         ok, reason = coup.can_apply(user, self.validated_data["items"], subtotal)
         if not ok:
-            return subtotal, Decimal("0.00")
+            return subtotal, Decimal("0.00"), None
 
         discount = quant2(coup.discount_amount(user, self.validated_data["items"], subtotal))
         total = quant2(subtotal - discount)
         if total < Decimal("0.00"):
             total = Decimal("0.00")
-        return total, discount
+        return total, discount, coup
 
     # --- creation ---
 
@@ -892,25 +873,31 @@ class OrderCreateSerializer(serializers.Serializer):
         installments_months = validated_data.get("installments_months")
         idempotency_key = (validated_data.get("idempotency_key") or "").strip() or None
 
-        # totals
+        # totals (preliminary)
         subtotal = self._calc_subtotal(items_data)
-        total_price, discount = self._apply_coupon(subtotal, coupon_code, user)
+        total_after_discount, discount, coupon_obj = self._apply_coupon(subtotal, coupon_code, user)
 
-        # safety: Stripe/PayPal cannot charge 0 €
-        if total_price <= Decimal("0.00"):
+        # safety: online payment cannot be 0 €
+        if total_after_discount <= Decimal("0.00"):
             raise serializers.ValidationError({
-                "detail": "Cart total is 0.00 €. Cannot create online payment."
+                "detail": "Your total is 0.00 € after discounts. We can't create an online payment for 0 €. Please remove the full discount or add another item."
             })
 
         with transaction.atomic():
-            # (Optionally: implement idempotency on your Order model if needed)
             order = Order.objects.create(
                 user=user if user else None,
                 email=validated_data["email"].strip().lower(),
-                total_price=total_price,
+                # money fields (shipping/vat will be recomputed below)
+                subtotal=subtotal,
+                discount_total=discount,
+                shipping_price=Decimal("0.00"),
+                vat_total=Decimal("0.00"),
+                total_price=total_after_discount,
+                # payment
                 payment_method=payment_method,
                 installments_months=installments_months if installments_months else None,
                 status="pending",
+                # snapshot shipping
                 ship_first_name=shipping_data["first_name"],
                 ship_last_name=shipping_data["last_name"],
                 ship_line1=shipping_data["line1"],
@@ -923,47 +910,45 @@ class OrderCreateSerializer(serializers.Serializer):
                 ship_house_number=shipping_data.get("house_number", ""),
             )
 
+            # Create items and compute using product.final_price_gross
+            items_created = []
             for it in items_data:
                 prod = Product.objects.get(pk=it["product_id"])
                 unit = Decimal(str(getattr(prod, "final_price_gross", None) or prod.price_gross))
-                OrderItem.objects.create(
+                item = OrderItem.objects.create(
                     order=order,
                     product=prod,
-                    product_name=prod.title_en or prod.title_de or str(prod),
+                    product_name_snapshot=(prod.title_en or prod.title_de or str(prod)),
                     quantity=it["qty"],
                     unit_price=unit,
                 )
+                items_created.append(item)
+
+            # If you want to attach coupon to order via CouponRedemption, do it in your view/service:
+            #   CouponRedemption.objects.create(coupon=coupon_obj, user=user if user else None, order=order)
+            # Here we just recompute totals to populate vat_total, etc.
+            order.compute_totals(shipping_price=order.shipping_price)  # uses default VAT
+            order.save(update_fields=["subtotal", "discount_total", "shipping_price", "vat_total", "total_price"])
 
         return order
 
 
 # -----------------
-# Order list/detail for simple/legacy views (kept)
+# Order list/detail (compact)
 # -----------------
 
 class OrderListItemSerializer(serializers.ModelSerializer):
-    product = ProductMiniSerializer()
+    items_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
-        fields = ["id", "quantity", "total_price", "product"]
+        fields = ["id", "number", "status", "payment_status", "total_price", "created_at", "items_count"]
 
-
-class OrderDetailSerializer(serializers.ModelSerializer):
-    product = ProductMiniSerializer()
-    shipping_address = AddressSerializer()
-
-    class Meta:
-        model = Order
-        fields = [
-            "id",
-            "created_at",
-            "status",
-            "quantity",
-            "total_price",
-            "product",
-            "shipping_address",
-        ]
+    def get_items_count(self, obj):
+        try:
+            return obj.items.count()
+        except Exception:
+            return 0
 
 
 # -----------------
@@ -1032,9 +1017,7 @@ class PromotionSerializer(serializers.ModelSerializer):
 # -----------------
 
 class ReviewSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(
-        source="product.title_en", read_only=True
-    )
+    product_name = serializers.CharField(source="product.title_en", read_only=True)
     image = serializers.SerializerMethodField()
     author_avatar_url = serializers.SerializerMethodField()
     user_name = serializers.SerializerMethodField()
@@ -1082,16 +1065,13 @@ class ReviewSerializer(serializers.ModelSerializer):
         if obj.author_name:
             return obj.author_name
         u = obj.user
-        # prefer profile.full_name, fallback username, fallback email localpart
         if hasattr(u, "profile") and getattr(u.profile, "full_name", ""):
             return u.profile.full_name
         return u.username or (u.email.split("@")[0] if u.email else "User")
 
     def get_is_owner(self, obj):
         req = self.context.get("request")
-        return bool(
-            req and req.user.is_authenticated and obj.user_id == req.user.id
-        )
+        return bool(req and req.user.is_authenticated and obj.user_id == req.user.id)
 
 
 class ReviewWriteSerializer(serializers.ModelSerializer):
@@ -1112,9 +1092,7 @@ class ReviewWriteSerializer(serializers.ModelSerializer):
 
     def validate_rating(self, v):
         if v < 1 or v > 5:
-            raise serializers.ValidationError(
-                "Rating must be between 1 and 5."
-            )
+            raise serializers.ValidationError("Rating must be between 1 and 5.")
         return v
 
 
@@ -1134,7 +1112,7 @@ class OnDemandOrderRequestSerializer(serializers.ModelSerializer):
             "message",
             "created_at",
         ]
-    read_only_fields = ["id", "created_at"]
+        read_only_fields = ["id", "created_at"]
 
     def validate(self, attrs):
         qty = int(attrs.get("quantity") or 0)
