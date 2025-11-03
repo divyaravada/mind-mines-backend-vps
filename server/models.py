@@ -620,13 +620,7 @@ class Order(models.Model):
     stripe_pi = models.CharField(max_length=128, blank=True)  # PaymentIntent id
     invoice_number = models.CharField(max_length=64, blank=True)
     confirmation_sent_at = models.DateTimeField(null=True, blank=True)
-    tracking_number = models.CharField(
-        max_length=64,
-        blank=True,
-        null=True,
-        default="",      # keeps existing code paths happy
-        help_text="Carrier tracking number (set when shipped)."
-    )
+    tracking_number = models.CharField(max_length=64, default="", blank=True)
 
     class Meta:
         constraints = [
