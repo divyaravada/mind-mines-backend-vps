@@ -324,7 +324,6 @@ class CustomUserAdmin(DjangoUserAdmin):
     search_fields = ("email", "username")
     
     def _user_addresses_referenced(self, user_id: int) -> bool:
-        # Works even if the ORM field was removed but the DB FK/column still exists.
         with connection.cursor() as cur:
             cur.execute("""
                 SELECT 1
