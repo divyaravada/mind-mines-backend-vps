@@ -295,7 +295,7 @@ class InvoiceAdmin(admin.ModelAdmin):
 @admin.register(User)
 class CustomUserAdmin(DjangoUserAdmin):
     model = User
-    list_display = ["email", "username,"] + ["is_active", "is_staff"]
+    list_display = ["email", "username", "is_active", "is_staff"]  # <-- fixed here
     ordering = ["email"]
     fieldsets = (
         (None, {"fields": ("email", "password", "username")}),
