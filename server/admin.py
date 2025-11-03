@@ -223,28 +223,52 @@ class OrderAdmin(admin.ModelAdmin):
     def cancelled_at(self, obj):  return getattr(obj, "cancelled_at", None)
 
     def shipping_snapshot_readonly(self, obj):
-        fn = getattr(obj, "ship_first_name", "") or ""
-        ln = getattr(obj, "ship_last_name", "") or ""
-        line1 = getattr(obj, "ship_line1", "") or ""
-        line2 = getattr(obj, "ship_line2", "") or ""
-        postal = getattr(obj, "ship_postal", "") or ""
-        city = getattr(obj, "ship_city", "") or ""
-        country = getattr(obj, "ship_country", "") or ""
-        phone = getattr(obj, "ship_phone", "") or ""
-        street_name = getattr(obj, "ship_street_name", "") or ""
-        house_number = getattr(obj, "ship_house_number", "") or ""
+        fn  = (getattr(obj, "ship_first_name", "") or "").strip()
+        ln  = (getattr(obj, "ship_last_name", "") or "").strip()
+        l1  = (getattr(obj, "ship_line1", "") or "").strip()
+        l2  = (getattr(obj, "ship_line2", "") or "").strip()
+        pc  = (getattr(obj, "ship_postal", "") or "").strip()
+        city = (getattr(obj, "ship_city", "") or "").strip()
+        cty  = (getattr(obj, "ship_country", "") or "").strip()
+        ph   = (getattr(obj, "ship_phone", "") or "").strip()
+        stn  = (getattr(obj, "ship_street_name", "") or "").strip()
+        hno  = (getattr(obj, "ship_house_number", "") or "").strip()
+        # detect if snapshot is basically empty
+        snapshot_missing = not any([fn, ln, l1, l2, pc, city, cty, ph, stn, hno])
+
+        # 2) Fallback to related Address (legacy flow)
+        if snapshot_missing:
+            addr = getattr(obj, "shipping_address", None)  # FK on older schema
+            if addr:
+                fn  = (getattr(addr, "first_name", "") or "").strip()
+                ln  = (getattr(addr, "last_name", "") or "").strip()
+                l1  = (getattr(addr, "address_line1", "") or "").strip()
+                l2  = (getattr(addr, "apartment", "") or "").strip()
+                pc  = (getattr(addr, "postal_code", "") or "").strip()
+                city = (getattr(addr, "city", "") or "").strip()
+                cty  = (getattr(addr, "country", "") or "").strip()
+                ph   = (getattr(addr, "phone", "") or "").strip()
+                stn  = (getattr(addr, "street_name", "") or "").strip()
+                hno  = (getattr(addr, "house_number", "") or "").strip()
+
+        # 3) Render
+        from django.utils.html import format_html
+        if not any([fn, ln, l1, l2, pc, city, cty, ph, stn, hno]):
+            return "-"
+
+        street_line = " ".join(x for x in [stn, hno] if x).strip()
         return format_html(
             "<div>"
             "<div><b>{fn}</b> {ln}</div>"
-            "<div>{line1}</div>"
-            "<div>{line2}</div>"
-            "<div>{postal} {city}</div>"
-            "<div>{country}</div>"
-            "<div>{phone}</div>"
-            "<div>Street: {street} {house}</div>"
+            "<div>{l1}</div>"
+            "<div>{l2}</div>"
+            "<div>{pc} {city}</div>"
+            "<div>{cty}</div>"
+            "<div>{ph}</div>"
+            "{street}"
             "</div>",
-            fn=fn, ln=ln, line1=line1, line2=line2, postal=postal, city=city,
-            country=country, phone=phone, street=street_name, house=house_number
+            fn=fn, ln=ln, l1=l1, l2=l2, pc=pc, city=city, cty=cty, ph=ph,
+            street=format_html("<div>Street: {}</div>", street_line) if street_line else "",
         )
     shipping_snapshot_readonly.short_description = "Shipping snapshot"
 
