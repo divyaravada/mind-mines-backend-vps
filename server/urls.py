@@ -56,20 +56,20 @@ from .views import (
 
     # Stripe
     StripeCreateIntent, StripeCardInstallmentsView,
-    StripeCreateSepaIntent, StripeSepaInstallmentsView, SepaPostConfirmView, stripe_webhook, OrderPaymentStatusUpdateAPIView,
-
+    StripeCreateSepaIntent, StripeSepaInstallmentsView,
+    SepaPostConfirmView, stripe_webhook, OrderPaymentStatusUpdateAPIView,
 
     # Returns / Cancellations
     OrderRequestReturnAPIView, OrderCancelRequestAPIView,
 
-    # Stock Alerts
+    # Stock Alerts / On-demand
     StockAlertCreateView, StockAlertUnsubscribeView, OnDemandOrderCreateView,
 
     # Admin birthday coupon send
     SendBirthdayCouponAPIView,
 
-    #Guest lookup
-    GuestOrderLookupAPIView,GuestInvoiceDownloadView
+    # Guest lookup / invoices
+    GuestOrderLookupAPIView, GuestInvoiceDownloadView,
 )
 
 sitemaps = {
@@ -86,10 +86,10 @@ def robots_txt(request):
     ]
     return HttpResponse("\n".join(lines), content_type="text/plain")
 
-router = DefaultRouter()  # no viewsets registered (ok to keep)
+router = DefaultRouter()  # (no viewsets yet)
 
 urlpatterns = [
-    # -------- Auth / JWT --------
+    # -------- Auth / Account --------
     path("users/register/", RegisterView.as_view(), name="register"),
     path("users/profile/", UserProfileAPIView.as_view(), name="user_profile"),
     path("users/account/", AccountAPIView.as_view(), name="account"),
@@ -143,7 +143,6 @@ urlpatterns = [
     path("orders/<int:pk>/invoice/", OrderInvoiceAPIView.as_view(), name="order_invoice"),
     path("orders/<int:pk>/invoice/download/", InvoiceDownloadView.as_view(), name="order_invoice_download"),
 
-   
     # -------- Orders (admin helpers) --------
     path("admin/orders/<int:pk>/update/", OrderAdminUpdateAPIView.as_view(), name="admin_order_update"),
     path("admin/orders/<int:pk>/set-tracking/", SetTrackingAPIView.as_view(), name="admin_set_tracking"),
@@ -162,12 +161,15 @@ urlpatterns = [
 
     # -------- Stripe --------
     path("stripe/create-intent/", StripeCreateIntent.as_view(), name="stripe_create_intent"),
-    path("stripe/installments/card/", StripeCardInstallmentsView.as_view(), name="stripe_installments_card"),
+    path("stripe/create-intent/card", StripeCreateIntent.as_view(), name="stripe_create_intent_card_compat"),  # back-compat
     path("stripe/create-intent/sepa/", StripeCreateSepaIntent.as_view(), name="stripe_create_sepa_intent"),
+    path("stripe/create-intent/sepa", StripeCreateSepaIntent.as_view(), name="stripe_create_sepa_intent_compat"),  # optional no-slash
+    path("stripe/installments/card/", StripeCardInstallmentsView.as_view(), name="stripe_installments_card"),
     path("stripe/installments/sepa/", StripeSepaInstallmentsView.as_view(), name="stripe_installments_sepa"),
-
     path("payments/sepa-post-confirm/", SepaPostConfirmView.as_view(), name="sepa-post-confirm"),
     path("stripe/webhook/", stripe_webhook, name="stripe_webhook"),
+    path("stripe/webhook", stripe_webhook, name="stripe_webhook_no_slash"),  # optional alias
+    path("orders/<int:pk>/payment-status/", OrderPaymentStatusUpdateAPIView.as_view(), name="order_payment_status"),
 
     # -------- Returns / Cancellations --------
     path("orders/<int:pk>/request-return/", OrderRequestReturnAPIView.as_view(), name="order_request_return"),
@@ -176,7 +178,7 @@ urlpatterns = [
     # -------- Allauth (optional) --------
     path("accounts/", include("allauth.urls")),
 
-    # -------- Stock alerts --------
+    # -------- Stock alerts / On-demand --------
     path("stock-alerts/", StockAlertCreateView.as_view(), name="stock-alerts-create"),
     path("stock-alerts/unsubscribe/<str:unsubscribe_token>/", StockAlertUnsubscribeView.as_view(), name="stock-alerts-unsubscribe"),
     path("on-demand/", OnDemandOrderCreateView.as_view(), name="on-demand-create"),
@@ -184,12 +186,10 @@ urlpatterns = [
     # -------- Admin birthday coupon send --------
     path("admin/send-birthday-coupon/", SendBirthdayCouponAPIView.as_view(), name="admin_send_birthday_coupon"),
 
-    # Guest order lookup (guest can retrieve order + invoice using email + order number)
+    # -------- Guest order lookup / invoice download --------
     path("orders/guest-lookup/", GuestOrderLookupAPIView.as_view(), name="guest_order_lookup"),
-    path("orders/guest-invoice-download/", GuestInvoiceDownloadView.as_view(), name="guest_invoice_download"),
-
-    # Frontend payment status callback
-    path("orders/<int:pk>/payment-status/", OrderPaymentStatusUpdateAPIView.as_view(), name="order_payment_status"),
+    # aligned with build_guest_invoice_download_url()
+    path("guest/invoice/download/", GuestInvoiceDownloadView.as_view(), name="guest_invoice_download"),
 ]
 
 if settings.DEBUG:

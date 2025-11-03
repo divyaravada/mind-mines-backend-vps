@@ -62,7 +62,7 @@ from .utils.invoices import generate_invoice_pdf
 from .utils.emails import (
     send_invoice_email, send_order_confirmation, send_sepa_pending_email,
     send_cancel_request_emails, send_return_request_emails,
-    send_stock_alert_email, send_installments_started_email,   
+    send_stock_alert_email, send_installments_started_email,
 )
 
 import stripe
@@ -86,7 +86,6 @@ def _safe(func, *args, **kwargs):
 # 2 hours signed token window for guest invoice links
 SIGNER_SALT = "invoice-public-download-v1"
 INVOICE_TOKEN_MAX_AGE = 60 * 60 * 2
-PUBLIC_AUTH_CLASSES: list = []
 
 def _get_signer():
     """
@@ -95,7 +94,7 @@ def _get_signer():
     """
     return TimestampSigner(key=settings.SECRET_KEY, salt=SIGNER_SALT)
 
-# Returns window default: 15 days (aligned with your business rule & models)
+# Returns window default: 15 days
 RETURNS_WINDOW_DAYS = getattr(settings, "RETURNS_WINDOW_DAYS", 15)
 
 # Stripe key
@@ -133,6 +132,7 @@ def build_guest_invoice_download_url(order) -> Optional[str]:
     if not inv or not inv.pdf:
         return None
     payload = {"order_id": order.id, "invoice": inv.number}
+    signer = _get_signer()
     token = signer.sign(json.dumps(payload))
     base = getattr(settings, "FRONTEND_URL", "https://mindmines.eu").rstrip("/")
     api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
@@ -567,7 +567,7 @@ class ProductReviewListCreate(generics.ListCreateAPIView):
             user=review_user,
             product=product,
             rating=write_ser.validated_data["rating"],
-            message=write_ser.validated_data["message"],
+            message=write_ser.validated_data.get("message", ""),
             image=write_ser.validated_data.get("image"),
             author_name=write_ser.validated_data.get("author_name", ""),
             author_avatar=write_ser.validated_data.get("author_avatar"),
@@ -733,7 +733,7 @@ class OrderAdminUpdateAPIView(APIView):
         prev_status = order.status
         updated = False
         for field in allowed:
-            if field in request.data:
+            if field in request.data and hasattr(order, field):
                 setattr(order, field, request.data[field])
                 updated = True
         if not updated:
@@ -742,7 +742,7 @@ class OrderAdminUpdateAPIView(APIView):
 
         if prev_status != "paid" and order.status == "paid":
             inv = generate_invoice_pdf(order)
-            order.reserve_stock()
+            _safe(order.reserve_stock_atomic)
             try:
                 user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
                 send_invoice_email(order, user_locale=user_locale, to=_order_to(order))
@@ -754,7 +754,7 @@ class OrderAdminUpdateAPIView(APIView):
             except Exception:
                 pass
         if prev_status != "cancelled" and order.status == "cancelled":
-            order.release_stock()
+            _safe(order.release_stock_atomic)
 
         return Response(OrderReadSerializer(order, context={"request": request}).data, status=200)
 
@@ -763,8 +763,9 @@ class SetTrackingAPIView(APIView):
     def post(self, request, pk):
         tracking = (request.data.get("tracking_number") or "").strip()
         order = get_object_or_404(Order, pk=pk)
-        order.tracking_number = tracking
-        order.save(update_fields=["tracking_number"])
+        if hasattr(order, "tracking_number"):
+            order.tracking_number = tracking
+            order.save(update_fields=["tracking_number"])
         inv = generate_invoice_pdf(order)
         user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
         send_invoice_email(order, user_locale=user_locale)
@@ -993,7 +994,6 @@ class PaypalCreateOrder(PaypalBase):
                 "brand_name": "MindMines",
                 "landing_page": "LOGIN",
                 "user_action": "PAY_NOW",
-                # PayPal Pay Later / installment options are offered automatically if eligible.
                 "shipping_preference": "NO_SHIPPING",
             },
         }
@@ -1074,24 +1074,18 @@ class PaypalCaptureOrder(PaypalBase):
         # we consider "COMPLETED" as paid.
         with transaction.atomic():
             order.status = "paid"
-            order.payment_status = "succeeded"
+            order.payment_status = "paid"
             order.paid_at = timezone.now()
             order.save(update_fields=["status","payment_status","paid_at"])
 
             # stock reservation
-            try:
-                order.reserve_stock()
-            except Exception:
-                logger.exception("reserve_stock failed for order %s", order.id)
+            _safe(order.reserve_stock_atomic)
 
-            # generate invoice etc.
+            # generate invoice etc. (deferred to pipeline or here)
             order.assign_unique_invoice_number()
-            # generate_invoice_pdf(order)
-            # send_invoice_email(order, to=order.email, ...)
-            # send_order_confirmation(order, ...)
+            # generate_invoice_pdf(order); send emails if you want immediate dispatch
 
         return Response({"status": "COMPLETED"}, status=200)
-
 
 # -----------------------------------------------------------------------------
 # Stripe — one-off PI + setups + installments
@@ -1110,7 +1104,6 @@ def _split_installments_eur(total_cents: int, months: int) -> List[Decimal]:
     return [Decimal(c) / Decimal(100) for c in cents_array]
 
 def _month_dates(anchor_dt, months: int):
-    from dateutil.relativedelta import relativedelta
     return [anchor_dt + relativedelta(months=i) for i in range(months)]
 
 def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> Optional[str]:
@@ -1132,7 +1125,6 @@ def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> Op
             prof.stripe_customer_id = customer.id
             prof.save(update_fields=["stripe_customer_id"])
         return customer.id
-    # guest => we may or may not create. For Klarna etc. it's optional.
     return None
 
 # ---------------------------
@@ -1146,8 +1138,7 @@ class StripeCreateIntent(APIView):
        - 'card' always
        - 'klarna', 'giropay', 'sofort' etc. when cart total high enough
     3. return {clientSecret, order_id}
-    Frontend then mounts <PaymentElement/> and calls stripe.confirmPayment()
-    Webhook will finalize order -> paid/failed.
+    Webhook will finalize order -> paid/failed/processing.
     """
 
     def post(self, request):
@@ -1218,7 +1209,6 @@ class StripeCreateIntent(APIView):
             {"clientSecret": intent.client_secret, "order_id": order.id},
             status=201,
         )
-
 
 # ---------------------------
 # STRIPE: card installments (authenticated only)
@@ -1297,18 +1287,18 @@ class StripeCardInstallmentsView(APIView):
                     price_base = mk_price(base, f"{title_base} (monthly)")
                     phases.append({
                         "items": [{"price": price_base.id, "quantity": 1}],
-                        "end_date": ts(now_ + timezone.timedelta(days=30*(months-1))),
+                        "end_date": ts(now_ + timedelta(days=30*(months-1))),
                     })
                 price_last = mk_price(base + remainder, f"{title_base} (final)")
                 phases.append({
                     "items": [{"price": price_last.id, "quantity": 1}],
-                    "end_date": ts(now_ + timezone.timedelta(days=30*months)),
+                    "end_date": ts(now_ + timedelta(days=30*months)),
                 })
             else:
                 price_all = mk_price(base, f"{title_base} (monthly)")
                 phases.append({
                     "items": [{"price": price_all.id, "quantity": 1}],
-                    "end_date": ts(now_ + timezone.timedelta(days=30*months)),
+                    "end_date": ts(now_ + timedelta(days=30*months)),
                 })
 
             schedule = stripe.SubscriptionSchedule.create(
@@ -1326,14 +1316,13 @@ class StripeCardInstallmentsView(APIView):
             order.payment_ref = schedule.id
             order.save(update_fields=["payment_ref"])
 
-            # email user that installments started etc. (omitted here but you have send_installments_started_email)
+            _safe(send_installments_started_email, order, to=_order_to(order))
             return Response({"order_id": order.id, "schedule_id": schedule.id}, status=201)
 
         except stripe_error.StripeError as e:
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
         except Exception as e:
             return Response({"detail": f"Schedule create failed: {e}"}, status=500)
-
 
 # ---------------------------
 # STRIPE: SEPA one-time (DE only)
@@ -1356,7 +1345,7 @@ class StripeCreateSepaIntent(APIView):
             order.save(update_fields=["payment_method", "status"])
 
         # we *require* email for mandate
-        email = order.email.strip()
+        email = (order.email or "").strip()
         if not email:
             return Response({"detail": "Email is required for SEPA payments."}, status=400)
 
@@ -1389,7 +1378,6 @@ class StripeCreateSepaIntent(APIView):
             status=201,
         )
 
-
 # ---------------------------
 # STRIPE: SEPA installments (DE only)
 # ---------------------------
@@ -1419,9 +1407,7 @@ class StripeSepaInstallmentsView(APIView):
             order.status = "processing"
             order.save(update_fields=["payment_method", "installments_months", "status"])
 
-        # (Very similar to StripeCardInstallmentsView logic, but using saved SEPA PM from SetupIntent.)
-        # We assume frontend already did a SetupIntent, got payment_method_id (sepa_debit),
-        # and passes it to us.
+        # We assume frontend already did a SetupIntent and passes payment_method_id (sepa_debit)
         payment_method_id = request.data.get("payment_method_id")
         if not payment_method_id:
             return Response({"detail": "payment_method_id is required"}, status=400)
@@ -1463,18 +1449,18 @@ class StripeSepaInstallmentsView(APIView):
                     base_price = mk_price(base, f"{title_base} (monthly)")
                     phases.append({
                         "items": [{"price": base_price.id, "quantity": 1}],
-                        "end_date": ts(now_ + timezone.timedelta(days=30*(months-1))),
+                        "end_date": ts(now_ + timedelta(days=30*(months-1))),
                     })
                 last_price = mk_price(base + remainder, f"{title_base} (final)")
                 phases.append({
                     "items": [{"price": last_price.id, "quantity": 1}],
-                    "end_date": ts(now_ + timezone.timedelta(days=30*months)),
+                    "end_date": ts(now_ + timedelta(days=30*months)),
                 })
             else:
                 all_price = mk_price(base, f"{title_base} (monthly)")
                 phases.append({
                     "items": [{"price": all_price.id, "quantity": 1}],
-                    "end_date": ts(now_ + timezone.timedelta(days=30*months)),
+                    "end_date": ts(now_ + timedelta(days=30*months)),
                 })
 
             schedule = stripe.SubscriptionSchedule.create(
@@ -1499,7 +1485,6 @@ class StripeSepaInstallmentsView(APIView):
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
 
-
 # ---------------------------
 # SEPA post-confirm (after confirmSepaDebitPayment on frontend)
 # ---------------------------
@@ -1523,20 +1508,15 @@ class SepaPostConfirmView(APIView):
         order = get_object_or_404(Order, pk=order_id)
 
         # reserve stock immediately
-        try:
-            order.reserve_stock()
-        except Exception:
-            logger.exception("reserve_stock failed for order %s", order.id)
+        _safe(order.reserve_stock_atomic)
 
         order.status = "processing"
+        order.payment_status = "processing"
         order.confirmation_sent_at = timezone.now()
-        order.save(update_fields=["status", "confirmation_sent_at"])
+        order.save(update_fields=["status", "payment_status", "confirmation_sent_at"])
 
-        # You send "we received your SEPA order, waiting for bank" email here
-        # send_sepa_pending_email(order)
-
+        _safe(send_sepa_pending_email, order, to=_order_to(order))
         return Response({"ok": True}, status=200)
-
 
 # -----------------------------------------------------------------------------
 # Stripe webhook
@@ -1563,7 +1543,7 @@ def stripe_webhook(request):
         changed = False
         if order.status != "paid":
             order.status = "paid"
-            order.payment_status = "succeeded"
+            order.payment_status = "paid"
             order.paid_at = timezone.now()
             changed = True
 
@@ -1584,15 +1564,9 @@ def stripe_webhook(request):
             order.save(update_fields=["status","payment_status","paid_at","payment_id"])
 
         # stock, invoice, email
-        try:
-            order.reserve_stock()
-        except Exception:
-            logger.exception("reserve_stock failed for %s", order.id)
-
+        _safe(order.reserve_stock_atomic)
         order.assign_unique_invoice_number()
-        # generate_invoice_pdf(order)
-        # send_invoice_email(order, to=order.email, ...)
-        # send_order_confirmation(order, ...)
+        # generate_invoice_pdf(order); send emails (optional here)
 
     # payment_intent.succeeded => normal card, klarna, sofort, giropay
     if etype == "payment_intent.succeeded":
@@ -1627,7 +1601,7 @@ def stripe_webhook(request):
                         order.status = "processing"
                         order.payment_status = "processing"
                         order.save(update_fields=["status","payment_status"])
-                        # send_sepa_pending_email(order)
+                        _safe(send_sepa_pending_email, order, to=_order_to(order))
             except Order.DoesNotExist:
                 pass
 
@@ -1641,10 +1615,7 @@ def stripe_webhook(request):
                     order.status = "failed"
                     order.payment_status = "failed"
                     order.save(update_fields=["status","payment_status"])
-                    try:
-                        order.release_stock()
-                    except Exception:
-                        logger.exception("release_stock failed for %s", order.id)
+                    _safe(order.release_stock_atomic)
             except Order.DoesNotExist:
                 pass
 
@@ -1873,19 +1844,19 @@ class SendBirthdayCouponAPIView(APIView):
         if not candidates:
             return Response({"ok": True, "count": 0, "recipients": [], "dry_run": dry_run})
 
-        created = 0
-        reused = 0
-        emailed = 0
-        errors = []
-        recipients = [{"id": u.id, "email": u.email} for u in candidates]
-
         if dry_run:
+            recipients = [{"id": u.id, "email": u.email} for u in candidates]
             return Response({"ok": True, "dry_run": True, "count": len(recipients),
                              "recipients": recipients,
                              "defaults": {"percent": percent, "valid_days": valid_days,
                                           "window": [starts_at.isoformat(), ends_at.isoformat()]}})
 
         from server.models import Coupon
+        created = 0
+        reused = 0
+        emailed = 0
+        errors = []
+
         def ensure_coupon_for_user(user):
             code = f"BD{mmdd}-{user.id}"
             coup = Coupon.objects.filter(code=code).first()
@@ -1893,7 +1864,7 @@ class SendBirthdayCouponAPIView(APIView):
                 return coup, False
             coup = Coupon.objects.create(
                 code=code, kind="percent", value=percent, active=True,
-                starts_at=starts_at, ends_at=ends_at, min_subtotal=None,
+                starts_at=starts_at, ends_at=ends_at, is_birthday=True,
             )
             return coup, True
 
@@ -1959,7 +1930,7 @@ class GuestOrderLookupAPIView(APIView):
             return Response({"detail": "No order found for this email and order number."}, status=404)
 
         items_data = []
-        for it in order._iter_items():
+        for it in order.items.all():
             items_data.append({
                 "product_id": it.product_id,
                 "name": it.product_name,
@@ -1976,7 +1947,7 @@ class GuestOrderLookupAPIView(APIView):
             "order_id": order.id,
             "order_number": order.number,
             "status": order.status,
-            "payment_method": order.payment_method_label if hasattr(order, "payment_method_label") else order.payment_method,
+            "payment_method": getattr(order, "payment_method_label", None) or order.payment_method,
             "total_price": f"{order.total_price:.2f}",
             "currency": "EUR",
             "created_at": order.created_at,
@@ -2031,32 +2002,44 @@ class GuestInvoiceDownloadView(APIView):
             filename=f"{inv.number}.pdf",
             content_type="application/pdf",
         )
+
 # -----------------------------------------------------------------------------
-# Payment status update
+# Payment status update (from frontend echo)
 # -----------------------------------------------------------------------------
 class OrderPaymentStatusUpdateAPIView(APIView):
     permission_classes = [AllowAny]
     def post(self, request, pk: int):
         order = get_object_or_404(Order, pk=pk)
-        payment_status = (request.data.get("payment_status") or "").strip().lower()
+        payment_status_in = (request.data.get("payment_status") or "").strip().lower()
         gateway_ref = (request.data.get("gateway_ref") or "").strip()
-        if not payment_status:
+        if not payment_status_in:
             return Response({"detail": "payment_status is required."}, status=400)
+
+        # normalize to our enum: "", processing | paid | failed
+        synonyms_paid = {"succeeded", "completed", "paid", "success"}
+        synonyms_processing = {"processing", "pending", "requires_action", "requires_capture"}
+        synonyms_failed = {"failed", "canceled", "cancelled", "error"}
+
+        if payment_status_in in synonyms_paid:
+            normalized = "paid"
+        elif payment_status_in in synonyms_processing:
+            normalized = "processing"
+        elif payment_status_in in synonyms_failed:
+            normalized = "failed"
+        else:
+            normalized = payment_status_in  # best-effort
 
         updates = []
         if hasattr(order, "payment_status"):
-            order.payment_status = payment_status
+            order.payment_status = normalized
             updates.append("payment_status")
         if gateway_ref:
             order.payment_ref = gateway_ref
             updates.append("payment_ref")
 
-        if payment_status in ("succeeded", "completed", "paid"):
+        if normalized == "paid":
             if order.status != "paid":
-                try:
-                    order.reserve_stock()
-                except Exception as e:
-                    logger.exception("reserve_stock error in OrderPaymentStatusUpdateAPIView for order %s: %s", order.id, e)
+                _safe(order.reserve_stock_atomic)
                 order.status = "paid"
                 updates.append("status")
                 if hasattr(order, "paid_at"):
@@ -2068,7 +2051,9 @@ class OrderPaymentStatusUpdateAPIView(APIView):
                 user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
                 _safe(send_invoice_email, order, user_locale=user_locale, to=_order_to(order))
                 _safe(send_order_confirmation, order, user_locale=user_locale, to=_order_to(order))
-        elif payment_status in ("processing", "pending", "requires_action"):
+            else:
+                order.save(update_fields=list(set(updates)) or ["payment_status"])
+        elif normalized == "processing":
             if order.status not in ("paid", "failed"):
                 order.status = "processing"
                 updates.append("status")
@@ -2079,10 +2064,7 @@ class OrderPaymentStatusUpdateAPIView(APIView):
             order.status = "failed"
             updates.append("status")
             order.save(update_fields=list(set(updates)))
-            try:
-                order.release_stock()
-            except Exception as e:
-                logger.exception("release_stock error in OrderPaymentStatusUpdateAPIView for order %s: %s", order.id, e)
+            _safe(order.release_stock_atomic)
 
         return Response({
             "order_id": order.id,

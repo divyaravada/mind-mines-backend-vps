@@ -1,16 +1,15 @@
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.contrib.postgres.fields import ArrayField
 from django.db import models, transaction
-from django.db.models import Q, UniqueConstraint, F
+from django.db.models import Q, UniqueConstraint, F, CheckConstraint
 from django.db.models.functions import Lower
 from django.core.exceptions import ValidationError
-from django.core.validators import EmailValidator
-from django.core.validators import MinValueValidator, MaxValueValidator
+from django.core.validators import EmailValidator, MinValueValidator, MaxValueValidator
 from django.utils import timezone
 from django.conf import settings
 
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
-from datetime import timedelta
+from datetime import timedelta, datetime
 import secrets
 import uuid
 
@@ -49,7 +48,6 @@ MATERIAL_CHOICES = [
     ("marble", "Marble"),
     ("granite", "Granite"),
     ("stone", "Stone"),
-    # extend as needed
 ]
 
 COLOR_CHOICES = [
@@ -57,14 +55,13 @@ COLOR_CHOICES = [
     ("black", "Black"),
     ("green", "Green"),
     ("grey", "Grey"),
-    # extend as needed
 ]
 
-VAT_RATE = Decimal("0.19")
+DEFAULT_VAT_RATE = Decimal("0.19")
 
 
 def _q2(d: Decimal) -> Decimal:
-    return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return Decimal(d).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 # ----------------- Users -----------------
@@ -118,22 +115,13 @@ class Profile(models.Model):
     image = models.ImageField(upload_to="profile_pics/", blank=True, null=True)
 
     verified = models.BooleanField(default=False)
-
     stripe_customer_id = models.CharField(max_length=64, blank=True, null=True)
 
-    # for birthday coupon logic
-    date_of_birth = models.DateField(
-        null=True,
-        blank=True,
-        help_text="Used for birthday coupon emails"
-    )
+    # Birthday coupon logic
+    date_of_birth = models.DateField(null=True, blank=True, help_text="Used for birthday coupon emails")
 
-    # <--- this was missing but signals use it
-    language = models.CharField(
-        max_length=5,
-        default="en",
-        help_text="Preferred language code ('en' or 'de')."
-    )
+    # Preferred language for emails/content
+    language = models.CharField(max_length=5, default="en", help_text="Preferred language code ('en' or 'de').")
 
     def __str__(self):
         return f"{self.user.email} profile"
@@ -150,17 +138,17 @@ class Address(models.Model):
         blank=True,
     )
 
-    # New checkout-friendly fields
+    # Checkout-friendly fields
     first_name = models.CharField(max_length=100, blank=True)
     last_name = models.CharField(max_length=100, blank=True)
-    address_line1 = models.CharField(max_length=255, blank=True)  # street + house no. for new UI
-    apartment = models.CharField(max_length=100, blank=True)      # "Address supplement"
+    address_line1 = models.Char_length = models.CharField(max_length=255, blank=True)  # street + house no.
+    apartment = models.CharField(max_length=100, blank=True)                           # Address supplement
     postal_code = models.CharField(max_length=20, blank=True)
     city = models.CharField(max_length=100, blank=True)
     country = models.CharField(max_length=100, blank=True)
     phone = models.CharField(max_length=20, blank=True)
 
-    # Legacy / fallback snapshot fields
+    # Legacy snapshot fields (kept for backward compatibility)
     full_name = models.CharField(max_length=255, blank=True)
     house_number = models.CharField(max_length=50, blank=True)
     street_name = models.CharField(max_length=255, blank=True)
@@ -174,19 +162,14 @@ class Address(models.Model):
 
     class Meta:
         constraints = [
-            UniqueConstraint(
-                fields=["user"],
-                condition=Q(is_default=True),
-                name="one_default_address_per_user",
-            ),
+            UniqueConstraint(fields=["user"], condition=Q(is_default=True), name="one_default_address_per_user"),
         ]
 
     def save(self, *args, **kwargs):
         """
         Rules:
         - Only one default per user.
-        - When creating with is_default=True, we first save as non-default,
-          then atomically flip and clear others.
+        - When creating with is_default=True, save as non-default, then atomically set default.
         """
         if self._state.adding and self.is_default:
             make_default_after_create = True
@@ -196,10 +179,8 @@ class Address(models.Model):
             return
 
         if self.user_id and self.is_default and not self._state.adding:
-            # Updating an existing address to be default:
             with transaction.atomic():
-                (
-                    Address.objects
+                (Address.objects
                     .select_for_update()
                     .filter(user_id=self.user_id, is_default=True)
                     .exclude(pk=self.pk)
@@ -209,14 +190,10 @@ class Address(models.Model):
         super().save(*args, **kwargs)
 
     def set_default_for_user(self):
-        """
-        Force THIS address to be default for the user; clear others.
-        """
         if not self.user_id:
             return
         with transaction.atomic():
-            (
-                Address.objects
+            (Address.objects
                 .select_for_update()
                 .filter(user=self.user, is_default=True)
                 .exclude(pk=self.pk)
@@ -258,23 +235,14 @@ class NaturalStone(models.Model):
     usage_en = models.TextField()
     usage_de = models.TextField()
 
-    image = models.ImageField(
-        upload_to="natural-stone/images/",
-        blank=True,
-        null=True,
-        help_text="Primary display image",
-    )
+    image = models.ImageField(upload_to="natural-stone/images/", blank=True, null=True, help_text="Primary display image")
 
     def __str__(self):
         return self.type
 
 
 class NaturalStoneImage(models.Model):
-    stone = models.ForeignKey(
-        NaturalStone,
-        on_delete=models.CASCADE,
-        related_name="images",
-    )
+    stone = models.ForeignKey(NaturalStone, on_delete=models.CASCADE, related_name="images")
     image = models.ImageField(upload_to="natural-stone/images/")
 
     def save(self, *args, **kwargs):
@@ -336,99 +304,42 @@ class Product(models.Model):
     returnspara3_de = models.TextField(blank=True)
 
     # attributes
-    type_of_stone = models.CharField(
-        max_length=50,
-        choices=STONE_TYPES,
-        blank=True,
-        null=True,
-    )
-    material = models.CharField(
-        max_length=20,
-        choices=MATERIAL_CHOICES,
-        default="marble",
-        blank=True,
-        null=True,
-    )
-    color = models.CharField(
-        max_length=20,
-        choices=COLOR_CHOICES,
-        default="white",
-        blank=True,
-        null=True,
-    )
-    stone_color_image = models.ImageField(
-        upload_to="decor-products/colors/",
-        null=True,
-        blank=True,
-    )
+    type_of_stone = models.CharField(max_length=50, choices=STONE_TYPES, blank=True, null=True)
+    material = models.CharField(max_length=20, choices=MATERIAL_CHOICES, default="marble", blank=True, null=True)
+    color = models.CharField(max_length=20, choices=COLOR_CHOICES, default="white", blank=True, null=True)
+    stone_color_image = models.ImageField(upload_to="decor-products/colors/", null=True, blank=True)
 
     # inventory
-    quantity = models.PositiveIntegerField(
-        default=0,
-        help_text="Authoritative stock count",
-    )
+    quantity = models.PositiveIntegerField(default=0, help_text="Authoritative stock count")
 
     # misc
     dimensions = models.CharField(max_length=255, blank=True)
     weight = models.CharField(max_length=100, blank=True)
-    category = models.CharField(
-        max_length=30,
-        choices=CATEGORY_CHOICES,
-        default="home_decor",
-    )
+    category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default="home_decor")
 
     # pricing (gross is VAT-included)
-    price_net = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        null=True,
-        blank=True,
-    )
+    price_net = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     vat_rate = models.DecimalField(
         max_digits=4,
         decimal_places=4,
-        default=Decimal("0.19"),
-        validators=[
-            MinValueValidator(Decimal("0.00")),
-            MaxValueValidator(Decimal("1.00")),
-        ],
+        default=DEFAULT_VAT_RATE,
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("1.00"))],
         help_text="VAT as a fraction (0.19 = 19%).",
     )
-    price_gross = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        help_text="Displayed price incl. VAT",
-    )
-    sale_price_gross = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        blank=True,
-        null=True,
-        help_text="Optional discounted price incl. VAT",
-    )
-    discount_percent = models.PositiveIntegerField(
-        blank=True,
-        null=True,
-        help_text="e.g. 10 = 10%. Must be <100",
-    )
+    price_gross = models.DecimalField(max_digits=10, decimal_places=2, help_text="Displayed price incl. VAT")
+    sale_price_gross = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True, help_text="Optional discounted price incl. VAT")
+    discount_percent = models.PositiveIntegerField(blank=True, null=True, help_text="e.g. 10 = 10%. Must be <100")
 
-    key = models.CharField(
-        max_length=20,
-        unique=True,
-        null=True,
-        blank=True,
-        help_text="Public product key (HOME01, SCULPT03, ...)",
-    )
-    image = models.ImageField(
-        upload_to="decor-products/",
-        null=True,
-        blank=True,
-    )
+    key = models.CharField(max_length=20, unique=True, null=True, blank=True, help_text="Public product key (HOME01, SCULPT03, ...)")
+    image = models.ImageField(upload_to="decor-products/", null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            CheckConstraint(check=Q(quantity__gte=0), name="product_quantity_nonnegative"),
+        ]
 
     def clean(self):
         # Validate sale price
@@ -442,26 +353,19 @@ class Product(models.Model):
 
         if self.sale_price_gross is not None and self.price_gross is not None:
             if Decimal(self.sale_price_gross) >= Decimal(self.price_gross):
-                raise ValidationError({
-                    "sale_price_gross": "Sale price must be lower than base gross price."
-                })
+                raise ValidationError({"sale_price_gross": "Sale price must be lower than base gross price."})
 
         # Validate discount range
-        if self.discount_percent is not None:
-            if not (0 <= int(self.discount_percent) <= 99):
-                raise ValidationError({
-                    "discount_percent": "Discount percent must be between 0 and 99."
-                })
+        if self.discount_percent is not None and not (0 <= int(self.discount_percent) <= 99):
+            raise ValidationError({"discount_percent": "Discount percent must be between 0 and 99."})
 
         # Guard VAT range
         if self.vat_rate is None:
-            self.vat_rate = Decimal("0.19")
+            self.vat_rate = DEFAULT_VAT_RATE
         else:
             vr = Decimal(self.vat_rate)
             if vr < 0 or vr > 1:
-                raise ValidationError({
-                    "vat_rate": "VAT must be between 0 and 1 (e.g., 0.19 for 19%)."
-                })
+                raise ValidationError({"vat_rate": "VAT must be between 0 and 1 (e.g., 0.19 for 19%)."})
 
     def save(self, *args, **kwargs):
         self.clean()
@@ -470,7 +374,6 @@ class Product(models.Model):
         if self.price_net is not None:
             net = Decimal(self.price_net)
             self.price_gross = _q2(net * (Decimal(1) + Decimal(self.vat_rate)))
-
         # If only gross entered, back-calc net for convenience
         elif self.price_gross is not None and self.price_net is None:
             gross = Decimal(self.price_gross)
@@ -520,11 +423,7 @@ class Product(models.Model):
         - else price_gross
         """
         base = Decimal(self.price_gross or 0)
-        sale = (
-            Decimal(self.sale_price_gross or 0)
-            if self.sale_price_gross is not None
-            else None
-        )
+        sale = (Decimal(self.sale_price_gross or 0) if self.sale_price_gross is not None else None)
         if sale is not None and sale > 0 and sale < base:
             return _q2(sale)
         if self.discount_percent:
@@ -537,45 +436,33 @@ class Product(models.Model):
 
 
 class ProductMedia(models.Model):
-    MEDIA_TYPE_CHOICES = [
-        ("image", "Image"),
-        ("video", "Video"),
-    ]
+    MEDIA_TYPE_CHOICES = [("image", "Image"), ("video", "Video")]
 
-    product = models.ForeignKey(
-        Product,
-        related_name="media",
-        on_delete=models.CASCADE,
-    )
+    product = models.ForeignKey(Product, related_name="media", on_delete=models.CASCADE)
     image = models.ImageField(upload_to="product-gallery/", null=True, blank=True)
     video = models.FileField(upload_to="product-videos/", null=True, blank=True)
     caption = models.CharField(max_length=255, blank=True)
     order = models.PositiveIntegerField(default=0)
-    media_type = models.CharField(
-        max_length=10,
-        choices=MEDIA_TYPE_CHOICES,
-        default="image",
-    )
+    media_type = models.CharField(max_length=10, choices=MEDIA_TYPE_CHOICES, default="image")
+
+    def clean(self):
+        if self.media_type == "image" and not self.image:
+            raise ValidationError({"image": "Image file is required for media_type=image"})
+        if self.media_type == "video" and not self.video:
+            raise ValidationError({"video": "Video file is required for media_type=video"})
 
     def save(self, *args, **kwargs):
         # enforce max 10 images and 10 videos per product
         if self.pk is None:
             if self.media_type == "image":
-                cnt = ProductMedia.objects.filter(
-                    product=self.product, media_type="image"
-                ).count()
+                cnt = ProductMedia.objects.filter(product=self.product, media_type="image").count()
                 if cnt >= 10:
-                    raise ValidationError(
-                        "Each product can have at most 10 images."
-                    )
+                    raise ValidationError("Each product can have at most 10 images.")
             if self.media_type == "video":
-                cnt = ProductMedia.objects.filter(
-                    product=self.product, media_type="video"
-                ).count()
+                cnt = ProductMedia.objects.filter(product=self.product, media_type="video").count()
                 if cnt >= 10:
-                    raise ValidationError(
-                        "Each product can have at most 10 videos."
-                    )
+                    raise ValidationError("Each product can have at most 10 videos.")
+        self.clean()
         return super().save(*args, **kwargs)
 
     def __str__(self):
@@ -585,23 +472,14 @@ class ProductMedia(models.Model):
 # ----------------- Wishlist / On-demand / Stock alerts -----------------
 
 class OnDemandOrderRequest(models.Model):
-    product = models.ForeignKey(
-        "Product",
-        related_name="on_demand_requests",
-        on_delete=models.CASCADE,
-    )
+    product = models.ForeignKey("Product", related_name="on_demand_requests", on_delete=models.CASCADE)
     name = models.CharField(max_length=120, blank=True)
     email = models.EmailField()
     quantity = models.PositiveIntegerField(default=1)
     message = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-    )
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
 
     class Meta:
         indexes = [
@@ -615,18 +493,10 @@ class OnDemandOrderRequest(models.Model):
 
 class StockAlert(models.Model):
     """Notify me when back in stock."""
-    product = models.ForeignKey(
-        "Product",
-        related_name="stock_alerts",
-        on_delete=models.CASCADE,
-    )
+    product = models.ForeignKey("Product", related_name="stock_alerts", on_delete=models.CASCADE)
     email = models.EmailField(validators=[EmailValidator()], db_index=True)
     is_active = models.BooleanField(default=True, db_index=True)
-    unsubscribe_token = models.CharField(
-        max_length=64,
-        unique=True,
-        editable=False,
-    )
+    unsubscribe_token = models.CharField(max_length=64, unique=True, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     notified_at = models.DateTimeField(null=True, blank=True)
 
@@ -677,9 +547,7 @@ class NewsletterSubscriber(models.Model):
     subscribed_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        constraints = [
-            UniqueConstraint(Lower("email"), name="uniq_newsletter_email_ci")
-        ]
+        constraints = [UniqueConstraint(Lower("email"), name="uniq_newsletter_email_ci")]
 
     def __str__(self):
         return self.email
@@ -695,7 +563,7 @@ class Order(models.Model):
         ("sepa_installments", "SEPA Direct Debit Installments"),
         ("klarna", "Klarna (Stripe Klarna)"),
         ("paypal", "PayPal / PayPal Pay Later"),
-        ("bank", "Bank Transfer"),  # optional if you still allow manual SEPA
+        ("bank", "Bank Transfer"),
     ]
 
     STATUS_CHOICES = [
@@ -708,13 +576,19 @@ class Order(models.Model):
         ("cancelled", "Cancelled"),
     ]
 
+    PAYMENT_STATUS_CHOICES = [
+        ("", "Unknown"),
+        ("processing", "Processing"),
+        ("paid", "Paid"),
+        ("failed", "Failed"),
+    ]
+
     id = models.AutoField(primary_key=True)
     number = models.CharField(max_length=32, unique=True, blank=True)
+    lookup_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)  # secure guest links
+
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True, blank=True,
-        on_delete=models.SET_NULL,
-        related_name="orders"
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="orders"
     )
     email = models.EmailField()
 
@@ -733,56 +607,26 @@ class Order(models.Model):
     installments_months = models.PositiveIntegerField(null=True, blank=True)
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
-    payment_status = models.CharField(max_length=30, blank=True)
+    payment_status = models.CharField(max_length=30, choices=PAYMENT_STATUS_CHOICES, default="")
     payment_ref = models.CharField(max_length=128, blank=True)  # Stripe PI id, PayPal order id, schedule id, etc.
     payment_id = models.CharField(max_length=128, blank=True)   # final captured charge id etc.
 
     paid_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True) 
+    updated_at = models.DateTimeField(auto_now=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
 
     # bookkeeping
     stripe_pi = models.CharField(max_length=128, blank=True)  # PaymentIntent id
     invoice_number = models.CharField(max_length=64, blank=True)
     confirmation_sent_at = models.DateTimeField(null=True, blank=True)
-
-    def save(self, *args, **kwargs):
-        # assign a human number like "MM00001234"
-        if not self.number:
-            self.number = self._gen_number()
-        super().save(*args, **kwargs)
-
-    def _gen_number(self):
-        # example format: MM + zero-padded pk-like timestamp chunk
-        return f"MM{timezone.now().strftime('%m')}{uuid.uuid4().hex[:8].upper()}"
-
-    # item iterator helper for emails / invoice
-    def _iter_items(self):
-        return self.items.all()
-
-    def line_total(self):
-        return sum([it.line_total() for it in self._iter_items()], Decimal("0.00"))
-
-    def reserve_stock(self):
-        # subtract stock from each item.product
-        for it in self._iter_items():
-            if hasattr(it.product, "quantity"):
-                it.product.quantity = max(0, (it.product.quantity or 0) - it.quantity)
-                it.product.save(update_fields=["quantity"])
-
-    def release_stock(self):
-        # put stock back
-        for it in self._iter_items():
-            if hasattr(it.product, "quantity"):
-                it.product.quantity = (it.product.quantity or 0) + it.quantity
-                it.product.save(update_fields=["quantity"])
-
-    def assign_unique_invoice_number(self):
-        if self.invoice_number:
-            return
-        self.invoice_number = f"INV-{self.number}"
-        self.save(update_fields=["invoice_number"])
+    tracking_number = models.CharField(
+        max_length=64,
+        blank=True,
+        null=True,
+        default="",      # keeps existing code paths happy
+        help_text="Carrier tracking number (set when shipped)."
+    )
 
     class Meta:
         constraints = [
@@ -796,117 +640,102 @@ class Order(models.Model):
     def __str__(self):
         return f"Order #{self.pk}"
 
-    
-    @property
-    def ordered_at(self):
-        return self.created_at
+    # ---- numbering & totals ----
 
-    def generate_invoice_number(self):
-        """
-        Human-readable invoice no. Example: MM-11-2025-000123
-        """
-        from datetime import datetime
-        return f"MM-{datetime.now():%m-%Y}-{self.pk:06d}"
-
-    def assign_unique_invoice_number(self):
-        """
-        Ensure unique invoice_number. If there is a clash,
-        append -2, -3, ...
-        """
-        if not self.invoice_number:
-            base = self.generate_invoice_number()
-        else:
-            base = self.invoice_number
-
-        candidate = base
-        i = 1
-        from server.models import Order as O
-        while O.objects.filter(invoice_number=candidate).exclude(pk=self.pk).exists():
-            i += 1
-            candidate = f"{base}-{i}"
-
-        if candidate != self.invoice_number:
-            self.invoice_number = candidate
-            self.save(update_fields=["invoice_number"])
-
-        return self.invoice_number
-
-    def assign_unique_order_number(self):
-        """
-        Your admin UI shows numbers like MM00000407.
-        We'll generate that style and keep it stable & unique.
-        """
-        if self.number:
-            return self.number
-
-        base = f"MM{self.pk:08d}"
-        candidate = base
-        i = 1
-        while (
-            type(self)
-            .objects.filter(number=candidate)
-            .exclude(pk=self.pk)
-            .exists()
-        ):
-            i += 1
-            candidate = f"{base}-{i}"
-
-        self.number = candidate
-        super().save(update_fields=["number"])
-        return self.number
+    def _generate_admin_number(self) -> str:
+        # MM######## using DB pk to avoid collisions
+        return f"MM{self.pk:08d}"
 
     def ensure_number(self):
-        """
-        Fallback generator (not really used now because we prefer MM########),
-        but left in case older code calls it.
-        """
-        if not self.number:
-            self.number = f"ORD-{self.created_at:%Y%m%d}-{self.pk:06d}"
+        if not self.number and self.pk:
+            self.number = self._generate_admin_number()
             super().save(update_fields=["number"])
+        return self.number
+
+    def line_total(self) -> Decimal:
+        total = Decimal("0.00")
+        for it in self.items.all():
+            total += it.line_total()
+        return _q2(total)
+
+    # ---- stock helpers (to be called from service layer) ----
+
+    def reserve_stock_atomic(self):
+        """
+        Decrement product.quantity for each item atomically with row locks.
+        """
+        with transaction.atomic():
+            for it in self.items.select_for_update(of=("self",)).select_related("product"):
+                if it.product and hasattr(it.product, "quantity"):
+                    if (it.product.quantity or 0) < it.quantity:
+                        raise ValidationError(f"Insufficient stock for {it.product}")
+                    it.product.quantity = F("quantity") - it.quantity
+                    it.product.save(update_fields=["quantity"])
+
+    def release_stock_atomic(self):
+        with transaction.atomic():
+            for it in self.items.select_for_update(of=("self",)).select_related("product"):
+                if it.product and hasattr(it.product, "quantity"):
+                    it.product.quantity = F("quantity") + it.quantity
+                    it.product.save(update_fields=["quantity"])
+
+    # ---- invoices ----
+
+    def generate_invoice_number(self) -> str:
+        # Example: MM-11-2025-000123
+        return f"MM-{datetime.now():%m-%Y}-{self.pk:06d}"
+
+    def assign_unique_invoice_number(self) -> str:
+        base = self.invoice_number or self.generate_invoice_number()
+        candidate = base
+        i = 1
+        while type(self).objects.filter(invoice_number=candidate).exclude(pk=self.pk).exists():
+            i += 1
+            candidate = f"{base}-{i}"
+        if candidate != self.invoice_number:
+            self.invoice_number = candidate
+            super().save(update_fields=["invoice_number"])
+        return self.invoice_number
+
+    # ---- lifecycle ----
 
     def save(self, *args, **kwargs):
         creating = self.pk is None
         super().save(*args, **kwargs)
-
-        # ensure guest lookup_token exists
-        if creating and not self.lookup_token:
-            self.lookup_token = str(uuid.uuid4())
-            super().save(update_fields=["lookup_token"])
+        if creating:
+            # now we have a pk -> set MM######## number
+            self.ensure_number()
 
     @property
     def payment_method_label(self):
         return self.get_payment_method_display()
 
     @property
+    def ordered_at(self):
+        return self.created_at
+
+    @property
     def return_deadline(self):
-        """
-        Returns last date to request a return:
-        delivered_at + 15 days
-        """
         if not self.delivered_at:
             return None
         return self.delivered_at + timedelta(days=15)
 
     @property
     def is_returnable(self) -> bool:
-        """
-        True if status=delivered and still inside 15 day window.
-        """
-        if self.status != "delivered" or not self.delivered_at:
-            return False
-        return timezone.now() <= (self.delivered_at + timedelta(days=15))
+        return self.status == "delivered" and self.delivered_at and timezone.now() <= (self.delivered_at + timedelta(days=15))
 
-    
 
 class OrderItem(models.Model):
     order = models.ForeignKey(Order, related_name="items", on_delete=models.CASCADE)
     product = models.ForeignKey("server.Product", null=True, blank=True, on_delete=models.SET_NULL)
-    product_name = models.CharField(max_length=255)
+
+    # Snapshot name at the time of ordering (avoid future title changes)
+    product_name_snapshot = models.CharField(max_length=255)
     quantity = models.PositiveIntegerField(default=1)
     unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
 
     def line_total(self):
-        return (self.unit_price * self.quantity).quantize(Decimal("0.01"))
+        return _q2(Decimal(self.unit_price) * self.quantity)
 
     @property
     def product_name(self):
@@ -933,51 +762,25 @@ DISCOUNT_TYPES = [("percent", "Percent"), ("fixed", "Fixed amount")]
 class Coupon(models.Model):
     code = models.CharField(max_length=32, unique=True, db_index=True)
     kind = models.CharField(max_length=10, choices=DISCOUNT_TYPES, default="percent")
-    value = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        help_text="Percent (e.g. 10) or fixed EUR amount",
-    )
+    value = models.DecimalField(max_digits=10, decimal_places=2, help_text="Percent (e.g. 10) or fixed EUR amount")
     active = models.BooleanField(default=True)
 
     starts_at = models.DateTimeField(null=True, blank=True)
     ends_at = models.DateTimeField(null=True, blank=True)
 
-    min_subtotal = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=Decimal("0.00"),
-    )
-    max_uses = models.PositiveIntegerField(
-        null=True,
-        blank=True,
-        help_text="Global usage limit across everyone",
-    )
-    max_uses_per_user = models.PositiveIntegerField(
-        null=True,
-        blank=True,
-        help_text="Per-account usage limit",
-    )
+    min_subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    max_uses = models.PositiveIntegerField(null=True, blank=True, help_text="Global usage limit across everyone")
+    max_uses_per_user = models.PositiveIntegerField(null=True, blank=True, help_text="Per-account usage limit")
 
     # targeting
-    products = models.ManyToManyField(
-        "Product",
-        blank=True,
-        related_name="coupons",
-    )
-    categories = ArrayField(
-        models.CharField(max_length=30),
-        default=list,
-        blank=True,
-    )  # store category keys
+    products = models.ManyToManyField("Product", blank=True, related_name="coupons")
+    categories = ArrayField(models.CharField(max_length=30), default=list, blank=True)  # store category keys
 
     # optional cap for percent coupons
-    max_discount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        null=True,
-        blank=True,
-    )
+    max_discount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
+    # birthday flag (for admin campaigns)
+    is_birthday = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -998,15 +801,12 @@ class Coupon(models.Model):
 
     def eligible_items_subtotal(self, items):
         """
-        items: iterable of OrderItem OR lightweight dicts:
-            { "product_id": int, "qty": int }
+        items: iterable of OrderItem OR dicts { "product_id": int, "qty": int }
         Returns gross subtotal of eligible items only.
         """
         subtotal = Decimal("0.00")
-        allowed_products = (
-            set(self.products.values_list("id", flat=True)) if self.pk else set()
-        )
-        allowed_categories = set((self.categories or []))
+        allowed_products = set(self.products.values_list("id", flat=True)) if self.pk else set()
+        allowed_categories = set(self.categories or [])
 
         for it in items:
             # normalize access
@@ -1014,7 +814,7 @@ class Coupon(models.Model):
                 pid = it.product_id
                 qty = it.quantity
                 unit = it.unit_price  # already gross
-                cat = it.product.category
+                cat = it.product.category if it.product else None
             else:
                 pid = int(it.get("product_id"))
                 qty = int(it.get("qty"))
@@ -1026,7 +826,7 @@ class Coupon(models.Model):
             if allowed_products:
                 ok = pid in allowed_products
             if ok and allowed_categories:
-                ok = cat in allowed_categories
+                ok = (cat in allowed_categories)
 
             if ok:
                 subtotal += (Decimal(unit) * qty)
@@ -1044,21 +844,14 @@ class Coupon(models.Model):
         if Decimal(cart_subtotal) < self.min_subtotal:
             return False, f"Minimum order amount is {self.min_subtotal:.2f} €."
 
-        paid_q = CouponRedemption.objects.filter(
-            coupon=self,
-            order__status="paid",
-        )
+        paid_q = CouponRedemption.objects.filter(coupon=self, order__status="paid")
 
         if self.max_uses is not None and paid_q.count() >= self.max_uses:
             return False, "Coupon usage limit reached."
 
         if user and self.max_uses_per_user is not None:
             user_paid = paid_q.filter(user=user).count()
-            has_open = Order.objects.filter(
-                user=user,
-                coupon=self,
-            ).exclude(status__in=["cancelled", "failed"]).exists()
-
+            has_open = Order.objects.filter(user=user, couponredemption__coupon=self).exclude(status__in=["cancelled", "failed"]).exists()
             if user_paid >= self.max_uses_per_user or has_open:
                 return False, "You have already used this coupon."
 
@@ -1073,11 +866,7 @@ class Coupon(models.Model):
         Compute discount in EUR (gross).
         """
         elig_subtotal = self.eligible_items_subtotal(items)
-
-        if self.products.exists() or (self.categories or []):
-            base = elig_subtotal
-        else:
-            base = Decimal(cart_subtotal)
+        base = elig_subtotal if (self.products.exists() or (self.categories or [])) else Decimal(cart_subtotal)
 
         if base <= 0:
             return Decimal("0.00")
@@ -1095,23 +884,9 @@ class Coupon(models.Model):
 
 
 class CouponRedemption(models.Model):
-    coupon = models.ForeignKey(
-        Coupon,
-        on_delete=models.CASCADE,
-        related_name="redemptions",
-    )
-    user = models.ForeignKey(
-        User,
-        on_delete=models.CASCADE,
-        related_name="coupon_redemptions",
-        null=True,
-        blank=True,
-    )
-    order = models.OneToOneField(
-        "Order",
-        on_delete=models.CASCADE,
-        related_name="coupon_redemption",
-    )
+    coupon = models.ForeignKey(Coupon, on_delete=models.CASCADE, related_name="redemptions")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="coupon_redemptions", null=True, blank=True)
+    order = models.OneToOneField("Order", on_delete=models.CASCADE, related_name="coupon_redemption")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -1123,18 +898,8 @@ class CouponRedemption(models.Model):
 
 class PromotionBanner(models.Model):
     name = models.CharField(max_length=64)
-    coupon = models.ForeignKey(
-        "Coupon",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="promotions",
-    )
-    code = models.CharField(
-        max_length=32,
-        blank=True,
-        help_text="Optional manual code (used if coupon FK empty)",
-    )
+    coupon = models.ForeignKey("Coupon", null=True, blank=True, on_delete=models.SET_NULL, related_name="promotions")
+    code = models.CharField(max_length=32, blank=True, help_text="Optional manual code (used if coupon FK empty)")
 
     headline = models.CharField(max_length=120)
     subheadline = models.CharField(max_length=180, blank=True)
@@ -1149,16 +914,9 @@ class PromotionBanner(models.Model):
     image = models.ImageField(upload_to="promos/", null=True, blank=True)
 
     # Target markets (empty = all)
-    country_whitelist = ArrayField(
-        models.CharField(max_length=2),
-        default=list,
-        blank=True,
-    )
+    country_whitelist = ArrayField(models.CharField(max_length=2), default=list, blank=True)
 
-    priority = models.IntegerField(
-        default=0,
-        help_text="Higher wins when multiple promos overlap",
-    )
+    priority = models.IntegerField(default=0, help_text="Higher wins when multiple promos overlap")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1170,9 +928,7 @@ class PromotionBanner(models.Model):
         return self.name
 
     def current_code(self) -> str:
-        return (
-            self.coupon.code if self.coupon_id else (self.code or "")
-        ).upper()
+        return (self.coupon.code if self.coupon_id else (self.code or "")).upper()
 
     def active_now(self, now=None) -> bool:
         now = now or timezone.now()
@@ -1182,10 +938,7 @@ class PromotionBanner(models.Model):
 # ----------------- Returns -----------------
 
 class ReturnRequest(models.Model):
-    REQUEST_TYPES = (
-        ("cancel", "Cancel"),
-        ("return", "Return"),
-    )
+    REQUEST_TYPES = (("cancel", "Cancel"), ("return", "Return"))
     STATUS = [
         ("requested", "Requested"),
         ("approved", "Approved"),
@@ -1194,35 +947,16 @@ class ReturnRequest(models.Model):
         ("refunded", "Refunded"),
     ]
 
-    order = models.ForeignKey(
-        "Order",
-        on_delete=models.CASCADE,
-        related_name="return_requests",
-    )
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="return_requests",
-    )
+    order = models.ForeignKey("Order", on_delete=models.CASCADE, related_name="return_requests")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="return_requests")
     message = models.TextField(blank=True, default="")
-    status = models.CharField(
-        max_length=16,
-        choices=STATUS,
-        default="requested",
-    )
-    request_type = models.CharField(
-        max_length=16,
-        choices=REQUEST_TYPES,
-    )
+    status = models.CharField(max_length=16, choices=STATUS, default="requested")
+    request_type = models.CharField(max_length=16, choices=REQUEST_TYPES)
     created_at = models.DateTimeField(auto_now_add=True)
 
 
 class ReturnAttachment(models.Model):
-    request = models.ForeignKey(
-        ReturnRequest,
-        on_delete=models.CASCADE,
-        related_name="attachments",
-    )
+    request = models.ForeignKey(ReturnRequest, on_delete=models.CASCADE, related_name="attachments")
     file = models.FileField(upload_to="returns/%Y/%m/")
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
@@ -1230,11 +964,7 @@ class ReturnAttachment(models.Model):
 # ----------------- Invoices -----------------
 
 class Invoice(models.Model):
-    order = models.OneToOneField(
-        "Order",
-        on_delete=models.CASCADE,
-        related_name="invoice",
-    )
+    order = models.OneToOneField("Order", on_delete=models.CASCADE, related_name="invoice")
     number = models.CharField(max_length=32, unique=True)
     pdf = models.FileField(upload_to="invoices/")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1246,29 +976,13 @@ class Invoice(models.Model):
 # ----------------- Reviews -----------------
 
 class Review(models.Model):
-    user = models.ForeignKey(
-        User,
-        on_delete=models.CASCADE,
-        related_name="reviews",
-    )
-    product = models.ForeignKey(
-        Product,
-        on_delete=models.CASCADE,
-        related_name="reviews",
-    )
-    rating = models.PositiveIntegerField()
-    message = models.TextField()
-    image = models.ImageField(
-        upload_to="review_images/",
-        blank=True,
-        null=True,
-    )
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="reviews")
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="reviews")
+    rating = models.PositiveIntegerField(validators=[MinValueValidator(1), MaxValueValidator(5)])
+    message = models.TextField(blank=True, default="")
+    image = models.ImageField(upload_to="review_images/", blank=True, null=True)
     author_name = models.CharField(max_length=100, blank=True, default="")
-    author_avatar = models.ImageField(
-        upload_to="review_avatars/",
-        blank=True,
-        null=True,
-    )
+    author_avatar = models.ImageField(upload_to="review_avatars/", blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -1278,14 +992,8 @@ class Review(models.Model):
 # ----------------- Birthday Coupons -----------------
 
 class BirthdayCouponLog(models.Model):
-    user = models.ForeignKey(
-        User,
-        on_delete=models.CASCADE,
-        related_name="birthday_coupons",
-    )
-    sent_on = models.DateField(
-        help_text="Store the YYYY-MM-DD we sent the birthday coupon",
-    )
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="birthday_coupons")
+    sent_on = models.DateField(help_text="Store the YYYY-MM-DD we sent the birthday coupon")
     coupon_code = models.CharField(max_length=32, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
