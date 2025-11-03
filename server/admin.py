@@ -169,36 +169,19 @@ class OrderAdmin(admin.ModelAdmin):
     search_fields = ("number", "user__email", "email")
     actions = [mark_paid, mark_shipped, mark_cancelled]
 
-    # All computed fields must live here
     readonly_fields = (
-        "number", "subtotal", "discount_amount", "shipping_fee", "total_price",
-        "payment_ref", "payment_id", "created_at", "updated_at",
-        "items_readonly", "delivered_at", "cancelled_at",
-        "customer_email", "shipping_snapshot_readonly",
+        "number","subtotal","discount_amount","shipping_fee","total_price",
+        "payment_ref","payment_id","created_at","updated_at",
+        "items_readonly","delivered_at","cancelled_at",
+        "customer_email","shipping_snapshot_readonly",
     )
-
-    # IMPORTANT: do NOT use `fields` here.
     fieldsets = (
-        (None, {
-            "fields": ("number", "user", "customer_email", "created_at", "delivered_at", "cancelled_at")
-        }),
-        ("Status & Shipping", {
-            # show only REAL model fields here (adjust names to your model)
-            "fields": ("status", "payment_method", "tracking_number")
-            # if your model does NOT have tracking_number, drop it from here
-        }),
-        ("Totals", {
-            "fields": ("subtotal", "discount_amount", "shipping_fee", "total_price")
-        }),
-        ("Shipping snapshot", {
-            "fields": ("shipping_snapshot_readonly",)
-        }),
-        ("Items", {
-            "fields": ("items_readonly",)
-        }),
-        ("Payment refs", {
-            "fields": ("payment_ref", "payment_id")
-        }),
+        (None, {"fields": ("number","user","customer_email","created_at","delivered_at","cancelled_at")}),
+        ("Status & Payment", {"fields": ("status","payment_method")}),  # <- no tracking_number here
+        ("Totals", {"fields": ("subtotal","discount_amount","shipping_fee","total_price")}),
+        ("Shipping snapshot", {"fields": ("shipping_snapshot_readonly",)}),
+        ("Items", {"fields": ("items_readonly",)}),
+        ("Payment refs", {"fields": ("payment_ref","payment_id")}),
     )
 
     inlines = [OrderItemInline]
@@ -339,16 +322,24 @@ class CustomUserAdmin(DjangoUserAdmin):
         (None, {"classes": ("wide",), "fields": ("email", "username", "password1", "password2", "is_staff", "is_active")}),
     )
     search_fields = ("email", "username")
+    
+    def _user_addresses_referenced(self, user_id: int) -> bool:
+        # Works even if the ORM field was removed but the DB FK/column still exists.
+        with connection.cursor() as cur:
+            cur.execute("""
+                SELECT 1
+                FROM server_order o
+                JOIN server_address a ON a.id = o.shipping_address_id
+                WHERE a.user_id = %s
+                LIMIT 1
+            """, [user_id])
+            return cur.fetchone() is not None
 
     def _has_order_links(self, user):
-        from .models import Order, Address
-        # any order directly tied to user?
+        from .models import Order
         if Order.objects.filter(user=user).exists():
             return True
-        # any order referencing an address of this user?
-        if Order.objects.filter(shipping_address__user=user).exists():
-            return True
-        return False
+        return self._user_addresses_referenced(user.id)
 
     def delete_model(self, request, obj):
         if self._has_order_links(obj):
