@@ -41,7 +41,7 @@ from dateutil.relativedelta import relativedelta
 
 # --- local imports (models/serializers/utils) ---
 from .models import (
-    Address, Product, Review, Order, Wishlist,
+    Address, Product, Review, Order, Wishlist, OrderItem,
     OnDemandOrderRequest, NewsletterSubscriber, ContactMessage,
     PromotionBanner, StockAlert, ReturnRequest, ReturnAttachment,
     NaturalStone, NaturalStoneImage
@@ -1142,21 +1142,43 @@ class StripeCreateIntent(APIView):
     """
 
     def post(self, request):
-        ser = OrderCreateSerializer(data=request.data, context={"request": request})
-        try:
-            ser.is_valid(raise_exception=True)
-        except serializers.ValidationError as ve:
-            return Response({"detail": "Order validation failed", "errors": ve.detail}, status=400)
+        data = request.data
+        items = data.get("items") or []
+        email = (data.get("email") or "").strip()
 
-        # Create order in DB
-        try:
-            with transaction.atomic():
-                order = ser.save()
-                order.payment_method = ser.validated_data.get("payment_method") or "card"
-                order.status = "pending"
-                order.save(update_fields=["payment_method", "status"])
-        except Exception as e:
-            return Response({"detail": f"Order creation failed: {e}"}, status=400)
+        if not items:
+            return Response({"detail": "No items."}, status=400)
+
+        with transaction.atomic():
+            order = Order.objects.create(
+                payment_method="card",
+                status="pending",
+                email=email or None,
+                # If you set shipping at this stage:
+                shipping_total=Decimal("0.00"),
+            )
+            # create line items
+            for row in items:
+                pid = int(row.get("product_id"))
+                qty = int(row.get("qty") or 0)
+                if qty <= 0:
+                    continue
+
+                p = Product.objects.select_for_update().get(id=pid)
+                unit = p.price_gross or p.price or Decimal("0.00")  # adapt to your fields
+                OrderItem.objects.create(order=order, product=p, qty=qty, unit_price=unit)
+
+            # compute monetary fields safely
+            order.compute_totals()
+            order.save()
+
+            # guard 0 € online payments (your existing check)
+            if order.total_price <= Decimal("0.00"):
+                transaction.set_rollback(True)
+                return Response(
+                    {"detail": "Your total is 0.00 € after discounts. We can't create an online payment for 0 €."},
+                    status=400,
+                )         
 
         total_decimal = Decimal(order.total_price or "0.00")
         if total_decimal <= Decimal("0.00"):
@@ -1205,10 +1227,7 @@ class StripeCreateIntent(APIView):
         order.stripe_pi = intent.id
         order.save(update_fields=["payment_ref", "stripe_pi"])
 
-        return Response(
-            {"clientSecret": intent.client_secret, "order_id": order.id},
-            status=201,
-        )
+        return Response({"order_id": order.id, "client_secret": intent.client_secret})
 
 # ---------------------------
 # STRIPE: card installments (authenticated only)
