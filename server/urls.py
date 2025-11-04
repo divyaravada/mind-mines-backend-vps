@@ -39,7 +39,7 @@ from .views import (
     WishlistView, WishlistDetailView,
 
     # Orders (user)
-    OrderListAPIView, OrderCreateView, OrderDetailAPIView,
+    OrderListAPIView, OrderCreateView, OrderDetailAPIView,OrderDetailPublicAPIView,
     OrderInvoiceAPIView, InvoiceDownloadView,
 
     # Orders (admin helpers)
@@ -140,6 +140,7 @@ urlpatterns = [
     path("orders/", OrderListAPIView.as_view(), name="order_list"),
     path("orders/create/", OrderCreateView.as_view(), name="order_create"),
     path("orders/<int:pk>/", OrderDetailAPIView.as_view(), name="order_detail"),
+    path("orders/<int:pk>/", OrderDetailPublicAPIView.as_view(), name="order_detail_public"),
     path("orders/<int:pk>/invoice/", OrderInvoiceAPIView.as_view(), name="order_invoice"),
     path("orders/<int:pk>/invoice/download/", InvoiceDownloadView.as_view(), name="order_invoice_download"),
 

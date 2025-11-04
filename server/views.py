@@ -698,6 +698,20 @@ class OrderCreateView(APIView):
             order = ser.save()
         return Response(OrderReadSerializer(order, context={"request": request}).data, status=201)
 
+class OrderDetailPublicAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk: int):
+        o = get_object_or_404(Order, pk=pk)
+        return Response({
+            "id": o.id,
+            "number": o.number,
+            "status": o.status,
+            "payment_status": getattr(o, "payment_status", ""),
+            "total_price": f"{o.total_price:.2f}",
+            "created_at": o.created_at,
+        })
+    
 class OrderDetailAPIView(generics.RetrieveAPIView):
     serializer_class = OrderReadSerializer
     permission_classes = [IsAuthenticated]
@@ -737,21 +751,17 @@ class OrderAdminUpdateAPIView(APIView):
             return Response({"detail": "No updatable fields provided."}, status=400)
         order.save()
 
-        # status transitions -> emails and stock/invoice handling
         if prev_status != "paid" and order.status == "paid":
-            inv = generate_invoice_pdf(order)
             _safe(order.reserve_stock_atomic)
-            try:
-                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                send_invoice_email(order, user_locale=user_locale, to=_order_to(order))
-            except Exception:
-                pass
+            order.assign_unique_invoice_number()
+            _safe(generate_invoice_pdf, order)
+            user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+            _safe(send_invoice_email, order, user_locale=user_locale, to=_order_to(order))
+
         elif prev_status != "processing" and order.status == "processing":
-            try:
-                locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                send_order_confirmation(order, user_locale=locale, to=_order_to(order))
-            except Exception:
-                pass
+            user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+            _safe(send_order_confirmation, order, user_locale=user_locale, to=_order_to(order))
+
         elif prev_status != "failed" and order.status == "failed":
             _safe(order.release_stock_atomic)
 
@@ -767,10 +777,10 @@ class SetTrackingAPIView(APIView):
         if not order.shipped_at:
             order.shipped_at = timezone.now()
         order.save(update_fields=["tracking_number","tracking_carrier","tracking_url","shipped_at"])
-        inv = generate_invoice_pdf(order)
+        _safe(generate_invoice_pdf, order)
         user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-        send_invoice_email(order, user_locale=user_locale)
-        return Response({"status": "ok", "invoice": inv.number})
+        _safe(send_invoice_email, order, user_locale=user_locale, to=_order_to(order))
+        return Response({"status": "ok", "invoice": getattr(getattr(order, "invoice", None), "number", "")})
 
 # -----------------------------------------------------------------------------
 # Coupons / Promotions
@@ -1155,14 +1165,6 @@ def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> Op
 # ---------------------------
 class StripeCreateIntent(APIView):
     permission_classes = [permissions.AllowAny]
-    """
-    1. Create local Order(status=pending)
-    2. Create Stripe PaymentIntent with payment_method_types including:
-       - 'card' always
-       - 'klarna', 'giropay', 'sofort' etc. when cart total high enough
-    3. return {clientSecret, order_id}
-    Webhook will finalize order -> paid/failed/processing.
-    """
 
     def post(self, request):
         ser = OrderCreateSerializer(data=request.data, context={"request": request})
@@ -1184,12 +1186,11 @@ class StripeCreateIntent(APIView):
             order.save(update_fields=["status"])
             return Response({"detail": "Total must be > 0."}, status=400)
 
-        # Decide allowed payment methods for this PI
+        # allow extra methods on bigger carts (optional)
         pm_types = ["card"]
         if total >= Decimal("10.00"):
-            pm_types += ["klarna", "giropay", "sofort"]  # Stripe can redirect/BNPL
+            pm_types += ["klarna", "giropay", "sofort"]
 
-        # optional Stripe customer (for logged-in)
         customer_id = None
         if getattr(request, "user", None) and request.user.is_authenticated:
             try:
@@ -1197,22 +1198,21 @@ class StripeCreateIntent(APIView):
             except stripe_error.StripeError:
                 pass
 
-        # create PaymentIntent
         try:
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(total),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                payment_method_types=["card"],
+                payment_method_types=pm_types,  # <-- IMPORTANT
                 description=f"Order {order.number or order.id} — MindMines",
                 metadata={"order_id": str(order.id)},
                 receipt_email=order.email or None,
+                customer=customer_id or None,
             )
         except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
 
-        # persist PI id
         order.payment_ref = intent.id
         order.stripe_pi = intent.id
         order.save(update_fields=["payment_ref", "stripe_pi"])
@@ -1557,7 +1557,7 @@ def stripe_webhook(request):
             order.paid_at = timezone.now()
             changed = True
 
-        # store final charge id
+        # final charge id if available
         if not order.payment_id:
             ch_id = None
             charges_block = pi_data.get("charges", {})
@@ -1570,16 +1570,17 @@ def stripe_webhook(request):
                 order.payment_id = ch_id
                 changed = True
 
+
         if changed:
             order.save(update_fields=["status","payment_status","paid_at","payment_id"])
 
         # stock, invoice, email
         _safe(order.reserve_stock_atomic)
         order.assign_unique_invoice_number()
-        # Invoice + email (per requirements)
-        generate_invoice_pdf(order)
+        _safe(generate_invoice_pdf, order)  # wrap PDF
         user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
         _safe(send_invoice_email, order, user_locale=user_locale, to=_order_to(order))
+        _safe(send_order_confirmation, order, user_locale=user_locale, to=_order_to(order))
 
     # payment_intent.succeeded => normal card, klarna, sofort, giropay
     if etype == "payment_intent.succeeded":
@@ -1588,28 +1589,10 @@ def stripe_webhook(request):
             try:
                 with transaction.atomic():
                     order = Order.objects.select_for_update().get(pk=oid)
-                    # mark paid
-                    order.status = "paid"
-                    order.payment_status = "paid"
-                    order.paid_at = timezone.now()
-                    # set a final charge id if available
-                    ch_id = None
-                    charges = data.get("charges", {})
-                    items = charges.get("data") if isinstance(charges, dict) else None
-                    if items:
-                        ch_id = items[0].get("id")
-                    order.payment_id = ch_id or data.get("id", "") or order.payment_id
-                    order.save(update_fields=["status", "payment_status", "paid_at", "payment_id"])
-
-                    # invoice + email
-                    order.assign_unique_invoice_number()
-                    generate_invoice_pdf(order)
-                    send_invoice_email(order, to=_order_to(order))
-                    send_order_confirmation(order, to=_order_to(order))
+                    _mark_paid(order, data)
             except Order.DoesNotExist:
                 pass
 
-    # invoice.payment_succeeded => recurring installments charge
     elif etype == "invoice.payment_succeeded":
         oid = (data.get("metadata") or {}).get("order_id")
         if oid:
@@ -1630,12 +1613,11 @@ def stripe_webhook(request):
                     if order.status != "processing":
                         order.status = "processing"
                         order.payment_status = "processing"
-                        order.save(update_fields=["status","payment_status"])
+                        order.save(update_fields=["status", "payment_status"])
                         _safe(send_sepa_pending_email, order, to=_order_to(order))
             except Order.DoesNotExist:
                 pass
 
-    # payment failed
     elif etype in ("payment_intent.payment_failed", "invoice.payment_failed"):
         oid = (data.get("metadata") or {}).get("order_id")
         if oid:
@@ -1644,8 +1626,8 @@ def stripe_webhook(request):
                     order = Order.objects.select_for_update().get(pk=oid)
                     order.status = "failed"
                     order.payment_status = "failed"
-                    order.save(update_fields=["status","payment_status"])
-                  #  _safe(order.release_stock_atomic)
+                    order.save(update_fields=["status", "payment_status"])
+                    _safe(order.release_stock_atomic)
             except Order.DoesNotExist:
                 pass
 
@@ -2033,37 +2015,74 @@ class GuestInvoiceDownloadView(APIView):
 # Payment status update (from frontend echo)
 # -----------------------------------------------------------------------------
 class OrderPaymentStatusUpdateAPIView(APIView):
-    """Optional fallback if you want to mark status immediately after confirmPayment (not required)."""
     permission_classes = [AllowAny]
 
     def post(self, request, pk: int):
         order = get_object_or_404(Order, pk=pk)
         intent_id = (request.data.get("intent_id") or "").strip()
         payment_status = (request.data.get("payment_status") or "").strip().lower()
+        gateway_ref = (request.data.get("gateway_ref") or "").strip()
+
         if not payment_status:
             return Response({"detail": "payment_status is required."}, status=400)
 
-        # Minimal normalize
-        if payment_status in {"succeeded", "paid", "completed"}:
-            order.payment_status = "paid"
-            order.status = "paid"
-            order.paid_at = timezone.now()
-            if intent_id:
-                order.payment_ref = intent_id
-            order.save(update_fields=["payment_status", "status", "paid_at", "payment_ref"])
-            order.assign_unique_invoice_number()
-            generate_invoice_pdf(order)
-            send_invoice_email(order, to=_order_to(order))
-            send_order_confirmation(order, to=_order_to(order))
-        elif payment_status in {"processing", "requires_capture"}:
-            order.payment_status = "processing"
-            order.status = "processing"
-            if intent_id:
-                order.payment_ref = intent_id
-            order.save(update_fields=["payment_status", "status", "payment_ref"])
-        else:
-            order.payment_status = "failed"
-            order.status = "failed"
-            order.save(update_fields=["payment_status", "status"])
+        synonyms_paid = {"succeeded", "completed", "paid", "success"}
+        synonyms_processing = {"processing", "pending", "requires_action", "requires_capture"}
+        synonyms_failed = {"failed", "canceled", "cancelled", "error"}
 
-        return Response({"ok": True}, status=200)
+        if payment_status in synonyms_paid:
+            normalized = "paid"
+        elif payment_status in synonyms_processing:
+            normalized = "processing"
+        elif payment_status in synonyms_failed:
+            normalized = "failed"
+        else:
+            normalized = payment_status  # best-effort
+
+        updates = []
+        order.payment_status = normalized
+        updates.append("payment_status")
+
+        if gateway_ref or intent_id:
+            order.payment_ref = gateway_ref or intent_id
+            updates.append("payment_ref")
+
+        if normalized == "paid":
+            if order.status != "paid":
+                _safe(order.reserve_stock_atomic)
+                order.status = "paid"
+                updates.append("status")
+                order.paid_at = timezone.now()
+                updates.append("paid_at")
+                order.save(update_fields=list(set(updates)))
+                order.assign_unique_invoice_number()
+                _safe(generate_invoice_pdf, order)
+                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+                _safe(send_invoice_email, order, user_locale=user_locale, to=_order_to(order))
+                _safe(send_order_confirmation, order, user_locale=user_locale, to=_order_to(order))
+            else:
+                order.save(update_fields=list(set(updates)) or ["payment_status"])
+
+        elif normalized == "processing":
+            if order.status not in ("paid", "failed"):
+                order.status = "processing"
+                updates.append("status")
+                order.save(update_fields=list(set(updates)))
+                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+                _safe(send_order_confirmation, order, user_locale=user_locale, to=_order_to(order))
+            else:
+                order.save(update_fields=list(set(updates)) or ["payment_status"])
+
+        else:  # failed
+            order.status = "failed"
+            updates.append("status")
+            order.save(update_fields=list(set(updates)))
+            _safe(order.release_stock_atomic)
+
+        return Response({
+            "order_id": order.id,
+            "number": order.number,
+            "status": order.status,
+            "payment_status": getattr(order, "payment_status", ""),
+            "total_price": f"{order.total_price:.2f}",
+        }, status=200)
