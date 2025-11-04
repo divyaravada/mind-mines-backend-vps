@@ -897,6 +897,7 @@ class OrderCreateSerializer(serializers.Serializer):
                 payment_method=payment_method,
                 installments_months=installments_months if installments_months else None,
                 stock_locked=False,
+                stock_released=False,
                 status="pending",
                 # snapshot shipping
                 ship_first_name=shipping_data.get("first_name") or "",

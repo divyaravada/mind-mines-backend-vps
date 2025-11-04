@@ -648,6 +648,10 @@ class Order(models.Model):
         default=False,
         help_text="True once inventory for items is reserved."
     )
+    stock_released = models.BooleanField(
+        default=False,
+        help_text="True when a previous reservation was returned to stock."
+    )
 
     class Meta:
         constraints = [

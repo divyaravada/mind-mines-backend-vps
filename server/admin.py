@@ -233,6 +233,16 @@ class OrderAdmin(admin.ModelAdmin):
     inlines = [OrderItemInline]
 
     # ---- list_display helpers ----
+    def release_stock(self):
+        if not self.stock_locked:
+            # still mark released if you consider it a no-op
+            self.stock_released = True
+            self.save(update_fields=["stock_released"])
+            return
+        self.stock_locked = False
+        self.stock_released = True
+        self.save(update_fields=["stock_locked", "stock_released"])
+    
     def customer_email(self, obj):
         return getattr(obj, "email", None) or getattr(getattr(obj, "user", None), "email", None) or "-"
     customer_email.short_description = "Email"
