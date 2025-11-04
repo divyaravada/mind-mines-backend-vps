@@ -12,7 +12,7 @@ from django.core.mail import EmailMultiAlternatives, send_mail
 from django.db import transaction
 from django.db.models import Q, Avg, Count
 from django.db.models.functions import Lower
-from django.http import JsonResponse, Http404, HttpResponse, FileResponse
+from django.http import JsonResponse, Http404, HttpResponse, FileResponse, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404
 from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.utils import timezone
@@ -21,6 +21,7 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.timezone import make_aware
 from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 
 from itsdangerous import TimestampSigner
 
@@ -1160,9 +1161,211 @@ def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> Op
         return customer.id
     return None
 
+def stripe_client():
+    stripe.api_key = settings.STRIPE_SECRET_KEY
+    stripe.set_app_info(name="MindMines", version="1.0.0")
+    return stripe
+
+def eur_cents(amount: Decimal) -> int:
+    # Quantize to 2dp, convert to Stripe's integer amount
+    q = Decimal(amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return int(q * 100)
+
 # ---------------------------
 # STRIPE: immediate one-shot (card / klarna / giropay / sofort etc.)
 # ---------------------------
+class StripeCreateIntentAPIView(APIView):
+    """
+    Creates or updates a Stripe PaymentIntent for credit cards.
+    Flow:
+      1) Frontend creates the Order via OrderCreateView (you already have it).
+      2) Frontend calls POST /api/stripe/create-intent/ with {"order_id": <id>}
+      3) We reserve stock, create (or update) PI tied to this order, return client_secret.
+      4) Frontend confirms with stripe.confirmCardPayment(client_secret, {payment_method})
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        try:
+            data = request.data if hasattr(request, "data") else json.loads(request.body.decode("utf-8"))
+            order_id = int(data.get("order_id") or 0)
+            if not order_id:
+                return Response({"detail": "order_id is required"}, status=400)
+
+            order = Order.objects.select_for_update().get(pk=order_id)  # lock row
+        except Order.DoesNotExist:
+            return Response({"detail": "Order not found"}, status=404)
+        except Exception as e:
+            return Response({"detail": f"Invalid payload: {e}"}, status=400)
+
+        # Must be payable and > 0
+        if order.total_price <= Decimal("0.00"):
+            return Response({"detail": "Your total is 0.00 € after discounts. We can't create an online payment for 0 €."},
+                            status=400)
+
+        # Only for card here
+        order.payment_method = "card"
+        order.payment_status = "processing"
+        order.save(update_fields=["payment_method", "payment_status"])
+
+        # Reserve stock if not already
+        try:
+            if not order.stock_locked:
+                order.lock_stock()
+        except Exception as e:
+            return Response({"detail": f"Not enough stock: {e}"}, status=400)
+
+        stripe = stripe_client()
+        amount_cents = eur_cents(order.total_price)
+        description = f"MindMines Order {order.number}"
+        meta = {
+            "order_id": str(order.pk),
+            "order_number": order.number,
+            "email": order.email,
+        }
+
+        # Create or update the PaymentIntent
+        if order.stripe_pi:
+            try:
+                pi = stripe.PaymentIntent.modify(
+                    order.stripe_pi,
+                    amount=amount_cents,
+                    currency=settings.STRIPE_CURRENCY,
+                    description=description,
+                    metadata=meta,
+                    automatic_payment_methods={"enabled": False},  # card-only control
+                    payment_method_types=["card"],
+                )
+            except stripe.error.InvalidRequestError:
+                # If the existing PI is in a terminal state, create a new one
+                pi = stripe.PaymentIntent.create(
+                    amount=amount_cents,
+                    currency=settings.STRIPE_CURRENCY,
+                    description=description,
+                    metadata=meta,
+                    payment_method_types=["card"],
+                    capture_method="automatic",
+                )
+                order.stripe_pi = pi.id
+                order.payment_ref = ""
+                order.payment_id = ""
+                order.save(update_fields=["stripe_pi", "payment_ref", "payment_id"])
+        else:
+            pi = stripe.PaymentIntent.create(
+                amount=amount_cents,
+                currency=settings.STRIPE_CURRENCY,
+                description=description,
+                metadata=meta,
+                payment_method_types=["card"],
+                capture_method="automatic",
+            )
+            order.stripe_pi = pi.id
+            order.save(update_fields=["stripe_pi"])
+
+        return Response({
+            "order_id": order.pk,
+            "order_number": order.number,
+            "amount": str(order.total_price),
+            "currency": settings.STRIPE_CURRENCY,
+            "payment_intent_id": pi.id,
+            "client_secret": pi.client_secret,
+        }, status=201)
+
+@method_decorator(csrf_exempt, name="dispatch")
+class StripeWebhookView(APIView):
+    """
+    Handles Stripe webhook events:
+      - payment_intent.succeeded -> mark order paid, set paid_at, generate invoice, send emails
+      - payment_intent.payment_failed -> mark order failed, release stock
+      - charge.refunded / payment_intent.canceled -> set status accordingly, release stock if needed
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        payload = request.body
+        sig_header = request.META.get("HTTP_STRIPE_SIGNATURE", "")
+        stripe = stripe_client()
+        endpoint_secret = settings.STRIPE_WEBHOOK_SECRET
+
+        try:
+            event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+        except ValueError:
+            return HttpResponseBadRequest("Invalid payload")
+        except stripe.error.SignatureVerificationError:
+            return HttpResponse(status=400)
+
+        # Route by event type
+        event_type = event.get("type")
+        data = event.get("data", {}).get("object", {})
+
+        if event_type == "payment_intent.succeeded":
+            pi_id = data.get("id")
+            metadata = data.get("metadata", {}) or {}
+            order_id = metadata.get("order_id")
+
+            order = None
+            if order_id:
+                try:
+                    order = Order.objects.get(pk=int(order_id))
+                except Exception:
+                    order = None
+            if not order and pi_id:
+                order = Order.objects.filter(stripe_pi=pi_id).first()
+
+            if order:
+                latest_charge = data.get("latest_charge")
+                order.payment_status = "paid"
+                order.status = "paid"
+                order.paid_at = timezone.now()
+                order.payment_ref = pi_id or order.payment_ref
+                order.payment_id = latest_charge or order.payment_id
+                order.assign_unique_invoice_number()
+                order.save(update_fields=[
+                    "payment_status", "status", "paid_at",
+                    "payment_ref", "payment_id", "invoice_number"
+                ])
+
+                # If you already have signals on paid -> generate_invoice + email, they will run.
+                # If not, ensure invoice exists and emails are sent here.
+                try:                    
+                    generate_invoice_pdf(order)
+                except Exception:
+                    pass
+
+            return HttpResponse(status=200)
+
+        elif event_type == "payment_intent.payment_failed":
+            pi_id = data.get("id")
+            order = Order.objects.filter(stripe_pi=pi_id).first()
+            if order:
+                order.payment_status = "failed"
+                order.status = "failed"
+                order.save(update_fields=["payment_status", "status"])
+                # Release stock if it was held
+                try:
+                    if order.stock_locked:
+                        order.release_stock()
+                except Exception:
+                    pass
+            return HttpResponse(status=200)
+
+        elif event_type in ("payment_intent.canceled", "charge.refunded", "charge.refund.updated"):
+            # Conservative: move to processing/cancelled accordingly and free stock
+            pi_id = data.get("payment_intent") or data.get("id")
+            order = Order.objects.filter(stripe_pi=pi_id).first()
+            if order:
+                order.status = "cancelled" if event_type == "payment_intent.canceled" else order.status
+                order.save(update_fields=["status"])
+                try:
+                    if order.stock_locked and not order.stock_released:
+                        order.release_stock()
+                except Exception:
+                    pass
+            return HttpResponse(status=200)
+
+        # Unhandled:
+        return HttpResponse(status=200)  
+
 class StripeCreateIntent(APIView):
     permission_classes = [permissions.AllowAny]
 
