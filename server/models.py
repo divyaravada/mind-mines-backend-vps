@@ -886,6 +886,33 @@ class Order(models.Model):
     @property
     def is_returnable(self) -> bool:
         return self.status == "delivered" and self.delivered_at and timezone.now() <= (self.delivered_at + timedelta(days=15))
+    @property
+    def shipping_address(self):
+        """
+        Back-compat shim for code that expects order.shipping_address.<field>.
+        Maps to the snapshot fields stored on Order.
+        """
+        return SimpleNamespace(
+            first_name=self.ship_first_name or "",
+            last_name=self.ship_last_name or "",
+            line1=self.ship_line1 or "",
+            line2=self.ship_line2 or "",
+            postal_code=self.ship_postal or "",
+            city=self.ship_city or "",
+            country=self.ship_country or "",
+            phone=self.ship_phone or "",
+            street_name=getattr(self, "ship_street_name", "") or "",
+            house_number=getattr(self, "ship_house_number", "") or "",
+            full_name=(" ".join([self.ship_first_name, self.ship_last_name]).strip()),
+        )
+
+    @property
+    def billing_address(self):
+        """
+        If you don't store a separate billing snapshot, reuse shipping.
+        Update later if you add dedicated billing fields.
+        """
+        return self.shipping_address
 
 
 class OrderItem(models.Model):

@@ -2200,7 +2200,7 @@ class GuestInvoiceDownloadView(APIView):
 class OrderPaymentStatusUpdateAPIView(APIView):
     permission_classes = [AllowAny]
 
-    def post(self, request, pk: int):
+    def post(self, request, pk):
         order = get_object_or_404(Order, pk=pk)
         intent_id = (request.data.get("intent_id") or "").strip()
         payment_status = (request.data.get("payment_status") or "").strip().lower()
@@ -2263,9 +2263,10 @@ class OrderPaymentStatusUpdateAPIView(APIView):
             _safe(order.release_stock_atomic)
 
         return Response({
-            "order_id": order.id,
+            "id": order.id,
             "number": order.number,
             "status": order.status,
             "payment_status": getattr(order, "payment_status", ""),
+            "paid_at": getattr(order, "paid_at", None),
             "total_price": f"{order.total_price:.2f}",
         }, status=200)
