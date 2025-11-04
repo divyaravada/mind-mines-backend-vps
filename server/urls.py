@@ -170,10 +170,6 @@ urlpatterns = [
     path("stripe/webhook/", stripe_webhook, name="stripe_webhook"),
     path("stripe/webhook", stripe_webhook, name="stripe_webhook_no_slash"),
     
-    # Add these aliases to match what Stripe (or your proxy) is calling:
-    path("payments/stripe/webhook/", stripe_webhook, name="stripe_webhook_payments"),
-    path("payments/stripe/webhook", stripe_webhook, name="stripe_webhook_payments_no_slash"),
-    
     path("orders/<int:pk>/payment-status/", OrderPaymentStatusUpdateAPIView.as_view(), name="order_payment_status"),
 
     # -------- Returns / Cancellations --------
