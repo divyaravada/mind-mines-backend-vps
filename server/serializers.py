@@ -866,8 +866,8 @@ class OrderCreateSerializer(serializers.Serializer):
         request = self.context.get("request")
         user = request.user if request and request.user.is_authenticated else None
 
-        items_data = validated_data["items"]
-        shipping_data = validated_data["shipping"]
+        items_data = validated_data.pop("items", [])
+        shipping_data = validated_data.pop("shipping", {})
         coupon_code = (validated_data.get("coupon_code") or "").strip()
         payment_method = validated_data.get("payment_method")
         installments_months = validated_data.get("installments_months")
@@ -886,7 +886,7 @@ class OrderCreateSerializer(serializers.Serializer):
         with transaction.atomic():
             order = Order.objects.create(
                 user=user if user else None,
-                email=validated_data["email"].strip().lower(),
+                email=validated_data.get("email"),
                 # money fields (shipping/vat will be recomputed below)
                 subtotal=subtotal,
                 discount_total=discount,
@@ -896,24 +896,25 @@ class OrderCreateSerializer(serializers.Serializer):
                 # payment
                 payment_method=payment_method,
                 installments_months=installments_months if installments_months else None,
+                stock_locked=False,
                 status="pending",
                 # snapshot shipping
-                ship_first_name=shipping_data["first_name"],
-                ship_last_name=shipping_data["last_name"],
-                ship_line1=shipping_data["line1"],
-                ship_line2=shipping_data.get("line2", ""),
-                ship_postal=shipping_data["postal_code"],
-                ship_city=shipping_data["city"],
-                ship_country=shipping_data["country"],
-                ship_phone=shipping_data.get("phone", ""),
-                ship_street_name=shipping_data.get("street_name", ""),
-                ship_house_number=shipping_data.get("house_number", ""),
+                ship_first_name=shipping_data.get("first_name") or "",
+                ship_last_name=shipping_data.get("last_name") or "",
+                ship_line1=shipping_data.get("line1") or "",
+                ship_line2=shipping_data.get("line2") or "",
+                ship_postal=shipping_data.get("postal_code") or "",
+                ship_city=shipping_data.get("city") or "",
+                ship_country=shipping_data.get("country") or "",
+                ship_phone=shipping_data.get("phone") or "",
+                ship_street_name=shipping_data.get("street_name") or "",
+                ship_house_number=shipping_data.get("house_number") or "",
             )
 
             # Create items and compute using product.final_price_gross
             items_created = []
             for it in items_data:
-                prod = Product.objects.get(pk=it["product_id"])
+                prod = Product.objects.select_for_update().get(pk=it["product_id"])
                 unit = Decimal(str(getattr(prod, "final_price_gross", None) or prod.price_gross))
                 item = OrderItem.objects.create(
                     order=order,

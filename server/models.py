@@ -8,7 +8,6 @@ from django.core.exceptions import ValidationError
 from django.core.validators import EmailValidator, MinValueValidator, MaxValueValidator
 from django.utils import timezone
 from django.conf import settings
-
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import timedelta, datetime
 import secrets
@@ -645,6 +644,10 @@ class Order(models.Model):
     confirmation_sent_at = models.DateTimeField(null=True, blank=True)
     invoice_sent_at = models.DateTimeField(null=True, blank=True)
     failed_email_sent_at = models.DateTimeField(null=True, blank=True)
+    stock_locked = models.BooleanField(
+        default=False,
+        help_text="True once inventory for items is reserved."
+    )
 
     class Meta:
         constraints = [
@@ -738,6 +741,43 @@ class Order(models.Model):
                 if it.product and hasattr(it.product, "quantity"):
                     it.product.quantity = F("quantity") + it.quantity
                     it.product.save(update_fields=["quantity"])
+    
+    def lock_stock(self) -> None:
+        """
+        Reserve stock for all items on this order (idempotent).
+        """
+        if self.stock_locked:
+            return
+        
+        with transaction.atomic():
+            # pessimistic lock products touched by this order
+            item_qs = self.items.select_related("product").select_for_update()
+            for it in item_qs:
+                prod = it.product
+                if not prod:
+                    continue
+                if (prod.quantity or 0) < it.quantity:
+                    raise ValueError(f"Insufficient stock for {prod} (have {prod.quantity}, need {it.quantity})")
+                type(prod).objects.filter(pk=prod.pk).update(quantity=F("quantity") - it.quantity)
+            self.stock_locked = True
+            self.save(update_fields=["stock_locked"])
+
+    def release_stock(self) -> None:
+        """
+        Put reserved stock back (used on cancellation).
+        """
+        if not self.stock_locked:
+            return
+        
+        with transaction.atomic():
+            item_qs = self.items.select_related("product").select_for_update()
+            for it in item_qs:
+                prod = it.product
+                if not prod:
+                    continue
+                type(prod).objects.filter(pk=prod.pk).update(quantity=F("quantity") + it.quantity)
+            self.stock_locked = False
+            self.save(update_fields=["stock_locked"])
 
     # ---- invoices ----
 
