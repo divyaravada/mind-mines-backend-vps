@@ -2,6 +2,9 @@
 
 from django.db import migrations, models
 
+def backfill(apps, schema_editor):
+    Order = apps.get_model("server", "Order")
+    Order.objects.filter(stock_locked__isnull=True).update(stock_locked=False)
 
 class Migration(migrations.Migration):
 
@@ -15,4 +18,5 @@ class Migration(migrations.Migration):
             name='stock_locked',
             field=models.BooleanField(default=False, help_text='True once inventory for items is reserved.'),
         ),
+        migrations.RunPython(backfill, migrations.RunPython.noop),
     ]
