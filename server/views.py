@@ -1168,9 +1168,11 @@ class StripeCreateIntent(APIView):
 
     def post(self, request):
         ser = OrderCreateSerializer(data=request.data, context={"request": request})
-        ser.is_valid(raise_exception=True)
+        try:
+            ser.is_valid(raise_exception=True)
+        except serializers.ValidationError as ve:
+            return Response({"detail": "Order validation failed", "errors": ve.detail}, status=400)
 
-        # Create order in DB
         try:
             with transaction.atomic():
                 order = ser.save()
@@ -1186,27 +1188,14 @@ class StripeCreateIntent(APIView):
             order.save(update_fields=["status"])
             return Response({"detail": "Total must be > 0."}, status=400)
 
-        # allow extra methods on bigger carts (optional)
-        pm_types = ["card"]
-        if total >= Decimal("10.00"):
-            pm_types += ["klarna", "giropay", "sofort"]
-
-        customer_id = None
-        if getattr(request, "user", None) and request.user.is_authenticated:
-            try:
-                customer_id = _get_or_create_stripe_customer(request.user, email=order.email)
-            except stripe_error.StripeError:
-                pass
-
         try:
             intent = stripe.PaymentIntent.create(
                 amount=_amount_cents(total),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                payment_method_types=pm_types,  # <-- IMPORTANT
+                payment_method_types=["card"],
                 description=f"Order {order.number or order.id} — MindMines",
                 metadata={"order_id": str(order.id)},
                 receipt_email=order.email or None,
-                customer=customer_id or None,
             )
         except stripe_error.StripeError as e:
             order.status = "failed"
