@@ -1589,7 +1589,7 @@ def stripe_webhook(request):
             try:
                 with transaction.atomic():
                     order = Order.objects.select_for_update().get(pk=oid)
-                    _mark_paid(order, data)
+                    _mark_paid(order, data)  # <— use the guarded helper
             except Order.DoesNotExist:
                 pass
 
