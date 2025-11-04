@@ -732,19 +732,51 @@ class Order(models.Model):
         Decrement product.quantity for each item atomically with row locks.
         """
         with transaction.atomic():
-            for it in self.items.select_for_update(of=("self",)).select_related("product"):
-                if it.product and hasattr(it.product, "quantity"):
-                    if (it.product.quantity or 0) < it.quantity:
-                        raise ValidationError(f"Insufficient stock for {it.product}")
-                    it.product.quantity = F("quantity") - it.quantity
-                    it.product.save(update_fields=["quantity"])
+            items = list(self.items.all())  # no select_for_update() here
+            prod_ids = [it.product_id for it in items if it.product_id]
+            if not prod_ids:
+                return
+
+            # Lock product rows only (safe for Postgres)
+            products = {
+                p.id: p
+                for p in Product.objects.select_for_update().filter(id__in=prod_ids)
+            }
+
+            # validate
+            for it in items:
+                if not it.product_id:
+                    continue
+                p = products[it.product_id]
+                if (p.quantity or 0) < it.quantity:
+                    raise ValidationError(f"Insufficient stock for {p}")
+
+            # decrement
+            for it in items:
+                if not it.product_id:
+                    continue
+                Product.objects.filter(id=it.product_id).update(
+                    quantity=F("quantity") - it.quantity
+                )
+
 
     def release_stock_atomic(self):
         with transaction.atomic():
-            for it in self.items.select_for_update(of=("self",)).select_related("product"):
-                if it.product and hasattr(it.product, "quantity"):
-                    it.product.quantity = F("quantity") + it.quantity
-                    it.product.save(update_fields=["quantity"])
+            items = list(self.items.all())
+            prod_ids = [it.product_id for it in items if it.product_id]
+            if not prod_ids:
+                return
+
+            # Lock product rows
+            Product.objects.select_for_update().filter(id__in=prod_ids)
+
+            # increment
+            for it in items:
+                if not it.product_id:
+                    continue
+                Product.objects.filter(id=it.product_id).update(
+                    quantity=F("quantity") + it.quantity
+                )
     
     def lock_stock(self) -> None:
         """
@@ -752,17 +784,35 @@ class Order(models.Model):
         """
         if self.stock_locked:
             return
-        
+
         with transaction.atomic():
-            # pessimistic lock products touched by this order
-            item_qs = self.items.select_related("product").select_for_update()
-            for it in item_qs:
-                prod = it.product
-                if not prod:
-                    continue
-                if (prod.quantity or 0) < it.quantity:
-                    raise ValueError(f"Insufficient stock for {prod} (have {prod.quantity}, need {it.quantity})")
-                type(prod).objects.filter(pk=prod.pk).update(quantity=F("quantity") - it.quantity)
+            items = list(self.items.all())
+            prod_ids = [it.product_id for it in items if it.product_id]
+
+            if prod_ids:
+                products = {
+                    p.id: p
+                    for p in Product.objects.select_for_update().filter(id__in=prod_ids)
+                }
+
+                # validate
+                for it in items:
+                    if not it.product_id:
+                        continue
+                    p = products[it.product_id]
+                    if (p.quantity or 0) < it.quantity:
+                        raise ValueError(
+                            f"Insufficient stock for {p} (have {p.quantity}, need {it.quantity})"
+                        )
+
+                # decrement
+                for it in items:
+                    if not it.product_id:
+                        continue
+                    Product.objects.filter(id=it.product_id).update(
+                        quantity=F("quantity") - it.quantity
+                    )
+
             self.stock_locked = True
             self.save(update_fields=["stock_locked"])
 
@@ -772,14 +822,23 @@ class Order(models.Model):
         """
         if not self.stock_locked:
             return
-        
+
         with transaction.atomic():
-            item_qs = self.items.select_related("product").select_for_update()
-            for it in item_qs:
-                prod = it.product
-                if not prod:
-                    continue
-                type(prod).objects.filter(pk=prod.pk).update(quantity=F("quantity") + it.quantity)
+            items = list(self.items.all())
+            prod_ids = [it.product_id for it in items if it.product_id]
+
+            if prod_ids:
+                # lock product rows
+                Product.objects.select_for_update().filter(id__in=prod_ids)
+
+                # increment
+                for it in items:
+                    if not it.product_id:
+                        continue
+                    Product.objects.filter(id=it.product_id).update(
+                        quantity=F("quantity") + it.quantity
+                    )
+
             self.stock_locked = False
             self.save(update_fields=["stock_locked"])
 
