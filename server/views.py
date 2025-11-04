@@ -1106,6 +1106,29 @@ def _split_installments_eur(total_cents: int, months: int) -> List[Decimal]:
 def _month_dates(anchor_dt, months: int):
     return [anchor_dt + relativedelta(months=i) for i in range(months)]
 
+def _normalize_payment_intent(obj):
+    """
+    Accepts:
+      - (intent, client_secret) tuple
+      - dict with 'id'/'client_secret'
+      - stripe.PaymentIntent object with attributes
+    Returns: (intent_id, client_secret)
+    """
+    # tuple form: (payment_intent, client_secret)
+    if isinstance(obj, tuple) and len(obj) >= 2:
+        pi, cs = obj[0], obj[1]
+        pi_id = getattr(pi, "id", None)
+        if pi_id is None and isinstance(pi, dict):
+            pi_id = pi.get("id")
+        return pi_id, cs
+
+    # dict form
+    if isinstance(obj, dict):
+        return obj.get("id"), obj.get("client_secret")
+
+    # object form
+    return getattr(obj, "id", None), getattr(obj, "client_secret", None)
+
 def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> Optional[str]:
     """
     Create/reuse Stripe customer for authenticated checkout
@@ -1190,30 +1213,30 @@ class StripeCreateIntent(APIView):
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                 payment_method_types=pm_types,
-                metadata={"order_id": str(order.id)}),
-        except TypeError:
-            # handle trailing comma above (tuple) in some environments
-            intent = stripe.PaymentIntent.create(
-                amount=_amount_cents(order.total_price),
-                currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                payment_method_types=pm_types,
                 metadata={"order_id": str(order.id)},
                 customer=customer_id or None,
                 description=f"Order {order.number or order.id} — MindMines",
                 receipt_email=order.email or None,
             )
+        
         except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
 
         # persist PI id
-        order.payment_ref = intent.id
-        order.stripe_pi = intent.id
+        pi_id, client_secret = _normalize_payment_intent(intent)
+        if not pi_id or not client_secret:
+            order.status = "failed"
+            order.save(update_fields=["status"])
+            return Response({"detail": "Failed to initialize Stripe PaymentIntent."}, status=400)
+
+        order.payment_ref = pi_id
+        order.stripe_pi = pi_id
         order.save(update_fields=["payment_ref", "stripe_pi"])
 
         return Response(
-            {"clientSecret": intent.client_secret, "order_id": order.id},
+            {"clientSecret": client_secret, "order_id": order.id},
             status=201,
         )
 
