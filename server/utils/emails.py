@@ -605,8 +605,11 @@ def send_order_failed_email(order, user_locale: str = "en", to: Optional[str] = 
     return ok
     
 # ------------- Invoice email (attaches PDF if present) -------------
-def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None) -> bool:
-    to_email = to or order_recipient_email(order)
+def _order_email(order):
+    return (getattr(order.user, "email", None) or order.email or "").strip()
+
+def send_invoice_email(order):
+    to_email = _order_email(order)
     if not to_email:
         return False
 

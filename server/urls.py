@@ -190,7 +190,7 @@ urlpatterns = [
     # -------- Guest order lookup / invoice download --------
     path("orders/guest-lookup/", GuestOrderLookupAPIView.as_view(), name="guest_order_lookup"),
     # aligned with build_guest_invoice_download_url()
-    path("guest/invoice/download/", GuestInvoiceDownloadView.as_view(), name="guest_invoice_download"),
+    path("orders/guest-invoice/", GuestInvoiceDownloadView.as_view(), name="guest_invoice_download"),
 ]
 
 # Static/media only during development
