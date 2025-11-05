@@ -8,6 +8,7 @@ from django.conf import settings
 from django.core.mail import EmailMultiAlternatives, send_mail, get_connection
 from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.utils import timezone
+from .guest_invoices import build_guest_invoice_download_url
 
 logger = logging.getLogger(__name__)
 CURRENCY = "€"
@@ -617,11 +618,27 @@ def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None)
     subject_en = _tr("en", "subject_invoice", num=num)
     subject_de = _tr("de", "subject_invoice", num=num)
 
+    link_snippets_en = []
+    link_snippets_de = []
+    account_link = FRONTEND_ORDERS_URL
+    if getattr(order, "user_id", None):
+        link_snippets_en.append(f"View your order online: <a href=\"{account_link}\" target=\"_blank\" rel=\"noopener\">{account_link}</a>")
+        link_snippets_de.append(f"Bestellung online ansehen: <a href=\"{account_link}\" target=\"_blank\" rel=\"noopener\">{account_link}</a>")
+
+    guest_invoice_url = build_guest_invoice_download_url(order)
+    if guest_invoice_url:
+        link_snippets_en.append(f"Download your invoice PDF anytime: <a href=\"{guest_invoice_url}\" target=\"_blank\" rel=\"noopener\">{guest_invoice_url}</a>")
+        link_snippets_de.append(f"Rechnung als PDF herunterladen: <a href=\"{guest_invoice_url}\" target=\"_blank\" rel=\"noopener\">{guest_invoice_url}</a>")
+
+    links_html_en = "".join(f"<p>{snippet}</p>" for snippet in link_snippets_en)
+    links_html_de = "".join(f"<p>{snippet}</p>" for snippet in link_snippets_de)
+
     body_en = f"""
       <p>{_tr('en','salute')},</p>
       <p>{_tr('en','invoice_ready_intro')}</p>
       {_order_header_html(order)}
       {_line_items_html(order)}
+      {links_html_en}
       <p>{_tr('en','thanks')}<br />{_tr('en','brand')}</p>
     """
     body_de = f"""
@@ -629,6 +646,7 @@ def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None)
       <p>{_tr('de','invoice_ready_intro')}</p>
       {_order_header_html(order)}
       {_line_items_html(order)}
+      {links_html_de}
       <p>{_tr('de','thanks')}<br />{_tr('de','brand')}</p>
     """
 

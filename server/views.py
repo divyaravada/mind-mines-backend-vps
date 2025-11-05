@@ -23,8 +23,6 @@ from django.utils.timezone import make_aware
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
-from itsdangerous import TimestampSigner
-
 from rest_framework import generics, permissions, serializers, filters, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -42,7 +40,7 @@ from dateutil.relativedelta import relativedelta
 
 # --- local imports (models/serializers/utils) ---
 from .models import (
-    Address, Product, Review, Order, Wishlist,
+    Address, Product, Review, Order, Wishlist,Coupon,
     OnDemandOrderRequest, NewsletterSubscriber, ContactMessage,
     PromotionBanner, StockAlert, ReturnRequest, ReturnAttachment,
     NaturalStone, NaturalStoneImage
@@ -66,6 +64,10 @@ from .utils.emails import (
     send_return_request_emails,
     send_stock_alert_email,
 )
+from .utils.guest_invoices import (
+    build_guest_invoice_download_url,
+    parse_guest_invoice_token,
+)
 
 import stripe
 try:
@@ -84,14 +86,6 @@ def _safe(func, *args, **kwargs):
         return func(*args, **kwargs)
     except Exception:
         return None
-
-# 2 hours signed token window for guest invoice links
-SIGNER_SALT = "invoice-public-download-v1"
-INVOICE_TOKEN_MAX_AGE = 60 * 60 * 2
-
-def _get_signer():
-    """TimestampSigner tied to SECRET_KEY and salt."""
-    return TimestampSigner(key=settings.SECRET_KEY, salt=SIGNER_SALT)
 
 # Returns window default: 15 days
 RETURNS_WINDOW_DAYS = getattr(settings, "RETURNS_WINDOW_DAYS", 15)
@@ -113,6 +107,24 @@ def _order_to(order):
     return (getattr(order, "email", None)
             or getattr(getattr(order, "user", None), "email", None))
 
+def _ensure_invoice_email(order) -> None:
+    """
+    Make sure the invoice PDF exists and the customer receives it once.
+    Safe to call repeatedly; it will no-op if already sent.
+    """
+    try:
+        order.refresh_from_db(fields=["invoice_sent_at"])
+    except Exception:
+        pass
+    if getattr(order, "invoice_sent_at", None):
+        return
+
+    _safe(generate_invoice_pdf, order)
+    user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+    recipient = _order_to(order)
+    if recipient:
+        _safe(send_invoice_email, order, user_locale=user_locale, to=recipient)
+
 # Fallback bilingual sender for small notices
 DEFAULT_FROM = getattr(settings, "EMAIL_HOST_USER", "no-reply@mindmines.eu")
 def _send_bilingual(subject, to, en_html, de_html):
@@ -124,18 +136,6 @@ def _send_bilingual(subject, to, en_html, de_html):
     msg = EmailMultiAlternatives(subject=subject, body=text, from_email=DEFAULT_FROM, to=[to])
     msg.attach_alternative(html, "text/html")
     msg.send(fail_silently=not settings.DEBUG)
-
-# Build signed guest invoice download URL
-def build_guest_invoice_download_url(order) -> Optional[str]:
-    inv = getattr(order, "invoice", None)
-    if not inv or not inv.pdf:
-        return None
-    payload = {"order_id": order.id, "invoice": inv.number}
-    signer = _get_signer()
-    token = signer.sign(json.dumps(payload))
-    base = getattr(settings, "FRONTEND_URL", "https://mindmines.eu").rstrip("/")
-    api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
-    return f"{base}{api_base}/guest/invoice/download/?token={token}"
 
 # -----------------------------------------------------------------------------
 # Auth
@@ -791,8 +791,7 @@ class CouponPreviewAPIView(APIView):
         for it in items:
             p = get_object_or_404(Product, pk=it["product_id"])
             subtotal += Decimal(p.final_price_gross) * int(it["qty"])
-
-        from server.models import Coupon
+       
         coup = Coupon.objects.filter(code__iexact=code.strip()).first()
         if not coup:
             return Response({"ok": False, "error": "Coupon not found"}, status=404)
@@ -1605,7 +1604,8 @@ def stripe_webhook(request):
             order.save(update_fields=["status","payment_status","paid_at","payment_id"])
 
         # reserve inventory for fulfilled orders
-        _safe(order.reserve_stock_atomic)        
+        _safe(order.reserve_stock_atomic)
+        _ensure_invoice_email(order)
 
     # payment_intent.succeeded => normal card, klarna, sofort, giropay
     if etype == "payment_intent.succeeded":
@@ -1883,7 +1883,7 @@ class SendBirthdayCouponAPIView(APIView):
                              "defaults": {"percent": percent, "valid_days": valid_days,
                                           "window": [starts_at.isoformat(), ends_at.isoformat()]}})
 
-        from server.models import Coupon
+        
         created = 0
         reused = 0
         emailed = 0
@@ -2012,12 +2012,11 @@ class GuestInvoiceDownloadView(APIView):
             return Response({"detail": "Missing token."}, status=400)
 
         try:
-            signer = _get_signer()
-            raw = signer.unsign(token, max_age=INVOICE_TOKEN_MAX_AGE)
-            payload = json.loads(raw)
-            order_id = payload.get("order_id")
-            invoice_no = payload.get("invoice")
+            order_id, invoice_no = parse_guest_invoice_token(token)
         except Exception:
+            return Response({"detail": "Invalid or expired token."}, status=400)
+
+        if not order_id or not invoice_no:
             return Response({"detail": "Invalid or expired token."}, status=400)
 
         order = Order.objects.filter(pk=order_id).first()
@@ -2081,16 +2080,7 @@ class OrderPaymentStatusUpdateAPIView(APIView):
                 order.save(update_fields=list(set(updates)))                
             else:
                 order.save(update_fields=list(set(updates)) or ["payment_status"])
-            try:
-                order.refresh_from_db(fields=["invoice_sent_at"])
-            except Exception:
-                pass
-            if not getattr(order, "invoice_sent_at", None):
-                _safe(generate_invoice_pdf, order)
-                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                recipient = _order_to(order)
-                if recipient:
-                    _safe(send_invoice_email, order, user_locale=user_locale, to=recipient)
+            _ensure_invoice_email(order)
 
         elif normalized == "processing":
             if order.status not in ("paid", "failed"):
