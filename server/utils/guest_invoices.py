@@ -1,7 +1,8 @@
 # server/utils/guest_invoices.py
 import json
 from typing import Optional, Tuple
-
+from django.urls import reverse
+from urllib.parse import urlencode
 from django.conf import settings
 
 try:
@@ -15,8 +16,8 @@ INVOICE_TOKEN_MAX_AGE = getattr(settings, "INVOICE_TOKEN_MAX_AGE", 60 * 60 * 2)
 
 def _get_signer() -> TimestampSigner:
     if TimestampSigner is None:
-        raise RuntimeError("TimestampSigner unavailable; ensure itsdangerous is installed.")
-    return TimestampSigner(key=settings.SECRET_KEY, salt=SIGNER_SALT)
+        raise RuntimeError("TimestampSigner unavailable; ensure itsdangerous is installed.")    
+    return TimestampSigner(settings.SECRET_KEY, salt=SIGNER_SALT)
 
 
 def build_guest_invoice_token(order) -> Optional[str]:
@@ -36,9 +37,14 @@ def build_guest_invoice_download_url(order) -> Optional[str]:
     token = build_guest_invoice_token(order)
     if not token:
         return None
-    base = getattr(settings, "FRONTEND_URL", "https://mindmines.eu").rstrip("/")
+    # Build the server path and then prepend your public API base
+    path = reverse("guest_invoice_download")  # -> "/api/orders/guest-invoice/"
+    base = getattr(settings, "PUBLIC_API_BASE", "").rstrip("/")
+    if base:
+        return f"{base}{path}?{urlencode({'token': token})}"
+    # Fallback: assume default base "/api"
     api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
-    return f"{base}{api_base}/guest/invoice/download/?token={token}"
+    return f"{api_base}{path}?{urlencode({'token': token})}"
 
 
 def parse_guest_invoice_token(token: str) -> Tuple[Optional[int], Optional[str]]:
