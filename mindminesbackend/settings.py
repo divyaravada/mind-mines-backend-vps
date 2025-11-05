@@ -192,6 +192,8 @@ ADMINS = [("Errors", "info@mindmines.eu")]
 # Where to point verification links
 FRONTEND_URL =  "https://mindmines.eu"
 
+FRONTEND_URL_API  =  "https://mindmines.eu/api"
+
 # Templates DIR fix (use absolute path)
 TEMPLATES[0]["DIRS"] = [BASE_DIR / "templates"]
 ORDER_EMAIL_REPLY_TO = ["info@mindmines.eu"]

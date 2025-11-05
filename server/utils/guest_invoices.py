@@ -2,7 +2,7 @@
 import json
 from typing import Optional, Tuple
 from django.urls import reverse
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin
 from django.conf import settings
 
 try:
@@ -32,6 +32,9 @@ def build_guest_invoice_token(order) -> Optional[str]:
     payload = {"order_id": order.id, "invoice": inv.number}
     return signer.sign(json.dumps(payload))
 
+def _absolute_url(base: str, path: str) -> str:
+    # Always ensure base ends with '/' and path begins without '//'
+    return urljoin(base.rstrip('/') + '/', path.lstrip('/'))
 
 def build_guest_invoice_download_url(order) -> Optional[str]:
     token = build_guest_invoice_token(order)
@@ -39,12 +42,17 @@ def build_guest_invoice_download_url(order) -> Optional[str]:
         return None
     # Build the server path and then prepend your public API base
     path = reverse("guest_invoice_download")  # -> "/api/orders/guest-invoice/"
-    base = getattr(settings, "PUBLIC_API_BASE", "").rstrip("/")
-    if base:
-        return f"{base}{path}?{urlencode({'token': token})}"
-    # Fallback: assume default base "/api"
-    api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
-    return f"{api_base}{path}?{urlencode({'token': token})}"
+    origin = getattr(settings, "FRONTEND_URL", "").strip()
+    if origin:
+        url = _absolute_url(origin, path)
+        return f"{url}?{urlencode({'token': token})}"
+    api_base = getattr(settings, "FRONTEND_URL_API", "").strip()
+    if api_base:
+        url = _absolute_url(api_base, path)  # urljoin prevents double '/api'
+        return f"{url}?{urlencode({'token': token})}"
+
+    # Final fallback: absolute path on current host
+    return f"{path}?{urlencode({'token': token})}"
 
 
 def parse_guest_invoice_token(token: str) -> Tuple[Optional[int], Optional[str]]:

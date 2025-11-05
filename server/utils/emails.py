@@ -434,57 +434,6 @@ def send_order_confirmation(order, user_locale: str = "en", to: Optional[str] = 
 
     return ok
 
-# ------------- Bank transfer -------------
-def send_bank_transfer_instructions(
-    order,
-    bank_details: dict,
-    user_locale: str = "en",
-    due_hours: int = 48,
-    to: Optional[str] = None,
-) -> bool:
-    to_email = to or order_recipient_email(order)
-    if not to_email:
-        return False
-
-    num = getattr(order, "number", None) or f"#{order.id}"
-    amt = _money(getattr(order, "total_price", Decimal("0.00")))
-    iban = (bank_details or {}).get("iban", "")
-    bic = (bank_details or {}).get("bic", "")
-    acc = (bank_details or {}).get("account_name", "")
-    ref = getattr(order, "number", f"ORD-{order.id}")
-
-    subject_en = _tr("en", "subject_bank_transfer", num=num)
-    subject_de = _tr("de", "subject_bank_transfer", num=num)
-
-    body_en = f"""
-      <p>{_tr('en','salute')},</p>
-      <p>{_tr('en','bank_transfer_intro')}</p>
-      {_order_header_html(order)}
-      <p><strong>Amount:</strong> {amt}<br>
-         <strong>IBAN:</strong> {iban}<br>
-         <strong>BIC:</strong> {bic}<br>
-         <strong>Beneficiary:</strong> {acc}<br>
-         <strong>Reference:</strong> {ref}</p>
-      <p>{_tr('en','pay_within_hours', hrs=due_hours)}</p>
-      <p><em>{_tr('en','reference_note')}</em></p>
-      <p>{_tr('en','kind_regards')}<br />{_tr('en','brand')}</p>
-    """
-    body_de = f"""
-      <p>{_tr('de','salute')},</p>
-      <p>{_tr('de','bank_transfer_intro')}</p>
-      {_order_header_html(order)}
-      <p><strong>Betrag:</strong> {amt}<br>
-         <strong>IBAN:</strong> {iban}<br>
-         <strong>BIC:</strong> {bic}<br>
-         <strong>Empfänger:</strong> {acc}<br>
-         <strong>Verwendungszweck:</strong> {ref}</p>
-      <p>{_tr('de','pay_within_hours', hrs=due_hours)}</p>
-      <p><em>{_tr('de','reference_note')}</em></p>
-      <p>{_tr('de','kind_regards')}<br />{_tr('de','brand')}</p>
-    """
-
-    mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
-    return _send_email(mail.subject, mail.text, mail.html, to_email)
 
 # ------------- Installments -------------
 def send_installments_started_email(
