@@ -84,6 +84,9 @@ def handle_payment_status_notifications(sender, instance: Order, created, **kwar
     user_locale = getattr(getattr(instance.user, "profile", None), "language", "en") or "en"
 
     if notify_status == "paid":
+        # Avoid duplicate sends
+        if getattr(instance, "invoice_sent_at", None):
+            return
         try:
             instance.assign_unique_invoice_number()
         except Exception:
