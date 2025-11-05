@@ -1,4 +1,5 @@
 #server/models.py
+from types import SimpleNamespace
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.contrib.postgres.fields import ArrayField
 from django.db import models, transaction
@@ -575,6 +576,7 @@ class Order(models.Model):
         ("sepa_installments", "SEPA Direct Debit Installments"),
         ("klarna", "Klarna (Stripe Klarna)"),
         ("paypal", "PayPal / PayPal Pay Later"),
+        ("giropay", "Giropay"),
             ]
 
     STATUS_CHOICES = [
