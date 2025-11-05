@@ -33,26 +33,31 @@ def build_guest_invoice_token(order) -> Optional[str]:
     return signer.sign(json.dumps(payload))
 
 def _absolute_url(base: str, path: str) -> str:
-    # Always ensure base ends with '/' and path begins without '//'
+    # joins cleanly (no double /api, no missing slashes)
     return urljoin(base.rstrip('/') + '/', path.lstrip('/'))
 
 def build_guest_invoice_download_url(order) -> Optional[str]:
     token = build_guest_invoice_token(order)
     if not token:
         return None
-    # Build the server path and then prepend your public API base
-    path = reverse("guest_invoice_download")  # -> "/api/orders/guest-invoice/"
-    origin = getattr(settings, "FRONTEND_URL", "").strip()
-    if origin:
-        url = _absolute_url(origin, path)
-        return f"{url}?{urlencode({'token': token})}"
-    api_base = getattr(settings, "FRONTEND_URL_API", "").strip()
-    if api_base:
-        url = _absolute_url(api_base, path)  # urljoin prevents double '/api'
-        return f"{url}?{urlencode({'token': token})}"
 
-    # Final fallback: absolute path on current host
-    return f"{path}?{urlencode({'token': token})}"
+    path = reverse("guest_invoice_download")  # e.g. "/api/orders/guest-invoice/"
+    qs = urlencode({"token": token})
+
+    # Prefer domain-only origin (recommended)
+    origin = getattr(settings, "FRONTEND_URL", "").strip()  # e.g. "https://mindmines.eu"
+    if origin:
+        return f"{_absolute_url(origin, path)}?{qs}"
+
+    # Or, if you keep an API base that may already include /api
+    api_base = getattr(settings, "FRONTEND_URL_API", "").strip()  # e.g. "https://mindmines.eu/api"
+    if api_base:
+        return f"{_absolute_url(api_base, path)}?{qs}"
+
+    # Final fallback (relative absolute path on current host)
+    # NOTE: this will render like "/api/orders/guest-invoice/?token=..." in emails.
+    # To guarantee full https links in emails, set PUBLIC_ORIGIN as below.
+    return f"{path}?{qs}"
 
 
 def parse_guest_invoice_token(token: str) -> Tuple[Optional[int], Optional[str]]:
