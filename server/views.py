@@ -2081,6 +2081,16 @@ class OrderPaymentStatusUpdateAPIView(APIView):
                 order.save(update_fields=list(set(updates)))                
             else:
                 order.save(update_fields=list(set(updates)) or ["payment_status"])
+            try:
+                order.refresh_from_db(fields=["invoice_sent_at"])
+            except Exception:
+                pass
+            if not getattr(order, "invoice_sent_at", None):
+                _safe(generate_invoice_pdf, order)
+                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+                recipient = _order_to(order)
+                if recipient:
+                    _safe(send_invoice_email, order, user_locale=user_locale, to=recipient)
 
         elif normalized == "processing":
             if order.status not in ("paid", "failed"):
