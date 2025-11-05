@@ -1103,6 +1103,119 @@ class PaypalCaptureOrder(PaypalBase):
 # -----------------------------------------------------------------------------
 PAYMENT_METHOD_MAP = {"card": "card", "sepa_debit": "sepa_debit", "giropay": "giropay", "klarna": "klarna"}
 
+INTENT_METHOD_ALIASES = {
+    "stripe_card": "card",
+    "stripe_klarna": "klarna",
+    "stripe_giropay": "giropay",
+    "debit_card": "card",
+}
+
+INTENT_METHOD_KEYS = (
+    "payment_method",
+    "paymentMethod",
+    "method",
+    "payment_method_type",
+    "type",
+)
+
+KLARNA_LOCALE_MAP = {
+    "AT": "de-AT",
+    "DE": "de-DE",
+    "DK": "da-DK",
+    "FI": "fi-FI",
+    "NL": "nl-NL",
+    "NO": "nb-NO",
+    "SE": "sv-SE",
+}
+
+
+def _resolve_intent_method(order, data):
+    """Return (normalized_method, should_update_order)."""
+    supported = set(PAYMENT_METHOD_MAP.keys()) | {"card", "giropay", "klarna"}
+    raw_value = None
+    method_source = "default"
+
+    for key in INTENT_METHOD_KEYS:
+        if key in data:
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                raw_value = value
+                method_source = "request"
+                break
+
+    if raw_value is None:
+        existing = getattr(order, "payment_method", "") or ""
+        if existing:
+            raw_value = existing
+            method_source = "order"
+
+    normalized = (raw_value or "card").strip().lower()
+    normalized = INTENT_METHOD_ALIASES.get(normalized, normalized)
+    if normalized not in supported:
+        normalized = "card"
+        if method_source == "order":
+            method_source = "default"
+
+    should_update = False
+    if method_source == "request":
+        should_update = True
+    elif method_source == "order":
+        should_update = ((order.payment_method or "").strip().lower() != normalized)
+    elif method_source == "default" and not order.payment_method:
+        should_update = True
+
+    return normalized, should_update
+
+
+def _klarna_locale(order, data):
+    locale = None
+    for key in ("klarna_locale", "locale", "preferred_locale"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            locale = value.strip()
+            break
+
+    if not locale:
+        country = data.get("klarna_country") or getattr(order, "ship_country", "") or ""
+        country = str(country).upper()
+        locale = KLARNA_LOCALE_MAP.get(country)
+
+    return locale or "en-GB"
+
+
+def _giropay_return_url(data):
+    for key in ("return_url", "giropay_return_url"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    configured = getattr(settings, "STRIPE_GIROPAY_RETURN_URL", "").strip()
+    if configured:
+        return configured
+
+    base = getattr(settings, "FRONTEND_URL", "").rstrip("/")
+    return base or None
+
+
+def _payment_intent_method_kwargs(method, order, data):
+    kwargs = {
+        "automatic_payment_methods": {"enabled": False},
+        "payment_method_types": [PAYMENT_METHOD_MAP.get(method, method or "card")],
+    }
+
+    options = {}
+    if method == "klarna":
+        options.setdefault("klarna", {})["preferred_locale"] = _klarna_locale(order, data)
+    elif method == "giropay":
+        return_url = _giropay_return_url(data)
+        if return_url:
+            options.setdefault("giropay", {})["return_url"] = return_url
+
+    if options:
+        kwargs["payment_method_options"] = options
+
+    return kwargs
+
 def _amount_cents(value: Decimal) -> int:
     return int((value * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
@@ -1163,7 +1276,7 @@ def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> Op
 
 def stripe_client():
     stripe.api_key = settings.STRIPE_SECRET_KEY
-    stripe.set_app_info(name="MindMines", version="1.0.0")
+    stripe.set_app_info(name="MindMines Payment", version="1.0.0")
     return stripe
 
 def eur_cents(amount: Decimal) -> int:
@@ -1198,9 +1311,15 @@ class StripeCreateIntentAPIView(APIView):
             )
 
         # mark processing
-        order.payment_method = "card"
+        method, update_payment_method = _resolve_intent_method(order, data)
+
+        update_fields = ["payment_status"]
         order.payment_status = "processing"
-        order.save(update_fields=["payment_method", "payment_status"])
+        if update_payment_method:
+            order.payment_method = method
+            update_fields.append("payment_method")
+        order.save(update_fields=update_fields)
+
 
         # Reserve stock safely (this has its own transaction.atomic() and row locks)
         try:
@@ -1211,8 +1330,10 @@ class StripeCreateIntentAPIView(APIView):
 
         stripe = stripe_client()
         amount_cents = eur_cents(order.total_price)
-        description = f"MindMines Order {order.number}"
+        description = f"MindMines Payment Order {order.number}"
         meta = {"order_id": str(order.pk), "order_number": order.number, "email": order.email}
+
+        method_kwargs = _payment_intent_method_kwargs(method, order, data)
 
         if order.stripe_pi:
             try:
@@ -1222,8 +1343,7 @@ class StripeCreateIntentAPIView(APIView):
                     currency=settings.STRIPE_CURRENCY,
                     description=description,
                     metadata=meta,
-                    automatic_payment_methods={"enabled": False},
-                    payment_method_types=["card"],
+                    **method_kwargs,
                 )
             except stripe.error.InvalidRequestError:
                 pi = stripe.PaymentIntent.create(
@@ -1231,8 +1351,8 @@ class StripeCreateIntentAPIView(APIView):
                     currency=settings.STRIPE_CURRENCY,
                     description=description,
                     metadata=meta,
-                    payment_method_types=["card"],
                     capture_method="automatic",
+                    **method_kwargs,
                 )
                 order.stripe_pi = pi.id
                 order.payment_ref = ""
@@ -1244,8 +1364,8 @@ class StripeCreateIntentAPIView(APIView):
                 currency=settings.STRIPE_CURRENCY,
                 description=description,
                 metadata=meta,
-                payment_method_types=["card"],
                 capture_method="automatic",
+                **method_kwargs,
             )
             order.stripe_pi = pi.id
             order.save(update_fields=["stripe_pi"])
@@ -1387,7 +1507,7 @@ class StripeCreateIntent(APIView):
                 amount=_amount_cents(total),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                 payment_method_types=["card"],
-                description=f"Order {order.number or order.id} — MindMines",
+                description=f"Order {order.number or order.id} — MindMines Payment",
                 metadata={"order_id": str(order.id)},
                 receipt_email=order.email or None,
             )
@@ -1550,7 +1670,7 @@ class StripeCreateSepaIntent(APIView):
                 amount=_amount_cents(order.total_price),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
                 payment_method_types=["sepa_debit"],
-                description=f"Order {order.number or order.id} — MindMines",
+                description=f"Order {order.number or order.id} — MindMines Payment",
                 metadata={"order_id": str(order.id)},
                 customer=customer_id or None,
                 receipt_email=email,
