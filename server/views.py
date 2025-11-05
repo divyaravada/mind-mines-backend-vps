@@ -1158,10 +1158,57 @@ def eur_cents(amount: Decimal) -> int:
 # STRIPE: immediate one-shot (card / klarna / giropay / sofort etc.)
 # ---------------------------
 
+# views.py (or wherever StripeCreateIntent lives)
 class StripeCreateIntent(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
+        order_id = request.data.get("order_id")
+
+        # Path 1: Existing order (recommended for your current frontend)
+        if order_id:
+            try:
+                with transaction.atomic():
+                    order = (
+                        Order.objects
+                        .select_for_update()
+                        .get(pk=order_id)
+                    )
+                    # Only allow when still pending/processing and total > 0
+                    if order.total_price is None or Decimal(order.total_price) <= Decimal("0.00"):
+                        return Response({"detail": "Total must be > 0."}, status=400)
+                    if order.status not in ("pending", "processing"):
+                        return Response({"detail": f"Order not payable in status '{order.status}'"}, status=400)
+
+                    # Create or reuse a PI
+                    if order.stripe_pi:
+                        # Optionally: retrieve and reuse existing PI
+                        intent = stripe.PaymentIntent.retrieve(order.stripe_pi)
+                    else:
+                        intent = stripe.PaymentIntent.create(
+                            amount=_amount_cents(Decimal(order.total_price)),
+                            currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
+                            payment_method_types=["card"],
+                            description=f"Order {order.number or order.id} — MindMines Payment",
+                            metadata={"order_id": str(order.id)},
+                            receipt_email=order.email or None,
+                        )
+                        order.payment_method = "card"
+                        order.status = "pending"
+                        order.payment_ref = intent.id
+                        order.stripe_pi = intent.id
+                        order.save(update_fields=["payment_method", "status", "payment_ref", "stripe_pi"])
+
+                # IMPORTANT: return snake_case the frontend expects
+                return Response({"client_secret": intent.client_secret, "order_id": order.id}, status=200)
+
+            except Order.DoesNotExist:
+                return Response({"detail": "Order not found."}, status=404)
+            except stripe_error.StripeError as e:
+                return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
+
+        # Path 2: (Optional fallback) No order_id -> create order + PI in one call
+        # Keep *only if* you still want to support the old flow somewhere else.
         ser = OrderCreateSerializer(data=request.data, context={"request": request})
         try:
             ser.is_valid(raise_exception=True)
@@ -1201,8 +1248,8 @@ class StripeCreateIntent(APIView):
         order.stripe_pi = intent.id
         order.save(update_fields=["payment_ref", "stripe_pi"])
 
-        return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
-
+        # IMPORTANT: snake_case here as well
+        return Response({"client_secret": intent.client_secret, "order_id": order.id}, status=201)
 
 # ---------------------------
 # STRIPE: card installments (authenticated only)

@@ -56,7 +56,7 @@ from .views import (
 
     # Stripe
     StripeCreateIntent, StripeCardInstallmentsView,
-    StripeCreateSepaIntent, StripeSepaInstallmentsView, StripeCreateIntentAPIView,
+    StripeCreateSepaIntent, StripeSepaInstallmentsView,
     SepaPostConfirmView, stripe_webhook, OrderPaymentStatusUpdateAPIView,
 
     # Returns / Cancellations
