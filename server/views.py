@@ -1154,10 +1154,9 @@ def eur_cents(amount: Decimal) -> int:
     return int(q * 100)
 
 # ---------------------------
-# STRIPE: immediate one-shot (card / klarna / giropay / sofort etc.)
+# STRIPE: immediate one-shot (card)
 # ---------------------------
 
-# views.py (or wherever StripeCreateIntent lives)
 class StripeCreateIntent(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -1249,6 +1248,75 @@ class StripeCreateIntent(APIView):
 
         # IMPORTANT: snake_case here as well
         return Response({"client_secret": intent.client_secret, "order_id": order.id}, status=201)
+
+# ---------------------------
+# STRIPE: immediate one-shot ( klarna / giropay )
+# ---------------------------
+
+class StripeCreateRedirectIntent(APIView):
+    """
+    Create or reuse a PaymentIntent for redirect-based methods (Klarna, giropay).
+    The frontend then renders PaymentElement and calls stripe.confirmPayment().
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        order_id = request.data.get("order_id")
+        method = (request.data.get("method") or "").strip().lower()  # "klarna" or "giropay"
+
+        if not order_id or method not in {"klarna", "giropay"}:
+            return Response({"detail": "order_id and method in {'klarna','giropay'} required."}, status=400)
+
+        try:
+            with transaction.atomic():
+                order = (
+                    Order.objects
+                    .select_for_update()
+                    .get(pk=order_id)
+                )
+
+                if order.total_price is None or Decimal(order.total_price) <= Decimal("0.00"):
+                    return Response({"detail": "Total must be > 0."}, status=400)
+                if order.status not in ("pending", "processing"):
+                    return Response({"detail": f"Order not payable in status '{order.status}'"}, status=400)
+
+                currency = getattr(settings, "STRIPE_CURRENCY", "eur")
+                email = (order.email or "").strip() or None
+
+                # Reuse PI if it matches the same method; otherwise create a new one
+                intent = None
+                if order.stripe_pi:
+                    try:
+                        current = stripe.PaymentIntent.retrieve(order.stripe_pi)
+                        if (isinstance(current.get("payment_method_types"), list)
+                                and current["payment_method_types"] == [method]
+                                and current["currency"] == currency
+                                and int(current["amount"]) == _amount_cents(Decimal(order.total_price))):
+                            intent = current
+                    except stripe_error.StripeError:
+                        intent = None
+
+                if not intent:
+                    intent = stripe.PaymentIntent.create(
+                        amount=_amount_cents(Decimal(order.total_price)),
+                        currency=currency,
+                        payment_method_types=[method],
+                        description=f"Order {order.number or order.id} — MindMines Payment",
+                        metadata={"order_id": str(order.id)},
+                        receipt_email=email,
+                    )
+                    order.payment_method = method  # record chosen pm
+                    order.status = "pending"
+                    order.payment_ref = intent.id
+                    order.stripe_pi = intent.id
+                    order.save(update_fields=["payment_method", "status", "payment_ref", "stripe_pi"])
+
+            return Response({"client_secret": intent.client_secret, "order_id": order.id}, status=200)
+
+        except Order.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=404)
+        except stripe_error.StripeError as e:
+            return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
 
 # ---------------------------
 # STRIPE: card installments (authenticated only)
