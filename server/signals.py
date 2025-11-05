@@ -11,7 +11,7 @@ from .models import Order, Product, StockAlert, Profile
 from .utils.invoices import generate_invoice_pdf
 from .utils.emails import (
     send_payment_status_email,
-    send_stock_alert_email,
+    send_stock_alert_email,send_invoice_email
 )
 
 # --------------------------------------------------------------------
@@ -93,11 +93,17 @@ def handle_payment_status_notifications(sender, instance: Order, created, **kwar
         except Exception:
             pass
 
-    # Send confirmation
+        try:
+            # This function sets invoice_sent_at internally on success
+            send_invoice_email(instance, user_locale=user_locale)
+        except Exception:
+            pass
+        return  # IMPORTANT: don't also send the generic payment-status email
+
+    # For 'processing' / 'failed' keep your generic email
     try:
         send_payment_status_email(instance, status=notify_status, user_locale=user_locale)
     except Exception:
-        # email or data issues should not crash request
         pass
 
 @receiver(post_save, sender=Order)

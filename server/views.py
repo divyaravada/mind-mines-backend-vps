@@ -1584,6 +1584,7 @@ def stripe_webhook(request):
             order.status = "paid"
             order.payment_status = "paid"
             order.paid_at = timezone.now()
+            order.save(update_fields=["status","payment_status","paid_at","payment_id"])
             changed = True
 
         # final charge id if available
