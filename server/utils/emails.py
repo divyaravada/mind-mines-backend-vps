@@ -80,6 +80,10 @@ def _tr(locale: str, key: str, **vars) -> str:
             "en": "Order {num} confirmed — thank you!",
             "de": "Bestellung {num} bestätigt — vielen Dank!",
         },
+        "subject_order_failed": {
+            "en": "Payment issue with Order {num}",
+            "de": "Zahlungsproblem bei Bestellung {num}",
+        },
         "subject_bank_transfer": {
             "en": "Bank transfer instructions for Order {num}",
             "de": "Überweisungsanleitung für Bestellung {num}",
@@ -104,6 +108,14 @@ def _tr(locale: str, key: str, **vars) -> str:
         "order_confirm_intro": {
             "en": "We’ve confirmed your order and will notify you as it moves through processing and shipment.",
             "de": "Wir haben Ihre Bestellung bestätigt und informieren Sie über den weiteren Verlauf bis zum Versand.",
+        },
+        "order_failed_intro": {
+            "en": "Unfortunately, we couldn’t complete the payment for your order just yet.",
+            "de": "Leider konnten wir die Zahlung für Ihre Bestellung noch nicht abschließen.",
+        },
+        "order_failed_next_steps": {
+            "en": "Please review your payment details or try another payment method. You can restart the checkout from your MindMines account or contact our support team for assistance.",
+            "de": "Bitte prüfen Sie Ihre Zahlungsdaten oder versuchen Sie eine andere Zahlungsmethode. Sie können die Bestellung in Ihrem MindMines-Konto erneut starten oder unseren Support um Hilfe bitten.",
         },
         "invoice_ready_intro": {
             "en": "Your payment has been received. Your invoice is attached to this email.",
@@ -481,6 +493,7 @@ def send_installments_started_email(
     dates: Optional[Sequence[timezone.datetime]] = None,
     user_locale: str = "en",
     to: Optional[str] = None,
+    attach_invoice: bool = False,
 ) -> bool:
     """
     Compatible with both signatures:
@@ -527,8 +540,70 @@ def send_installments_started_email(
     """
 
     mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
+
+    if attach_invoice:
+        try:
+            with get_connection() as conn:
+                msg = EmailMultiAlternatives(
+                    subject=mail.subject,
+                    body=mail.text,
+                    from_email=_from_email(),
+                    to=[to_email],
+                    bcc=list(_bcc_defaults()),
+                    connection=conn,
+                )
+                msg.attach_alternative(mail.html, "text/html")
+                _attach_invoice_if_available(order, msg)
+                msg.send()
+            type(order).objects.filter(pk=order.pk).update(invoice_sent_at=timezone.now())
+            setattr(order, "invoice_sent_at", timezone.now())
+            return True
+        except Exception:
+            logger.exception("Failed to send installments email for order %s", getattr(order, "id", "?"))
+            return False
+
     return _send_email(mail.subject, mail.text, mail.html, to_email)
 
+
+def send_order_failed_email(order, user_locale: str = "en", to: Optional[str] = None) -> bool:
+    """Notify customer that their payment failed."""
+
+    to_email = to or order_recipient_email(order)
+    if not to_email:
+        return False
+
+    if getattr(order, "failed_email_sent_at", None):
+        return False
+
+    num = getattr(order, "number", None) or f"#{order.id}"
+    subject_en = _tr("en", "subject_order_failed", num=num)
+    subject_de = _tr("de", "subject_order_failed", num=num)
+
+    body_en = f"""
+      <p>{_tr('en','salute')},</p>
+      <p>{_tr('en','order_failed_intro')}</p>
+      {_order_header_html(order)}
+      <p>{_tr('en','order_failed_next_steps')}</p>
+      <p>{_tr('en','thanks')}<br />{_tr('en','brand')}</p>
+    """
+    body_de = f"""
+      <p>{_tr('de','salute')},</p>
+      <p>{_tr('de','order_failed_intro')}</p>
+      {_order_header_html(order)}
+      <p>{_tr('de','order_failed_next_steps')}</p>
+      <p>{_tr('de','thanks')}<br />{_tr('de','brand')}</p>
+    """
+
+    mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
+    ok = _send_email(mail.subject, mail.text, mail.html, to_email)
+
+    if ok:
+        now = timezone.now()
+        type(order).objects.filter(pk=order.pk).update(failed_email_sent_at=now)
+        setattr(order, "failed_email_sent_at", now)
+
+    return ok
+    
 # ------------- Invoice email (attaches PDF if present) -------------
 def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None) -> bool:
     to_email = to or order_recipient_email(order)
@@ -569,10 +644,47 @@ def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None)
             msg.attach_alternative(mail.html, "text/html")
             _attach_invoice_if_available(order, msg)
             msg.send()
+        now = timezone.now()
+        type(order).objects.filter(pk=order.pk).update(invoice_sent_at=now)
+        setattr(order, "invoice_sent_at", now)
         return True
     except Exception:
         logger.exception("Failed to send invoice email for order %s", getattr(order, "id", "?"))
         return False
+
+
+def send_payment_status_email(
+    order,
+    status: Optional[str] = None,
+    user_locale: str = "en",
+    to: Optional[str] = None,
+) -> bool:
+    """Dispatch payment status notifications based on method and status."""
+
+    status_normalized = (status or getattr(order, "payment_status", "") or "").lower()
+    method = (getattr(order, "payment_method", "") or "").lower()
+    recipient = to or order_recipient_email(order)
+
+    if not recipient:
+        return False
+
+    if status_normalized == "processing":
+        return send_order_confirmation(order, user_locale=user_locale, to=recipient)
+
+    if status_normalized == "failed":
+        return send_order_failed_email(order, user_locale=user_locale, to=recipient)
+
+    if status_normalized == "paid":
+        if method in {"card_installments", "klarna"}:
+            return send_installments_started_email(
+                order,
+                user_locale=user_locale,
+                to=recipient,
+                attach_invoice=True,
+            )
+        return send_invoice_email(order, user_locale=user_locale, to=recipient)
+
+    return False
 
 # ------------- Stock Alert -------------
 def send_stock_alert_email(product, to_email: str, unsubscribe_url: str, user_locale: str = "en"):

@@ -61,9 +61,10 @@ from .serializers import (
 from .pagination import StandardResultsSetPagination
 from .utils.invoices import generate_invoice_pdf
 from .utils.emails import (
-    send_invoice_email, send_order_confirmation, send_sepa_pending_email,
-    send_cancel_request_emails, send_return_request_emails,
-    send_stock_alert_email, send_installments_started_email,
+    send_invoice_email,
+    send_cancel_request_emails,
+    send_return_request_emails,
+    send_stock_alert_email,
 )
 
 import stripe
@@ -754,14 +755,6 @@ class OrderAdminUpdateAPIView(APIView):
 
         if prev_status != "paid" and order.status == "paid":
             _safe(order.reserve_stock_atomic)
-            order.assign_unique_invoice_number()
-            _safe(generate_invoice_pdf, order)
-            user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-            _safe(send_invoice_email, order, user_locale=user_locale, to=_order_to(order))
-
-        elif prev_status != "processing" and order.status == "processing":
-            user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-            _safe(send_order_confirmation, order, user_locale=user_locale, to=_order_to(order))
 
         elif prev_status != "failed" and order.status == "failed":
             _safe(order.release_stock_atomic)
@@ -1091,10 +1084,6 @@ class PaypalCaptureOrder(PaypalBase):
 
             # stock reservation
             _safe(order.reserve_stock_atomic)
-
-            # invoice & numbering
-            order.assign_unique_invoice_number()
-            # generate_invoice_pdf(order)  # generate in pipeline/webhook if preferred
 
         return Response({"status": "COMPLETED"}, status=200)
 
@@ -1430,18 +1419,10 @@ class StripeWebhookView(APIView):
                 order.paid_at = timezone.now()
                 order.payment_ref = pi_id or order.payment_ref
                 order.payment_id = latest_charge or order.payment_id
-                order.assign_unique_invoice_number()
                 order.save(update_fields=[
                     "payment_status", "status", "paid_at",
-                    "payment_ref", "payment_id", "invoice_number"
+                    "payment_ref", "payment_id"
                 ])
-
-                # If you already have signals on paid -> generate_invoice + email, they will run.
-                # If not, ensure invoice exists and emails are sent here.
-                try:                    
-                    generate_invoice_pdf(order)
-                except Exception:
-                    pass
 
             return HttpResponse(status=200)
 
@@ -1627,8 +1608,7 @@ class StripeCardInstallmentsView(APIView):
 
             order.payment_ref = schedule.id
             order.save(update_fields=["payment_ref"])
-
-            _safe(send_installments_started_email, order, to=_order_to(order))
+            
             return Response({"order_id": order.id, "schedule_id": schedule.id}, status=201)
 
         except stripe_error.StripeError as e:
@@ -1824,10 +1804,9 @@ class SepaPostConfirmView(APIView):
 
         order.status = "processing"
         order.payment_status = "processing"
-        order.confirmation_sent_at = timezone.now()
-        order.save(update_fields=["status", "payment_status", "confirmation_sent_at"])
-
-        _safe(send_sepa_pending_email, order, to=_order_to(order))
+        order.save(update_fields=["status", "payment_status"])
+        
+        
         return Response({"ok": True}, status=200)
 
 # -----------------------------------------------------------------------------
@@ -1877,13 +1856,8 @@ def stripe_webhook(request):
         if changed:
             order.save(update_fields=["status","payment_status","paid_at","payment_id"])
 
-        # stock, invoice, email
-        _safe(order.reserve_stock_atomic)
-        order.assign_unique_invoice_number()
-        _safe(generate_invoice_pdf, order)  # wrap PDF
-        user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-        _safe(send_invoice_email, order, user_locale=user_locale, to=_order_to(order))
-        _safe(send_order_confirmation, order, user_locale=user_locale, to=_order_to(order))
+        # reserve inventory for fulfilled orders
+        _safe(order.reserve_stock_atomic)        
 
     # payment_intent.succeeded => normal card, klarna, sofort, giropay
     if etype == "payment_intent.succeeded":
@@ -1917,7 +1891,6 @@ def stripe_webhook(request):
                         order.status = "processing"
                         order.payment_status = "processing"
                         order.save(update_fields=["status", "payment_status"])
-                        _safe(send_sepa_pending_email, order, to=_order_to(order))
             except Order.DoesNotExist:
                 pass
 
@@ -2357,12 +2330,7 @@ class OrderPaymentStatusUpdateAPIView(APIView):
                 updates.append("status")
                 order.paid_at = timezone.now()
                 updates.append("paid_at")
-                order.save(update_fields=list(set(updates)))
-                order.assign_unique_invoice_number()
-                _safe(generate_invoice_pdf, order)
-                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                _safe(send_invoice_email, order, user_locale=user_locale, to=_order_to(order))
-                _safe(send_order_confirmation, order, user_locale=user_locale, to=_order_to(order))
+                order.save(update_fields=list(set(updates)))                
             else:
                 order.save(update_fields=list(set(updates)) or ["payment_status"])
 
@@ -2370,9 +2338,7 @@ class OrderPaymentStatusUpdateAPIView(APIView):
             if order.status not in ("paid", "failed"):
                 order.status = "processing"
                 updates.append("status")
-                order.save(update_fields=list(set(updates)))
-                user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-                _safe(send_order_confirmation, order, user_locale=user_locale, to=_order_to(order))
+                order.save(update_fields=list(set(updates)))                
             else:
                 order.save(update_fields=list(set(updates)) or ["payment_status"])
 

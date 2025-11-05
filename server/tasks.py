@@ -39,7 +39,7 @@ def post_payment_pipeline(order_id: int) -> None:
     try:
         from .models import Order
         from .utils.invoices import generate_invoice_pdf
-        from .utils.emails import send_invoice_email, send_order_confirmation
+        from .utils.emails import send_payment_status_email
 
         order = Order.objects.filter(pk=order_id).first()
         if not order:
@@ -51,8 +51,7 @@ def post_payment_pipeline(order_id: int) -> None:
         # Email notifications (best-effort)
         try:
             locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
-            send_invoice_email(order, user_locale=locale)
-            send_order_confirmation(order, user_locale=locale)
+            send_payment_status_email(order, status="paid", user_locale=locale)
         except Exception:
             logger.exception("post_payment_pipeline: email sending failed for order %s", order_id)
     except Exception:

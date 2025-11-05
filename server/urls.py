@@ -169,8 +169,8 @@ urlpatterns = [
     path("stripe/installments/card/", StripeCardInstallmentsView.as_view(), name="stripe_installments_card"),
     path("stripe/installments/sepa/", StripeSepaInstallmentsView.as_view(), name="stripe_installments_sepa"),
     path("payments/sepa-post-confirm/", SepaPostConfirmView.as_view(), name="sepa-post-confirm"),
-   # path("stripe/webhook/", stripe_webhook, name="stripe_webhook"),
-   # path("stripe/webhook", stripe_webhook, name="stripe_webhook_no_slash"),
+    path("stripe/webhook/", stripe_webhook, name="stripe_webhook"),
+    path("stripe/webhook", stripe_webhook, name="stripe_webhook_no_slash"),
     
     path("orders/<int:pk>/payment-status/", OrderPaymentStatusUpdateAPIView.as_view(), name="order_payment_status"),
 

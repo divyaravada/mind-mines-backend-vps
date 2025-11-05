@@ -10,8 +10,7 @@ from django.utils import timezone
 from .models import Order, Product, StockAlert, Profile
 from .utils.invoices import generate_invoice_pdf
 from .utils.emails import (
-    send_invoice_email,
-    send_order_confirmation,
+    send_payment_status_email,
     send_stock_alert_email,
 )
 
@@ -48,45 +47,57 @@ def remember_old_status(sender, instance: Order, **kwargs):
     """
     if not instance.pk:
         instance._old_status = None
+        instance._old_payment_status = None
         return
     try:
         old = Order.objects.get(pk=instance.pk)
         instance._old_status = old.status
+        instance._old_payment_status = old.payment_status
     except Order.DoesNotExist:
         instance._old_status = None
+        instance._old_payment_status = None
 
-def on_paid_generate_and_mail(sender, instance: Order, created, **kwargs):
-    """
-    After an Order is saved:
-      - if it just became paid, generate invoice and send invoice + confirmation.
-    """
-    if created:
+def handle_payment_status_notifications(sender, instance: Order, created, **kwargs):
+    """Trigger customer notifications when payment status changes."""
+
+    prev_payment_status = (getattr(instance, "_old_payment_status", None) or "").lower()
+    prev_status = (getattr(instance, "_old_status", None) or "").lower()
+    current_payment_status = (getattr(instance, "payment_status", "") or "").lower()
+    current_status = (getattr(instance, "status", "") or "").lower()
+
+    notify_status = None
+    if current_payment_status and current_payment_status != prev_payment_status:
+        notify_status = current_payment_status
+    elif current_status != prev_status and current_status in {"processing", "paid", "failed"}:
+        notify_status = current_status
+
+    if not notify_status:
         return
 
-    became_paid = (
-        instance.status == "paid"
-        and getattr(instance, "_old_status", None) != "paid"
-    )
-    if not became_paid:
+    if notify_status == "processing" and getattr(instance, "confirmation_sent_at", None):
+        return
+    if notify_status == "failed" and getattr(instance, "failed_email_sent_at", None):
+        return
+    if notify_status == "paid" and getattr(instance, "invoice_sent_at", None):
         return
 
-    # Generate invoice (idempotent)
-    generate_invoice_pdf(instance)
+    user_locale = getattr(getattr(instance.user, "profile", None), "language", "en") or "en"
 
-    # Send invoice email
-    try:
-        # If your send_invoice_email supports a locale param, pass it;
-        # otherwise the helper will choose defaults.
-        user_locale = getattr(getattr(instance.user, "profile", None), "language", "en") or "en"
-        send_invoice_email(instance, user_locale=user_locale)
-    except Exception:
-        pass
+    if notify_status == "paid":
+        try:
+            instance.assign_unique_invoice_number()
+        except Exception:
+            pass
+        try:
+            generate_invoice_pdf(instance)
+        except Exception:
+            pass
 
     # Send confirmation
     try:
-        locale = getattr(getattr(instance.user, "profile", None), "language", "en") or "en"
-        send_order_confirmation(instance, user_locale=locale)
+        send_payment_status_email(instance, status=notify_status, user_locale=user_locale)
     except Exception:
+        # email or data issues should not crash request
         pass
 
 @receiver(post_save, sender=Order)
@@ -184,7 +195,7 @@ def connect_signals():
     )
 
     post_save.connect(
-        on_paid_generate_and_mail,
+        handle_payment_status_notifications,
         sender=Order,
         dispatch_uid="server_order_paid_generate_mail",
     )
