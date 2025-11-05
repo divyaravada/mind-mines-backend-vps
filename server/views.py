@@ -1161,48 +1161,66 @@ class StripeCreateIntent(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        ser = OrderCreateSerializer(data=request.data, context={"request": request})
-        try:
-            ser.is_valid(raise_exception=True)
-        except serializers.ValidationError as ve:
-            return Response({"detail": "Order validation failed", "errors": ve.detail}, status=400)
+        oid = request.data.get("order_id")
+        if not oid:
+            return Response({"detail": "order_id is required"}, status=400)
 
-        try:
-            with transaction.atomic():
-                order = ser.save()
-                order.payment_method = "card"
-                order.status = "pending"
-                order.save(update_fields=["payment_method", "status"])
-        except Exception as e:
-            return Response({"detail": f"Order creation failed: {e}"}, status=400)
+        # Load existing order (this was created by your frontend earlier)
+        order = get_object_or_404(Order, pk=oid)
+
+        # Basic guards
+        if order.status in ("paid", "processing"):
+            return Response({"detail": "Order already paid or processing"}, status=409)
 
         total = Decimal(order.total_price or "0.00")
         if total <= Decimal("0.00"):
-            order.status = "failed"
-            order.save(update_fields=["status"])
             return Response({"detail": "Total must be > 0."}, status=400)
 
+        # Ensure method + pending status (idempotent)
+        updates = []
+        if order.payment_method != "card":
+            order.payment_method = "card"
+            updates.append("payment_method")
+        if order.status not in ("pending", "awaiting_payment"):
+            order.status = "pending"
+            order.payment_status = "pending"
+            updates += ["status", "payment_status"]
+        if updates:
+            order.save(update_fields=updates)
+
+        # Create or reuse a PaymentIntent
         try:
-            intent = stripe.PaymentIntent.create(
-                amount=_amount_cents(total),
-                currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                payment_method_types=["card"],
-                description=f"Order {order.number or order.id} — MindMines Payment",
-                metadata={"order_id": str(order.id)},
-                receipt_email=order.email or None,
-            )
+            if order.stripe_pi:
+                # Optional: retrieve to re-use the PI if it still exists
+                intent = stripe.PaymentIntent.retrieve(order.stripe_pi)
+                # If canceled or invalid, create a fresh one
+                if intent.get("status") in {"canceled"}:
+                    intent = None
+            else:
+                intent = None
+
+            if not intent:
+                intent = stripe.PaymentIntent.create(
+                    amount=_amount_cents(total),
+                    currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
+                    payment_method_types=["card"],
+                    description=f"Order {order.number or order.id} — MindMines Payment",
+                    metadata={"order_id": str(order.id)},
+                    receipt_email=order.email or None,
+                )
+
+                order.payment_ref = intent.id
+                order.stripe_pi = intent.id
+                order.save(update_fields=["payment_ref", "stripe_pi"])
+
         except stripe_error.StripeError as e:
-            order.status = "failed"
-            order.save(update_fields=["status"])
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
 
-        order.payment_ref = intent.id
-        order.stripe_pi = intent.id
-        order.save(update_fields=["payment_ref", "stripe_pi"])
-
-        return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
-
-
+        # IMPORTANT: use snake_case to match the frontend
+        return Response(
+            {"client_secret": intent.client_secret, "order_id": str(order.id)},
+            status=201,
+        )
 # ---------------------------
 # STRIPE: card installments (authenticated only)
 # ---------------------------
