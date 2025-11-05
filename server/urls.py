@@ -55,7 +55,7 @@ from .views import (
     PaypalCreateOrder, PaypalCaptureOrder,
 
     # Stripe
-    StripeCreateIntent, StripeCardInstallmentsView, StripeWebhookView,
+    StripeCreateIntent, StripeCardInstallmentsView,
     StripeCreateSepaIntent, StripeSepaInstallmentsView, StripeCreateIntentAPIView,
     SepaPostConfirmView, stripe_webhook, OrderPaymentStatusUpdateAPIView,
 
@@ -161,11 +161,9 @@ urlpatterns = [
     path("paypal/capture/<str:order_id>/", PaypalCaptureOrder.as_view(), name="paypal_capture_order"),
 
     # -------- Stripe --------
-    path("stripe/create-intent/", StripeCreateIntentAPIView.as_view(), name="stripe_create_intent"),
-    path("stripe/webhook/", StripeWebhookView.as_view(), name="stripe_webhook"),
-    path("stripe/create-intent/card", StripeCreateIntent.as_view(), name="stripe_create_intent_card_compat"),  # back-compat
-    path("stripe/create-intent/sepa/", StripeCreateSepaIntent.as_view(), name="stripe_create_sepa_intent"),
-    path("stripe/create-intent/sepa", StripeCreateSepaIntent.as_view(), name="stripe_create_sepa_intent_compat"),  # optional no-slash
+    
+    path("stripe/create-intent/", StripeCreateIntent.as_view(), name="stripe_create_intent_card_compat"),  # back-compat
+    path("stripe/create-intent/sepa/", StripeCreateSepaIntent.as_view(), name="stripe_create_sepa_intent"),  # optional no-slash
     path("stripe/installments/card/", StripeCardInstallmentsView.as_view(), name="stripe_installments_card"),
     path("stripe/installments/sepa/", StripeSepaInstallmentsView.as_view(), name="stripe_installments_sepa"),
     path("payments/sepa-post-confirm/", SepaPostConfirmView.as_view(), name="sepa-post-confirm"),
