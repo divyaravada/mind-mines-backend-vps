@@ -608,8 +608,8 @@ def send_order_failed_email(order, user_locale: str = "en", to: Optional[str] = 
 def _order_email(order):
     return (getattr(order.user, "email", None) or order.email or "").strip()
 
-def send_invoice_email(order):
-    to_email = _order_email(order)
+def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None):
+    to_email = (to or _order_email(order))
     if not to_email:
         return False
 
