@@ -63,11 +63,14 @@ from .utils.emails import (
     send_cancel_request_emails,
     send_return_request_emails,
     send_stock_alert_email,
+    send_installments_started_email
 )
 from .utils.guest_invoices import (
     build_guest_invoice_download_url,
     parse_guest_invoice_token,
 )
+from server.utils.checkout_tokens import unpack_checkout_payload
+from server.utils.installments import build_installments_schedule
 
 import stripe
 try:
@@ -1408,38 +1411,26 @@ class StripeCreateSetupIntent(APIView):
         
 class StripeCardInstallmentsView(APIView):
     """
-    Start card-based installments using a saved card payment_method_id.
-    - Guests and users supported (AllowAny).
-    - Accepts months or installments_months; normalizes to 3, 6, 9.
-    - Creates the Order (processing), then creates a SubscriptionSchedule.
+    Card-based installments via Stripe SubscriptionSchedule.
+    Works for guests and authenticated users.
+    Frontend must either:
+      - provide a saved card `payment_method_id` (from a prior SetupIntent), or
+      - collect & pass one right before calling this.
     """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        # --- normalize months
-        raw_months = request.data.get("months") or request.data.get("installments_months")
-        try:
-            months = int(raw_months or 0)
-        except (TypeError, ValueError):
-            months = 0
+        months = int(request.data.get("months") or 0)
         if months not in (3, 6, 9):
             return Response({"installments_months": ["Choose 3, 6, or 9 months for card installments."]}, status=400)
 
-        # Ensure serializer sees installments_months (some serializers validate it)
-        data = request.data.copy()
-        data["installments_months"] = months
+        ser = OrderCreateSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
 
-        # Build order from posted payload (guest-safe)
-        ser = OrderCreateSerializer(data=data, context={"request": request})
-        try:
-            ser.is_valid(raise_exception=True)
-        except serializers.ValidationError as ve:
-            return Response(ve.detail, status=400)
-
-        # Create the order (processing)
+        # 1) Create Order in "processing" (we’re starting a plan now)
         try:
             with transaction.atomic():
-                order = ser.save()
+                order = ser.create(ser.validated_data)  # uses your create()
                 order.payment_method = "card_installments"
                 order.installments_months = months
                 order.status = "processing"
@@ -1452,14 +1443,14 @@ class StripeCardInstallmentsView(APIView):
             return Response({"detail": "payment_method_id is required"}, status=400)
 
         try:
-            # Attach/ensure customer
+            # 2) Ensure customer + attach PM
             pm = stripe.PaymentMethod.retrieve(payment_method_id)
-            pm_customer = pm.get("customer")
-            if pm_customer:
-                customer_id = pm_customer
-            else:
-                user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
-                customer_id = _get_or_create_stripe_customer(user=user, email=(order.email or "").strip() or None)
+            customer_id = pm.get("customer")
+            if not customer_id:
+                customer_id = _get_or_create_stripe_customer(
+                    user=request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
+                    email=order.email,
+                )
                 stripe.PaymentMethod.attach(payment_method_id, customer=customer_id)
 
             stripe.Customer.modify(
@@ -1467,9 +1458,14 @@ class StripeCardInstallmentsView(APIView):
                 invoice_settings={"default_payment_method": payment_method_id},
             )
 
-            total_cents = _amount_cents(order.total_price)
-            base = total_cents // months
-            remainder = total_cents - base * months
+            # 3) Compute schedule we will email (authoritative version)
+            months_ok = months
+            amounts, dates = build_installments_schedule(Decimal(order.total_price), months_ok, first_now=True)
+
+            # 4) Build prices/phases for Stripe schedule (last item carries remainder)
+            total_cents = int(Decimal(order.total_price) * 100)
+            base = total_cents // months_ok
+            remainder = total_cents - base * months_ok
 
             def mk_price(amount_int, label):
                 return stripe.Price.create(
@@ -1480,29 +1476,27 @@ class StripeCardInstallmentsView(APIView):
                 )
 
             now_ = timezone.now()
-
-            def ts(dt):
-                return int(dt.timestamp())
+            def ts(dt): return int(dt.timestamp())
 
             title_base = f"Installments for Order {order.number or order.id}"
             phases = []
             if remainder:
-                if months > 1:
+                if months_ok > 1:
                     price_base = mk_price(base, f"{title_base} (monthly)")
                     phases.append({
                         "items": [{"price": price_base.id, "quantity": 1}],
-                        "end_date": ts(now_ + timedelta(days=30*(months-1))),
+                        "end_date": ts(now_ + timezone.timedelta(days=30*(months_ok-1))),
                     })
                 price_last = mk_price(base + remainder, f"{title_base} (final)")
                 phases.append({
                     "items": [{"price": price_last.id, "quantity": 1}],
-                    "end_date": ts(now_ + timedelta(days=30*months)),
+                    "end_date": ts(now_ + timezone.timedelta(days=30*months_ok)),
                 })
             else:
                 price_all = mk_price(base, f"{title_base} (monthly)")
                 phases.append({
                     "items": [{"price": price_all.id, "quantity": 1}],
-                    "end_date": ts(now_ + timedelta(days=30*months)),
+                    "end_date": ts(now_ + timezone.timedelta(days=30*months_ok)),
                 })
 
             schedule = stripe.SubscriptionSchedule.create(
@@ -1520,12 +1514,37 @@ class StripeCardInstallmentsView(APIView):
             order.payment_ref = schedule.id
             order.save(update_fields=["payment_ref"])
 
-            return Response({"order_id": order.id, "schedule_id": schedule.id}, status=201)
+            # 5) Generate invoice + email schedule to customer
+            try:
+                generate_invoice_pdf(order)
+            except Exception:
+                pass
+
+            user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+            send_installments_started_email(
+                order,
+                months=months_ok,
+                amounts_eur=amounts,
+                dates=dates,
+                user_locale=user_locale,
+                to=(order.email or getattr(getattr(order, "user", None), "email", None)),
+                attach_invoice=True,  # attach the invoice PDF
+            )
+
+            # Return schedule so frontend can show the same numbers/dates
+            return Response({
+                "order_id": order.id,
+                "schedule_id": schedule.id,
+                "months": months_ok,
+                "amounts": [str(a) for a in amounts],
+                "dates": [timezone.localtime(d).strftime("%Y-%m-%d") for d in dates],
+            }, status=201)
 
         except stripe_error.StripeError as e:
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
         except Exception as e:
             return Response({"detail": f"Schedule create failed: {e}"}, status=500)
+
         
 # ---------------------------
 # STRIPE: SEPA one-time (DE only)
@@ -1607,66 +1626,40 @@ class StripeCreateSepaSetupIntent(APIView):
         
 class StripeSepaInstallmentsView(APIView):
     """
-    Start SEPA installments using a saved sepa_debit payment_method_id.
-    Supports guests and users. Email is required to create/find a Stripe customer.
+    SEPA installments with a saved SEPA payment_method_id or a freshly collected one (guest or auth).
     """
-    permission_classes = [permissions.AllowAny]  # allow guests
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        # --- normalize months
-        raw_months = request.data.get("months") or request.data.get("installments_months")
-        try:
-            months = int(raw_months or 0)
-        except (TypeError, ValueError):
-            months = 0
-        if months not in (3, 6, 9):
-            # match serializer-style error your frontend saw
-            return Response(
-                {"installments_months": ["Choose 3, 6, or 9 months for SEPA installments."]},
-                status=400,
-            )
-
-        # --- country check (prefer explicit field; fallback to shipping.country)
+        months = int(request.data.get("months") or 0)
         country = (request.data.get("country") or "").upper()[:2]
-        if not country:
-            shipping = request.data.get("shipping") or {}
-            country = (shipping.get("country") or "").upper()[:2]
+        if months not in (3, 6, 9):
+            return Response({"installments_months": ["Choose 3, 6, or 9 months for SEPA installments."]}, status=400)
         if country != "DE":
             return Response({"detail": "Installments are available in DE only."}, status=400)
 
-        # Ensure serializer sees installments_months if it validates that field
-        data = request.data.copy()
-        data["installments_months"] = months
-
-        ser = OrderCreateSerializer(data=data, context={"request": request})
-        try:
-            ser.is_valid(raise_exception=True)
-        except serializers.ValidationError as ve:
-            return Response(ve.detail, status=400)
+        ser = OrderCreateSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
 
         with transaction.atomic():
-            order = ser.save()
+            order = ser.create(ser.validated_data)
             order.payment_method = "sepa_installments"
             order.installments_months = months
             order.status = "processing"
             order.save(update_fields=["payment_method", "installments_months", "status"])
 
-        # Require a saved SEPA payment method (mandate)
         payment_method_id = request.data.get("payment_method_id")
         if not payment_method_id:
             return Response({"detail": "payment_method_id is required"}, status=400)
 
         try:
             pm = stripe.PaymentMethod.retrieve(payment_method_id)
-            pm_customer = pm.get("customer")
-
-            # create/attach customer when needed (guest-friendly)
-            if pm_customer:
-                customer_id = pm_customer
-            else:
-                user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
-                email = (order.email or "").strip() or None
-                customer_id = _get_or_create_stripe_customer(user=user, email=email)
+            customer_id = pm.get("customer")
+            if not customer_id:
+                customer_id = _get_or_create_stripe_customer(
+                    user=request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
+                    email=order.email,
+                )
                 stripe.PaymentMethod.attach(payment_method_id, customer=customer_id)
 
             stripe.Customer.modify(
@@ -1674,7 +1667,10 @@ class StripeSepaInstallmentsView(APIView):
                 invoice_settings={"default_payment_method": payment_method_id},
             )
 
-            total_cents = _amount_cents(order.total_price)
+            # Email schedule (authoritative)
+            amounts, dates = build_installments_schedule(Decimal(order.total_price), months, first_now=True)
+
+            total_cents = int(Decimal(order.total_price) * 100)
             base = total_cents // months
             remainder = total_cents - base * months
 
@@ -1696,18 +1692,18 @@ class StripeSepaInstallmentsView(APIView):
                     base_price = mk_price(base, f"{title_base} (monthly)")
                     phases.append({
                         "items": [{"price": base_price.id, "quantity": 1}],
-                        "end_date": ts(now_ + timedelta(days=30*(months-1))),
+                        "end_date": ts(now_ + timezone.timedelta(days=30*(months-1))),
                     })
                 last_price = mk_price(base + remainder, f"{title_base} (final)")
                 phases.append({
                     "items": [{"price": last_price.id, "quantity": 1}],
-                    "end_date": ts(now_ + timedelta(days=30*months)),
+                    "end_date": ts(now_ + timezone.timedelta(days=30*months)),
                 })
             else:
                 all_price = mk_price(base, f"{title_base} (monthly)")
                 phases.append({
                     "items": [{"price": all_price.id, "quantity": 1}],
-                    "end_date": ts(now_ + timedelta(days=30*months)),
+                    "end_date": ts(now_ + timezone.timedelta(days=30*months)),
                 })
 
             schedule = stripe.SubscriptionSchedule.create(
@@ -1725,13 +1721,35 @@ class StripeSepaInstallmentsView(APIView):
             order.payment_ref = schedule.id
             order.save(update_fields=["payment_ref"])
 
-            return Response({"order_id": order.id, "schedule_id": schedule.id}, status=201)
+            try:
+                generate_invoice_pdf(order)
+            except Exception:
+                pass
+
+            user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+            send_installments_started_email(
+                order,
+                months=months,
+                amounts_eur=amounts,
+                dates=dates,
+                user_locale=user_locale,
+                to=(order.email or getattr(getattr(order, "user", None), "email", None)),
+                attach_invoice=True,
+            )
+
+            return Response({
+                "order_id": order.id,
+                "schedule_id": schedule.id,
+                "months": months,
+                "amounts": [str(a) for a in amounts],
+                "dates": [timezone.localtime(d).strftime("%Y-%m-%d") for d in dates],
+            }, status=201)
 
         except stripe_error.StripeError as e:
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
-        
+      
 # ---------------------------
 # SEPA post-confirm (after confirmSepaDebitPayment on frontend)
 # ---------------------------

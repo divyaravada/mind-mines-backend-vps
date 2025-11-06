@@ -8,6 +8,7 @@ from django.conf import settings
 from django.core.mail import EmailMultiAlternatives, send_mail, get_connection
 from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.utils import timezone
+from .installments import build_installment_plan
 from .guest_invoices import build_guest_invoice_download_url
 
 logger = logging.getLogger(__name__)
@@ -287,6 +288,7 @@ def send_sepa_pending_email(order, user_locale: str = "en", to: Optional[str] = 
     mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
     return _send_email(mail.subject, mail.text, mail.html, to_email)
 
+   
 # ------------- Return requests -------------
 def send_return_request_emails(return_request):
     order = return_request.order
