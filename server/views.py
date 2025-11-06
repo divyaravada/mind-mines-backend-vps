@@ -1384,26 +1384,59 @@ class StripeCreateRedirectIntent(APIView):
 # ---------------------------
 # STRIPE: card installments (authenticated only)
 # ---------------------------
-class StripeCardInstallmentsView(APIView):
-    """
-    User picked installments with their saved card.
-    Flow:
-    1. Frontend saves card via SetupIntent -> gets payment_method_id
-    2. Calls this endpoint with {months, payment_method_id, ...same checkout payload...}
-    3. We create Order(status=processing), Stripe SubscriptionSchedule with monthly prices.
-    """
 
-    permission_classes = [permissions.IsAuthenticated]
+class StripeCreateSetupIntent(APIView):
+    """
+    Create a SetupIntent so the client can save a card and obtain a payment_method_id.
+    Works for guests and users. For guests, we create/get a Stripe customer by email.
+    """
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        months = int(request.data.get("months") or 0)
+        email = (request.data.get("email") or "").strip() or None
+        user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
+        try:
+            customer_id = _get_or_create_stripe_customer(user=user, email=email)
+            si = stripe.SetupIntent.create(
+                customer=customer_id,
+                payment_method_types=["card"],
+                usage="off_session",  # saving for future charges
+            )
+            return Response({"client_secret": si.client_secret, "customer_id": customer_id}, status=201)
+        except stripe_error.StripeError as e:
+            return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
+        
+class StripeCardInstallmentsView(APIView):
+    """
+    Start card-based installments using a saved card payment_method_id.
+    - Guests and users supported (AllowAny).
+    - Accepts months or installments_months; normalizes to 3, 6, 9.
+    - Creates the Order (processing), then creates a SubscriptionSchedule.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        # --- normalize months
+        raw_months = request.data.get("months") or request.data.get("installments_months")
+        try:
+            months = int(raw_months or 0)
+        except (TypeError, ValueError):
+            months = 0
         if months not in (3, 6, 9):
-            return Response({"detail": "Invalid months. Choose 3, 6, or 9."}, status=400)
+            return Response({"installments_months": ["Choose 3, 6, or 9 months for card installments."]}, status=400)
 
-        ser = OrderCreateSerializer(data=request.data, context={"request": request})
-        ser.is_valid(raise_exception=True)
+        # Ensure serializer sees installments_months (some serializers validate it)
+        data = request.data.copy()
+        data["installments_months"] = months
 
-        # build order
+        # Build order from posted payload (guest-safe)
+        ser = OrderCreateSerializer(data=data, context={"request": request})
+        try:
+            ser.is_valid(raise_exception=True)
+        except serializers.ValidationError as ve:
+            return Response(ve.detail, status=400)
+
+        # Create the order (processing)
         try:
             with transaction.atomic():
                 order = ser.save()
@@ -1418,14 +1451,15 @@ class StripeCardInstallmentsView(APIView):
         if not payment_method_id:
             return Response({"detail": "payment_method_id is required"}, status=400)
 
-        # get/create stripe customer, attach card, schedule charges
         try:
+            # Attach/ensure customer
             pm = stripe.PaymentMethod.retrieve(payment_method_id)
             pm_customer = pm.get("customer")
             if pm_customer:
                 customer_id = pm_customer
             else:
-                customer_id = _get_or_create_stripe_customer(request.user, email=order.email)
+                user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
+                customer_id = _get_or_create_stripe_customer(user=user, email=(order.email or "").strip() or None)
                 stripe.PaymentMethod.attach(payment_method_id, customer=customer_id)
 
             stripe.Customer.modify(
@@ -1437,7 +1471,6 @@ class StripeCardInstallmentsView(APIView):
             base = total_cents // months
             remainder = total_cents - base * months
 
-            # helper to make a recurring price
             def mk_price(amount_int, label):
                 return stripe.Price.create(
                     unit_amount=amount_int,
@@ -1486,14 +1519,14 @@ class StripeCardInstallmentsView(APIView):
 
             order.payment_ref = schedule.id
             order.save(update_fields=["payment_ref"])
-            
+
             return Response({"order_id": order.id, "schedule_id": schedule.id}, status=201)
 
         except stripe_error.StripeError as e:
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
         except Exception as e:
             return Response({"detail": f"Schedule create failed: {e}"}, status=500)
-
+        
 # ---------------------------
 # STRIPE: SEPA one-time (DE only)
 # ---------------------------

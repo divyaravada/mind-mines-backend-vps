@@ -55,7 +55,7 @@ from .views import (
     PaypalCreateOrder, PaypalCaptureOrder,
 
     # Stripe
-    StripeCreateIntent, StripeCardInstallmentsView,StripeCreateRedirectIntent,
+    StripeCreateIntent, StripeCardInstallmentsView,StripeCreateRedirectIntent,StripeCreateSetupIntent,
     StripeCreateSepaIntent, StripeSepaInstallmentsView,
     SepaPostConfirmView, stripe_webhook, OrderPaymentStatusUpdateAPIView,
 
@@ -165,6 +165,7 @@ urlpatterns = [
     path("stripe/create-intent/", StripeCreateIntent.as_view(), name="stripe_create_intent_card_compat"),  # back-compat
     path("stripe/create-intent/redirect/", StripeCreateRedirectIntent.as_view(), name="stripe_create_redirect_intent"),
     path("stripe/create-intent/sepa/", StripeCreateSepaIntent.as_view(), name="stripe_create_sepa_intent"),  # optional no-slash
+     path("stripe/setup-intent/", StripeCreateSetupIntent.as_view(), name="stripe_setup_intent"),
     path("stripe/installments/card/", StripeCardInstallmentsView.as_view(), name="stripe_installments_card"),
     path("stripe/installments/sepa/", StripeSepaInstallmentsView.as_view(), name="stripe_installments_sepa"),
     path("payments/sepa-post-confirm/", SepaPostConfirmView.as_view(), name="sepa-post-confirm"),
