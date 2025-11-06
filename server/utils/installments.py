@@ -1,37 +1,26 @@
 # server/utils/installments.py
-from __future__ import annotations
 from decimal import Decimal
-from typing import List, Tuple
 from django.utils import timezone
-from dateutil.relativedelta import relativedelta
 
-def split_amount(total: Decimal, months: int) -> List[Decimal]:
+def build_installments_schedule(total_eur: Decimal, months: int, *, first_now: bool = True):
     """
-    Split total into N monthly parts, last item carries the remainder (exact total preservation).
-    Uses cents to avoid floating errors.
+    Returns (amounts_eur: list[Decimal], dates: list[datetime]).
+    Remainder goes to the *last* month.
     """
-    cents = int((total * 100).quantize(Decimal("1")))
-    base = cents // months
-    rem = cents - base * months
-    parts = [Decimal(base) / 100 for _ in range(months)]
-    parts[-1] = (Decimal(base + rem) / 100)
-    return parts
+    total_cents = int(total_eur * 100)
+    base = total_cents // months
+    rem = total_cents - base * months
 
-def monthly_dates(months: int, first_charge_now: bool = True) -> List[timezone.datetime]:
-    """
-    If first_charge_now=True: today/timestamp for 1st, then +1M, +2M...
-    If False: first one is next month (+1M).
-    """
+    cents_list = [base] * months
+    if rem:
+        cents_list[-1] += rem
+
     now = timezone.now()
-    out = []
-    if first_charge_now:
-        out.append(now)
-        for i in range(1, months):
-            out.append(now + relativedelta(months=+i))
-    else:
-        for i in range(1, months + 1):
-            out.append(now + relativedelta(months=+i))
-    return out
+    dates = []
+    for i in range(months):
+        # 1st collection "now", then +30d, +60d... (adjust if you prefer month boundaries)
+        offset_days = 0 if (i == 0 and first_now) else 30 * (i if first_now else i + 1)
+        dates.append(now + timezone.timedelta(days=offset_days))
 
-def build_installments_schedule(total: Decimal, months: int, first_now=True) -> Tuple[List[Decimal], List[timezone.datetime]]:
-    return split_amount(total, months), monthly_dates(months, first_charge_now=first_now)
+    amounts_eur = [Decimal(c) / Decimal(100) for c in cents_list]
+    return amounts_eur, dates
