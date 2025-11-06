@@ -816,6 +816,14 @@ class OrderCreateSerializer(serializers.Serializer):
                 })
 
         # installments validation
+        if attrs.get("installments_months") in (None, ""):
+            try:
+                alias = int((self.initial_data.get("months") or 0))
+                if alias in (3, 6, 9):
+                    attrs["installments_months"] = alias
+            except Exception:
+                pass
+
         months = attrs.get("installments_months")
         if attrs["payment_method"] == "card_installments":
             if months is None or months not in (3, 6, 9):

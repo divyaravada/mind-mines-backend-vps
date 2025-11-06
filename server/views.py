@@ -1631,14 +1631,17 @@ class StripeSepaInstallmentsView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        months = int(request.data.get("months") or 0)
+        months = int(request.data.get("months") or request.data.get("installments_months") or 0)
         country = (request.data.get("country") or "").upper()[:2]
         if months not in (3, 6, 9):
             return Response({"installments_months": ["Choose 3, 6, or 9 months for SEPA installments."]}, status=400)
         if country != "DE":
             return Response({"detail": "Installments are available in DE only."}, status=400)
+        
+        data = request.data.copy()
+        data["installments_months"] = months 
 
-        ser = OrderCreateSerializer(data=request.data, context={"request": request})
+        ser = OrderCreateSerializer(data=data, context={"request": request})
         ser.is_valid(raise_exception=True)
 
         with transaction.atomic():
