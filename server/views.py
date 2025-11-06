@@ -1430,7 +1430,9 @@ class StripeCardInstallmentsView(APIView):
                 order.payment_method = "card_installments"
                 order.installments_months = months
                 order.status = "processing"
-                order.save(update_fields=["payment_method", "installments_months", "status"])
+                order.confirmation_sent_at = timezone.now()
+                order.save(update_fields=["payment_method","installments_months","status","confirmation_sent_at"])
+
         except Exception as e:
             return Response({"detail": f"Order creation failed: {e}"}, status=500)
 
@@ -1647,7 +1649,8 @@ class StripeSepaInstallmentsView(APIView):
             order.payment_method = "sepa_installments"
             order.installments_months = months
             order.status = "processing"
-            order.save(update_fields=["payment_method", "installments_months", "status"])
+            order.confirmation_sent_at = timezone.now()
+            order.save(update_fields=["payment_method","installments_months","status","confirmation_sent_at"])
 
         pm_id = request.data.get("payment_method_id")
         if not pm_id:

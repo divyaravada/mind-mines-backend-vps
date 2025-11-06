@@ -58,8 +58,11 @@ def remember_old_status(sender, instance: Order, **kwargs):
         instance._old_payment_status = None
 
 def handle_payment_status_notifications(sender, instance: Order, created, **kwargs):
-    """Trigger customer notifications when payment status changes."""
-
+    """
+    Trigger customer notifications when payment status changes.
+    For installments, we suppress the generic 'processing' email – the view
+    will send a detailed schedule email instead.
+    """
     prev_payment_status = (getattr(instance, "_old_payment_status", None) or "").lower()
     prev_status = (getattr(instance, "_old_status", None) or "").lower()
     current_payment_status = (getattr(instance, "payment_status", "") or "").lower()
@@ -74,6 +77,7 @@ def handle_payment_status_notifications(sender, instance: Order, created, **kwar
     if not notify_status:
         return
 
+    # de-dupe guards
     if notify_status == "processing" and getattr(instance, "confirmation_sent_at", None):
         return
     if notify_status == "failed" and getattr(instance, "failed_email_sent_at", None):
@@ -83,10 +87,14 @@ def handle_payment_status_notifications(sender, instance: Order, created, **kwar
 
     user_locale = getattr(getattr(instance.user, "profile", None), "language", "en") or "en"
 
+    # ⛔️ For installments, skip the generic 'processing' email.
+    if notify_status == "processing" and (instance.payment_method or "").lower() in (
+        "sepa_installments", "card_installments",
+    ):
+        return
+
     if notify_status == "paid":
-        # Avoid duplicate sends
-        if getattr(instance, "invoice_sent_at", None):
-            return
+        # send real invoice once, then stop
         try:
             instance.assign_unique_invoice_number()
         except Exception:
@@ -95,20 +103,18 @@ def handle_payment_status_notifications(sender, instance: Order, created, **kwar
             generate_invoice_pdf(instance)
         except Exception:
             pass
-
         try:
-            # This function sets invoice_sent_at internally on success
             send_invoice_email(instance, user_locale=user_locale)
         except Exception:
             pass
-        return  # IMPORTANT: don't also send the generic payment-status email
+        return
 
-    # For 'processing' / 'failed' keep your generic email
+    # generic processing/failed for other payment methods
     try:
         send_payment_status_email(instance, status=notify_status, user_locale=user_locale)
     except Exception:
         pass
-
+    
 @receiver(post_save, sender=Order)
 def ensure_order_number(sender, instance: Order, created, **kwargs):
     """
