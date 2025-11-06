@@ -1584,24 +1584,65 @@ class StripeCreateSepaIntent(APIView):
 # ---------------------------
 # STRIPE: SEPA installments (DE only)
 # ---------------------------
-class StripeSepaInstallmentsView(APIView):
+class StripeCreateSepaSetupIntent(APIView):
     """
-    Same idea as card installments, but for SEPA mandate.
-    Germany only. User must be logged in (we need off-session charges).
+    Create a SetupIntent for SEPA so the client can save a mandate and get payment_method_id.
+    Works for guests and users.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        months = int(request.data.get("months") or 0)
-        country = (request.data.get("country") or "").upper()[:2]
+        email = (request.data.get("email") or "").strip() or None
+        user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
+        try:
+            customer_id = _get_or_create_stripe_customer(user=user, email=email)
+            si = stripe.SetupIntent.create(
+                customer=customer_id,
+                payment_method_types=["sepa_debit"],
+                usage="off_session",
+            )
+            return Response({"client_secret": si.client_secret, "customer_id": customer_id}, status=201)
+        except stripe_error.StripeError as e:
+            return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
+        
+class StripeSepaInstallmentsView(APIView):
+    """
+    Start SEPA installments using a saved sepa_debit payment_method_id.
+    Supports guests and users. Email is required to create/find a Stripe customer.
+    """
+    permission_classes = [permissions.AllowAny]  # allow guests
 
+    def post(self, request):
+        # --- normalize months
+        raw_months = request.data.get("months") or request.data.get("installments_months")
+        try:
+            months = int(raw_months or 0)
+        except (TypeError, ValueError):
+            months = 0
         if months not in (3, 6, 9):
-            return Response({"detail": "Invalid months. Choose 3, 6, or 9."}, status=400)
+            # match serializer-style error your frontend saw
+            return Response(
+                {"installments_months": ["Choose 3, 6, or 9 months for SEPA installments."]},
+                status=400,
+            )
+
+        # --- country check (prefer explicit field; fallback to shipping.country)
+        country = (request.data.get("country") or "").upper()[:2]
+        if not country:
+            shipping = request.data.get("shipping") or {}
+            country = (shipping.get("country") or "").upper()[:2]
         if country != "DE":
             return Response({"detail": "Installments are available in DE only."}, status=400)
 
-        ser = OrderCreateSerializer(data=request.data, context={"request": request})
-        ser.is_valid(raise_exception=True)
+        # Ensure serializer sees installments_months if it validates that field
+        data = request.data.copy()
+        data["installments_months"] = months
+
+        ser = OrderCreateSerializer(data=data, context={"request": request})
+        try:
+            ser.is_valid(raise_exception=True)
+        except serializers.ValidationError as ve:
+            return Response(ve.detail, status=400)
 
         with transaction.atomic():
             order = ser.save()
@@ -1610,7 +1651,7 @@ class StripeSepaInstallmentsView(APIView):
             order.status = "processing"
             order.save(update_fields=["payment_method", "installments_months", "status"])
 
-        # We assume frontend already did a SetupIntent and passes payment_method_id (sepa_debit)
+        # Require a saved SEPA payment method (mandate)
         payment_method_id = request.data.get("payment_method_id")
         if not payment_method_id:
             return Response({"detail": "payment_method_id is required"}, status=400)
@@ -1619,10 +1660,13 @@ class StripeSepaInstallmentsView(APIView):
             pm = stripe.PaymentMethod.retrieve(payment_method_id)
             pm_customer = pm.get("customer")
 
+            # create/attach customer when needed (guest-friendly)
             if pm_customer:
                 customer_id = pm_customer
             else:
-                customer_id = _get_or_create_stripe_customer(request.user, email=order.email)
+                user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
+                email = (order.email or "").strip() or None
+                customer_id = _get_or_create_stripe_customer(user=user, email=email)
                 stripe.PaymentMethod.attach(payment_method_id, customer=customer_id)
 
             stripe.Customer.modify(
@@ -1687,7 +1731,7 @@ class StripeSepaInstallmentsView(APIView):
             return Response({"detail": str(e)}, status=502)
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
-
+        
 # ---------------------------
 # SEPA post-confirm (after confirmSepaDebitPayment on frontend)
 # ---------------------------

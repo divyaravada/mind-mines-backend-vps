@@ -56,7 +56,7 @@ from .views import (
 
     # Stripe
     StripeCreateIntent, StripeCardInstallmentsView,StripeCreateRedirectIntent,StripeCreateSetupIntent,
-    StripeCreateSepaIntent, StripeSepaInstallmentsView,
+    StripeCreateSepaIntent, StripeSepaInstallmentsView,StripeCreateSepaSetupIntent,
     SepaPostConfirmView, stripe_webhook, OrderPaymentStatusUpdateAPIView,
 
     # Returns / Cancellations
@@ -165,8 +165,9 @@ urlpatterns = [
     path("stripe/create-intent/", StripeCreateIntent.as_view(), name="stripe_create_intent_card_compat"),  # back-compat
     path("stripe/create-intent/redirect/", StripeCreateRedirectIntent.as_view(), name="stripe_create_redirect_intent"),
     path("stripe/create-intent/sepa/", StripeCreateSepaIntent.as_view(), name="stripe_create_sepa_intent"),  # optional no-slash
-     path("stripe/setup-intent/", StripeCreateSetupIntent.as_view(), name="stripe_setup_intent"),
+    path("stripe/setup-intent/", StripeCreateSetupIntent.as_view(), name="stripe_setup_intent"),
     path("stripe/installments/card/", StripeCardInstallmentsView.as_view(), name="stripe_installments_card"),
+    path("stripe/setup-intent/sepa/", StripeCreateSepaSetupIntent.as_view(), name="stripe_setup_intent_sepa"),
     path("stripe/installments/sepa/", StripeSepaInstallmentsView.as_view(), name="stripe_installments_sepa"),
     path("payments/sepa-post-confirm/", SepaPostConfirmView.as_view(), name="sepa-post-confirm"),
     path("stripe/webhook/", stripe_webhook, name="stripe_webhook"),
