@@ -68,6 +68,7 @@ from .utils.guest_invoices import (
     build_guest_invoice_download_url,
     parse_guest_invoice_token,
 )
+from .utils.checkout_token import pack_checkout_payload
 
 import stripe
 try:
@@ -127,6 +128,7 @@ def _ensure_invoice_email(order) -> None:
 
 # Fallback bilingual sender for small notices
 DEFAULT_FROM = getattr(settings, "EMAIL_HOST_USER", "no-reply@mindmines.eu")
+
 def _send_bilingual(subject, to, en_html, de_html):
     text = f"ENGLISH\n{re.sub('<[^<]+?>','',en_html)}\n\nDEUTSCH\n{re.sub('<[^<]+?>','',de_html)}"
     html = (
@@ -137,6 +139,50 @@ def _send_bilingual(subject, to, en_html, de_html):
     msg.attach_alternative(html, "text/html")
     msg.send(fail_silently=not settings.DEBUG)
 
+def _ensure_order_from_checkout_token(pi_data) -> Optional[Order]:
+    # Already tied to an order?
+    oid = (pi_data.get("metadata") or {}).get("order_id")
+    if oid:
+        try: return Order.objects.get(pk=oid)
+        except Order.DoesNotExist: return None
+
+    token = (pi_data.get("metadata") or {}).get("checkout_token")
+    if not token: return None
+
+    # Idempotent: if we already created an order for this PI
+    pi_id = pi_data.get("id")
+    exists = Order.objects.filter(stripe_pi=pi_id).first()
+    if exists: return exists
+
+    try:
+        payload = unpack_checkout_payload(token)
+    except Exception:
+        return None
+
+    ser = OrderCreateSerializer(
+        data={
+            "email": payload.get("email"),
+            "payment_method": (pi_data.get("metadata") or {}).get("pm") or "unknown",
+            "coupon_code": payload.get("coupon_code") or "",
+            "items": payload.get("items") or [],
+            "shipping": payload.get("shipping") or {},
+        },
+        context={"request": None},
+    )
+    try:
+        ser.is_valid(raise_exception=True)
+    except Exception:
+        return None
+
+    with transaction.atomic():
+        order = ser.save()
+        order.payment_ref = pi_id
+        order.stripe_pi = pi_id
+        order.status = "pending"
+        order.payment_status = "pending"
+        order.save(update_fields=["payment_ref","stripe_pi","status","payment_status"])
+        return order
+    
 # -----------------------------------------------------------------------------
 # Auth
 # -----------------------------------------------------------------------------
@@ -1255,69 +1301,118 @@ class StripeCreateIntent(APIView):
 
 class StripeCreateRedirectIntent(APIView):
     """
-    Create or reuse a PaymentIntent for redirect-based methods (Klarna, giropay).
-    The frontend then renders PaymentElement and calls stripe.confirmPayment().
+    Redirect methods (Klarna, giropay):
+    - LEGACY: {order_id, method} -> use existing order
+    - C-OPTION: {method, payload} -> NO order yet; create in webhook
     """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        order_id = request.data.get("order_id")
-        method = (request.data.get("method") or "").strip().lower()  # "klarna" or "giropay"
+        method = (request.data.get("method") or "").strip().lower()
+        if method not in {"klarna", "giropay"}:
+            return Response({"detail": "method must be 'klarna' or 'giropay'."}, status=400)
 
-        if not order_id or method not in {"klarna", "giropay"}:
-            return Response({"detail": "order_id and method in {'klarna','giropay'} required."}, status=400)
+        order_id = request.data.get("order_id")
+        payload = request.data.get("payload")
+
+        # ----- Path A/B: old behavior, keep working for card-like flows you might reuse -----
+        if order_id:
+            try:
+                with transaction.atomic():
+                    order = (
+                        Order.objects
+                        .select_for_update()
+                        .get(pk=order_id)
+                    )
+                    if order.total_price is None or Decimal(order.total_price) <= Decimal("0.00"):
+                        return Response({"detail": "Total must be > 0."}, status=400)
+                    if order.status not in ("pending", "processing"):
+                        return Response({"detail": f"Order not payable in status '{order.status}'"}, status=400)
+
+                    intent = None
+                    if order.stripe_pi:
+                        try:
+                            current = stripe.PaymentIntent.retrieve(order.stripe_pi)
+                            if (isinstance(current.get("payment_method_types"), list)
+                                and current["payment_method_types"] == [method]
+                                and current["currency"] == getattr(settings, "STRIPE_CURRENCY", "eur")
+                                and int(current["amount"]) == _amount_cents(Decimal(order.total_price))):
+                                intent = current
+                        except stripe_error.StripeError:
+                            intent = None
+
+                    if not intent:
+                        intent = stripe.PaymentIntent.create(
+                            amount=_amount_cents(Decimal(order.total_price)),
+                            currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
+                            payment_method_types=[method],
+                            description=f"Order {order.number or order.id} — MindMines Payment",
+                            metadata={"order_id": str(order.id), "pm": method},
+                            receipt_email=(order.email or "").strip() or None,
+                        )
+                        order.payment_method = method
+                        order.status = "pending"
+                        order.payment_ref = intent.id
+                        order.stripe_pi = intent.id
+                        order.save(update_fields=["payment_method","status","payment_ref","stripe_pi"])
+
+                return Response({"client_secret": intent.client_secret}, status=200)
+            except Order.DoesNotExist:
+                return Response({"detail": "Order not found."}, status=404)
+            except stripe_error.StripeError as e:
+                return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
+
+        # ----- Path C: NEW — NO local order yet; create PI only -----
+        if not payload:
+            return Response({"detail": "Provide either order_id or payload."}, status=400)
+
+        email = (payload.get("email") or "").strip()
+        items = payload.get("items") or []
+        shipping = payload.get("shipping") or {}
+        if not email or not items or not shipping:
+            return Response({"detail": "payload.email, payload.items and payload.shipping are required."}, status=400)
+
+        # Validate / compute totals without saving an Order
+        ser = OrderCreateSerializer(
+            data={
+                "email": email,
+                "payment_method": method,
+                "coupon_code": payload.get("coupon_code"),
+                "items": items,
+                "shipping": shipping,
+            },
+            context={"request": request},
+        )
+        try:
+            ser.is_valid(raise_exception=True)
+        except serializers.ValidationError as ve:
+            return Response({"detail": "Invalid checkout payload", "errors": ve.detail}, status=400)
+
+        total = ser.get_total_price_preview() if hasattr(ser, "get_total_price_preview") else ser.validated_data.get("total_price")
+        if total is None or Decimal(total) <= Decimal("0.00"):
+            return Response({"detail": "Total must be > 0."}, status=400)
+
+        checkout_token = pack_checkout_payload({
+            "email": email,
+            "coupon_code": payload.get("coupon_code") or "",
+            "items": items,
+            "shipping": shipping,
+        })
 
         try:
-            with transaction.atomic():
-                order = (
-                    Order.objects
-                    .select_for_update()
-                    .get(pk=order_id)
-                )
-
-                if order.total_price is None or Decimal(order.total_price) <= Decimal("0.00"):
-                    return Response({"detail": "Total must be > 0."}, status=400)
-                if order.status not in ("pending", "processing"):
-                    return Response({"detail": f"Order not payable in status '{order.status}'"}, status=400)
-
-                currency = getattr(settings, "STRIPE_CURRENCY", "eur")
-                email = (order.email or "").strip() or None
-
-                # Reuse PI if it matches the same method; otherwise create a new one
-                intent = None
-                if order.stripe_pi:
-                    try:
-                        current = stripe.PaymentIntent.retrieve(order.stripe_pi)
-                        if (isinstance(current.get("payment_method_types"), list)
-                                and current["payment_method_types"] == [method]
-                                and current["currency"] == currency
-                                and int(current["amount"]) == _amount_cents(Decimal(order.total_price))):
-                            intent = current
-                    except stripe_error.StripeError:
-                        intent = None
-
-                if not intent:
-                    intent = stripe.PaymentIntent.create(
-                        amount=_amount_cents(Decimal(order.total_price)),
-                        currency=currency,
-                        payment_method_types=[method],
-                        description=f"Order {order.number or order.id} — MindMines Payment",
-                        metadata={"order_id": str(order.id)},
-                        receipt_email=email,
-                    )
-                    order.payment_method = method  # record chosen pm
-                    order.status = "pending"
-                    order.payment_ref = intent.id
-                    order.stripe_pi = intent.id
-                    order.save(update_fields=["payment_method", "status", "payment_ref", "stripe_pi"])
-
-            return Response({"client_secret": intent.client_secret, "order_id": order.id}, status=200)
-
-        except Order.DoesNotExist:
-            return Response({"detail": "Order not found."}, status=404)
+            intent = stripe.PaymentIntent.create(
+                amount=_amount_cents(Decimal(total)),
+                currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
+                payment_method_types=[method],
+                description="Checkout — MindMines Payment",
+                metadata={"checkout_token": checkout_token, "pm": method},  # <— no order_id here
+                receipt_email=email,
+            )
         except stripe_error.StripeError as e:
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
 
+        return Response({"client_secret": intent.client_secret}, status=201)
+    
 # ---------------------------
 # STRIPE: card installments (authenticated only)
 # ---------------------------
@@ -1679,13 +1774,16 @@ def stripe_webhook(request):
     # payment_intent.succeeded => normal card, klarna, sofort, giropay
     if etype == "payment_intent.succeeded":
         oid = (data.get("metadata") or {}).get("order_id")
-        if oid:
-            try:
-                with transaction.atomic():
+        try:
+            with transaction.atomic():
+                if oid:
                     order = Order.objects.select_for_update().get(pk=oid)
-                    _mark_paid(order, data)  # <— use the guarded helper
-            except Order.DoesNotExist:
-                pass
+                else:
+                    order = _ensure_order_from_checkout_token(data)
+                    if not order: return HttpResponse(status=200)
+                _mark_paid(order, data)
+        except Order.DoesNotExist:
+            pass
 
     elif etype == "invoice.payment_succeeded":
         oid = (data.get("metadata") or {}).get("order_id")
@@ -1700,29 +1798,34 @@ def stripe_webhook(request):
     # payment_intent.processing => SEPA direct debit / waiting bank
     elif etype == "payment_intent.processing":
         oid = (data.get("metadata") or {}).get("order_id")
-        if oid:
-            try:
-                with transaction.atomic():
+        try:
+            with transaction.atomic():
+                if oid:
                     order = Order.objects.select_for_update().get(pk=oid)
-                    if order.status != "processing":
-                        order.status = "processing"
-                        order.payment_status = "processing"
-                        order.save(update_fields=["status", "payment_status"])
-            except Order.DoesNotExist:
-                pass
+                else:
+                    order = _ensure_order_from_checkout_token(data)
+                    if not order: return HttpResponse(status=200)
+                if order.status != "processing":
+                    order.status = "processing"
+                    order.payment_status = "processing"
+                    order.save(update_fields=["status","payment_status"])
+        except Order.DoesNotExist:
+            pass
 
     elif etype in ("payment_intent.payment_failed", "invoice.payment_failed"):
-        oid = (data.get("metadata") or {}).get("order_id")
-        if oid:
-            try:
-                with transaction.atomic():
+        try:
+            with transaction.atomic():
+                if oid:
                     order = Order.objects.select_for_update().get(pk=oid)
-                    order.status = "failed"
-                    order.payment_status = "failed"
-                    order.save(update_fields=["status", "payment_status"])
-                    _safe(order.release_stock_atomic)
-            except Order.DoesNotExist:
-                pass
+                else:
+                    order = _ensure_order_from_checkout_token(data)
+                    if not order: return HttpResponse(status=200)
+                order.status = "failed"
+                order.payment_status = "failed"
+                order.save(update_fields=["status","payment_status"])
+                _safe(order.release_stock_atomic)
+        except Order.DoesNotExist:
+            pass
 
     return HttpResponse(status=200)
 
