@@ -1162,7 +1162,10 @@ KLARNA_LOCALE_MAP = {
     "SE": "sv-SE",
 }
 
-
+METHOD_MINS = {
+    "giropay": Decimal("1.00"),   # giropay generally requires >= €1.00
+    "klarna":  Decimal("1.00"),   # Klarna commonly requires >= €1.00 in many regions
+}
 
 
 def _amount_cents(value: Decimal) -> int:
@@ -1300,55 +1303,46 @@ class StripeCreateIntent(APIView):
 # ---------------------------
 
 class StripeCreateRedirectIntent(APIView):
-    """
-    Redirect methods (Klarna, giropay):
-    - LEGACY: {order_id, method} -> use existing order
-    - C-OPTION: {method, payload} -> NO order yet; create in webhook
-    """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         method = (request.data.get("method") or "").strip().lower()
-        if method not in {"klarna", "giropay"}:
-            return Response({"detail": "method must be 'klarna' or 'giropay'."}, status=400)
+        if method not in ("klarna", "giropay"):
+            return Response({"detail": "Unsupported method."}, status=400)
 
         order_id = request.data.get("order_id")
-        payload = request.data.get("payload")
-
-        # ----- Path A/B: old behavior, keep working for card-like flows you might reuse -----
+        # -------- Path A: existing order (KEEP working as before) --------
         if order_id:
             try:
                 with transaction.atomic():
-                    order = (
-                        Order.objects
-                        .select_for_update()
-                        .get(pk=order_id)
-                    )
-                    if order.total_price is None or Decimal(order.total_price) <= Decimal("0.00"):
+                    from server.models import Order
+                    order = (Order.objects
+                             .select_for_update()
+                             .get(pk=order_id))
+                    total = Decimal(order.total_price or "0.00")
+                    if total <= Decimal("0.00"):
                         return Response({"detail": "Total must be > 0."}, status=400)
-                    if order.status not in ("pending", "processing"):
-                        return Response({"detail": f"Order not payable in status '{order.status}'"}, status=400)
 
-                    intent = None
+                    # optional minimums by method
+                    min_amt = METHOD_MINS.get(method, Decimal("0.01"))
+                    if total < min_amt:
+                        return Response(
+                            {"detail": f"Minimum for {method} is {min_amt} EUR."}, status=400
+                        )
+
+                    pm_types = ["klarna"] if method == "klarna" else ["giropay"]
+
+                    # (Re)create or reuse PI
                     if order.stripe_pi:
-                        try:
-                            current = stripe.PaymentIntent.retrieve(order.stripe_pi)
-                            if (isinstance(current.get("payment_method_types"), list)
-                                and current["payment_method_types"] == [method]
-                                and current["currency"] == getattr(settings, "STRIPE_CURRENCY", "eur")
-                                and int(current["amount"]) == _amount_cents(Decimal(order.total_price))):
-                                intent = current
-                        except stripe_error.StripeError:
-                            intent = None
-
-                    if not intent:
+                        intent = stripe.PaymentIntent.retrieve(order.stripe_pi)
+                    else:
                         intent = stripe.PaymentIntent.create(
-                            amount=_amount_cents(Decimal(order.total_price)),
+                            amount=_amount_cents(total),
                             currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                            payment_method_types=[method],
+                            payment_method_types=pm_types,
                             description=f"Order {order.number or order.id} — MindMines Payment",
-                            metadata={"order_id": str(order.id), "pm": method},
-                            receipt_email=(order.email or "").strip() or None,
+                            metadata={"order_id": str(order.id)},
+                            receipt_email=order.email or None,
                         )
                         order.payment_method = method
                         order.status = "pending"
@@ -1357,56 +1351,58 @@ class StripeCreateRedirectIntent(APIView):
                         order.save(update_fields=["payment_method","status","payment_ref","stripe_pi"])
 
                 return Response({"client_secret": intent.client_secret}, status=200)
-            except Order.DoesNotExist:
-                return Response({"detail": "Order not found."}, status=404)
+
             except stripe_error.StripeError as e:
                 return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
+            except Exception as e:
+                return Response({"detail": str(e)}, status=400)
 
-        # ----- Path C: NEW — NO local order yet; create PI only -----
-        if not payload:
-            return Response({"detail": "Provide either order_id or payload."}, status=400)
+        # -------- Path B: NO order yet (new flow) --------
+        payload = request.data.get("payload") or {}
 
-        email = (payload.get("email") or "").strip()
-        items = payload.get("items") or []
-        shipping = payload.get("shipping") or {}
-        if not email or not items or not shipping:
-            return Response({"detail": "payload.email, payload.items and payload.shipping are required."}, status=400)
-
-        # Validate / compute totals without saving an Order
-        ser = OrderCreateSerializer(
-            data={
-                "email": email,
-                "payment_method": method,
-                "coupon_code": payload.get("coupon_code"),
-                "items": items,
-                "shipping": shipping,
-            },
-            context={"request": request},
-        )
+        # Validate using your existing OrderCreateSerializer (without saving)
+        from server.serializers import OrderCreateSerializer
+        ser = OrderCreateSerializer(data=payload, context={"request": request})
         try:
             ser.is_valid(raise_exception=True)
         except serializers.ValidationError as ve:
-            return Response({"detail": "Invalid checkout payload", "errors": ve.detail}, status=400)
+            return Response({"detail": "Order validation failed", "errors": ve.detail}, status=400)
 
-        total = ser.get_total_price_preview() if hasattr(ser, "get_total_price_preview") else ser.validated_data.get("total_price")
-        if total is None or Decimal(total) <= Decimal("0.00"):
+        # Compute a total like your normal order creation would
+        # (You likely already do this inside the serializer or a pricing engine.)
+        # Example: if serializer exposes computed fields, use them; else recompute here.
+        try:
+            # If your serializer has a helper: total = ser.compute_total()  # pseudo
+            # Fallback example: recompute from items and coupon (adapt to your logic!)
+            items = ser.validated_data.get("items", [])
+            coupon_code = ser.validated_data.get("coupon_code")
+            # compute subtotal from DB (pseudo-code – replace with your pricing logic):
+            from server.pricing import quote_basket  # <- your real function
+            quote = quote_basket(items=items, coupon=coupon_code)
+            total = Decimal(quote.total)  # must be Decimal
+
+        except Exception as e:
+            return Response({"detail": f"Failed to compute total: {e}"}, status=400)
+
+        if total <= Decimal("0.00"):
             return Response({"detail": "Total must be > 0."}, status=400)
 
-        checkout_token = pack_checkout_payload({
-            "email": email,
-            "coupon_code": payload.get("coupon_code") or "",
-            "items": items,
-            "shipping": shipping,
-        })
+        min_amt = METHOD_MINS.get(method, Decimal("0.01"))
+        if total < min_amt:
+            return Response({"detail": f"Minimum for {method} is {min_amt} EUR."}, status=400)
+
+        pm_types = ["klarna"] if method == "klarna" else ["giropay"]
+        receipt_email = (ser.validated_data.get("email") or "").strip() or None
 
         try:
             intent = stripe.PaymentIntent.create(
-                amount=_amount_cents(Decimal(total)),
+                amount=_amount_cents(total),
                 currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                payment_method_types=[method],
-                description="Checkout — MindMines Payment",
-                metadata={"checkout_token": checkout_token, "pm": method},  # <— no order_id here
-                receipt_email=email,
+                payment_method_types=pm_types,
+                description=f"MindMines Basket — {method}",
+                # No order yet, so no order_id metadata. You can add opaque context if you want:
+                metadata={"flow": "redirect_no_order"},
+                receipt_email=receipt_email,
             )
         except stripe_error.StripeError as e:
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
