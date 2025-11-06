@@ -8,7 +8,6 @@ from django.conf import settings
 from django.core.mail import EmailMultiAlternatives, send_mail, get_connection
 from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.utils import timezone
-from .installments import build_installment_plan
 from .guest_invoices import build_guest_invoice_download_url
 
 logger = logging.getLogger(__name__)
