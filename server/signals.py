@@ -114,7 +114,7 @@ def handle_payment_status_notifications(sender, instance: Order, created, **kwar
         send_payment_status_email(instance, status=notify_status, user_locale=user_locale)
     except Exception:
         pass
-    
+
 @receiver(post_save, sender=Order)
 def ensure_order_number(sender, instance: Order, created, **kwargs):
     """
@@ -129,16 +129,35 @@ def ensure_order_number(sender, instance: Order, created, **kwargs):
 
 def stamp_status_times(sender, instance: Order, created, **kwargs):
     """
-    Add delivered_at / cancelled_at timestamps when status flips.
+    Add delivered_at / cancelled_at timestamps when status flips, but only
+    if those fields exist on the model.
     """
     old = getattr(instance, "_old_status", None)
     updates = {}
-    if instance.status == "delivered" and old != "delivered" and not getattr(instance, "delivered_at", None):
+
+    OrderModel = type(instance)
+
+    has_delivered_at = hasattr(OrderModel, "delivered_at")
+    has_cancelled_at = hasattr(OrderModel, "cancelled_at")
+
+    if (
+        has_delivered_at
+        and instance.status == "delivered"
+        and old != "delivered"
+        and not getattr(instance, "delivered_at", None)
+    ):
         updates["delivered_at"] = timezone.now()
-    if instance.status == "cancelled" and old != "cancelled" and not getattr(instance, "cancelled_at", None):
+
+    if (
+        has_cancelled_at
+        and instance.status == "cancelled"
+        and old != "cancelled"
+        and not getattr(instance, "cancelled_at", None)
+    ):
         updates["cancelled_at"] = timezone.now()
+
     if updates:
-        type(instance).objects.filter(pk=instance.pk).update(**updates)
+        OrderModel.objects.filter(pk=instance.pk).update(**updates)
 
 # --------------------------------------------------------------------
 # Product stock alert helpers
