@@ -583,16 +583,42 @@ class OrderReadSerializer(serializers.ModelSerializer):
     class ItemOut(serializers.ModelSerializer):
         product_name = serializers.SerializerMethodField()
         line_total = serializers.SerializerMethodField()
+        product_image = serializers.SerializerMethodField()
 
         class Meta:
             model = OrderItem
-            fields = ("product_id", "product_name", "quantity", "unit_price", "line_total")
+            fields = ("product_id", "product_name", "quantity", "unit_price", "line_total", "product_image")
 
         def get_product_name(self, obj):
             return obj.product_name  # uses property to prefer snapshot
 
         def get_line_total(self, obj):
             return f"{obj.line_total():.2f}"
+
+        def get_product_image(self, obj):
+            """
+            Return an absolute URL for the product image when available.
+            Falls back to empty string when the product or image is missing.
+            """
+            request = getattr(self, "context", {}).get("request")
+            url = ""
+            try:
+                product = getattr(obj, "product", None)
+                image = getattr(product, "image", None) if product else None
+                if image is None and hasattr(obj, "product_image_snapshot"):
+                    image = getattr(obj, "product_image_snapshot", None)
+                if image is None:
+                    return ""
+                url = getattr(image, "url", image)
+            except Exception:
+                return ""
+
+            if not url:
+                return ""
+
+            if request and not str(url).startswith(("http://", "https://")):
+                return request.build_absolute_uri(url)
+            return url
 
     items = ItemOut(source="items.all", many=True, read_only=True)
 
