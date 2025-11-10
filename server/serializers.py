@@ -1,7 +1,7 @@
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 
 from django.conf import settings
-from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.template.loader import render_to_string, TemplateDoesNotExist
@@ -15,6 +15,8 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.core.mail import EmailMultiAlternatives
 
 from .models import (
+    Cart,
+    CartItem,
     PromotionBanner,
     StockAlert,
     ReturnRequest,
@@ -89,12 +91,18 @@ class AccountSerializer(serializers.Serializer):
     def to_representation(self, instance):
         user = instance
         prof = getattr(user, "profile", None)
+
+        image_url = None
+        if prof and getattr(prof, "image", None):
+            # guard both prof and image
+            image_url = prof.image.url
+
         return {
             "email": user.email,
             "username": user.username,
             "full_name": getattr(prof, "full_name", "") or "",
             "mobile": getattr(prof, "mobile", "") or "",
-            "image": prof.image.url if getattr(prof, "image", None) else None,
+            "image": image_url,
             "verified": bool(getattr(prof, "verified", False)),
             "language": getattr(prof, "language", "") or "en",
             "date_of_birth": getattr(prof, "date_of_birth", None),
@@ -106,7 +114,7 @@ class AccountSerializer(serializers.Serializer):
             instance.username = validated_data["username"]
             instance.save(update_fields=["username"])
 
-        prof = instance.profile
+        prof, _ = Profile.objects.get_or_create(user=instance)
         for f in ["full_name", "mobile", "image", "language", "date_of_birth"]:
             if f in validated_data:
                 setattr(prof, f, validated_data[f])
@@ -151,14 +159,22 @@ class AddressSerializer(serializers.ModelSerializer):
             addr.full_name = full
             addr.save(update_fields=["full_name"])
 
-    def create(self, validated_data):
-        user = self.context["request"].user
+    def create(self, validated_data: Dict[str, Any]) -> Address:
+        # request can be missing in some contexts; guard it
+        req = self.context.get("request")
+        user = getattr(req, "user", None)
         make_default = bool(validated_data.pop("is_default", False))
 
+        # Safely read raw incoming fields from initial_data (may be absent)
+        init_data: Mapping[str, Any] = cast(
+            Mapping[str, Any],
+            getattr(self, "initial_data", {}) or {}
+        )
+
         # If frontend sent split street/house_number instead of address_line1
-        if not validated_data.get("address_line1"):
-            hn = self.initial_data.get("house_number") or ""
-            sn = self.initial_data.get("street_name") or ""
+        if not (validated_data.get("address_line1") or "").strip():
+            hn = str(init_data.get("house_number") or "").strip()
+            sn = str(init_data.get("street_name") or "").strip()
             synth = " ".join([sn, hn]).strip()
             if synth:
                 validated_data["address_line1"] = synth
@@ -174,7 +190,7 @@ class AddressSerializer(serializers.ModelSerializer):
         self._sync_full_name(addr)
         return addr
 
-    def update(self, instance, validated_data):
+    def update(self, instance, validated_data: Dict[str, Any]) -> Address:
         make_default = bool(validated_data.pop("is_default", False))
 
         for k, v in validated_data.items():
@@ -555,6 +571,48 @@ class NewsletterSubscriberSerializer(serializers.ModelSerializer):
     def validate_email(self, value: str) -> str:
         return value.strip().lower()
 
+# -----------------
+# Cart detail / items
+# -----------------
+class CartItemSerializer(serializers.ModelSerializer):
+    product_id = serializers.IntegerField(source="product_id")
+
+    class Meta:
+        model = CartItem
+        fields = ("product_id","name","image","price","qty","color","weight","dimensions","category")
+
+class CartSerializer(serializers.ModelSerializer):
+    items = CartItemSerializer(many=True)
+    user_email = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Cart
+        fields = ("id","user_email","cart_token","currency","is_active","created_at","updated_at","items")
+
+    def get_user_email(self, obj):
+        return getattr(obj.user, "email", None)
+
+    def create(self, validated_data):
+        items_data = validated_data.pop("items", [])
+        cart = Cart.objects.create(**validated_data)
+        self._upsert_items(cart, items_data)
+        return cart
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop("items", [])
+        for k,v in validated_data.items():
+            setattr(instance, k, v)
+        instance.save(update_fields=["currency","is_active","updated_at"])
+        # replace items by product_id uniqueness
+        instance.items.all().delete()
+        self._upsert_items(instance, items_data)
+        return instance
+
+    def _upsert_items(self, cart, items):
+        bulk = []
+        for it in items:
+            bulk.append(CartItem(cart=cart, **it))
+        CartItem.objects.bulk_create(bulk)
 
 # -----------------
 # Order detail / items
@@ -767,36 +825,30 @@ class OrderCreateSerializer(serializers.Serializer):
 
     # --- helpers ---
 
-    def _normalize_country(self, c: str) -> str:
+    def _normalize_country(self, c: Optional[str]) -> str:
         if not c:
             return "DE"
         c = c.strip()
         if len(c) == 2:
             return c.upper()
-        mapping = {
-            "Germany": "DE",
-            "Deutschland": "DE",
-            "Austria": "AT",
-            "Österreich": "AT",
-            "Switzerland": "CH",
-            "Schweiz": "CH",
-            "Italy": "IT",
-            "Italia": "IT",
-            "France": "FR",
-            "Frankreich": "FR",
-            "Netherlands": "NL",
-            "Niederlande": "NL",
+        mapping: Dict[str, str] = {
+            "Germany": "DE", "Deutschland": "DE",
+            "Austria": "AT", "Österreich": "AT",
+            "Switzerland": "CH", "Schweiz": "CH",
+            "Italy": "IT", "Italia": "IT",
+            "France": "FR", "Frankreich": "FR",
+            "Netherlands": "NL", "Niederlande": "NL",
         }
         return mapping.get(c, "DE")
 
     # --- validation ---
 
-    def validate(self, attrs):
+    def validate(self, attrs: Dict[str, Any]) -> Dict[str, Any]:
         req = self.context.get("request")
         user = getattr(req, "user", None)
 
         # auth mode?
-        is_auth = bool(user and user.is_authenticated and getattr(user, "is_active", True))
+        is_auth = bool(user and getattr(user, "is_authenticated", False) and getattr(user, "is_active", True))
 
         # email
         incoming_email = (attrs.get("email") or "").strip().lower()
@@ -807,7 +859,7 @@ class OrderCreateSerializer(serializers.Serializer):
         attrs["email"] = incoming_email
 
         # normalize payment method aliases
-        aliases = {
+        aliases: Dict[str, str] = {
             "stripe_sepa": "sepa_debit",
             "stripe_card": "card",
             "debit_card": "card",
@@ -824,15 +876,15 @@ class OrderCreateSerializer(serializers.Serializer):
             "giropay": "giropay",
             "klarna": "klarna",
         }
-        key = (attrs.get("payment_method") or "").strip().lower() or "card"
+        key = str((attrs.get("payment_method") or "")).strip().lower() or "card"
         attrs["payment_method"] = aliases.get(key, key)
 
-        # country is inside shipping
-        shipping = attrs.get("shipping") or {}
-        country_in = shipping.get("country")
+        # country is inside shipping (ensure it's a dict)
+        shipping_in: Dict[str, Any] = cast(Dict[str, Any], attrs.get("shipping") or {})
+        country_in = cast(Optional[str], shipping_in.get("country"))
         country_norm = self._normalize_country(country_in)
-        shipping["country"] = country_norm
-        attrs["shipping"] = shipping
+        shipping_in["country"] = country_norm
+        attrs["shipping"] = shipping_in
 
         # methods restricted to DE (tune as needed)
         if attrs["payment_method"] in ("sepa_debit", "sepa_installments", "bank_transfer"):
@@ -841,16 +893,17 @@ class OrderCreateSerializer(serializers.Serializer):
                     "payment_method": "SEPA / Bank Transfer is only available in DE."
                 })
 
-        # installments validation
+        # installments validation — allow alias via initial_data["months"]
+        init_data: Mapping[str, Any] = cast(Mapping[str, Any], getattr(self, "initial_data", {}) or {})
         if attrs.get("installments_months") in (None, ""):
             try:
-                alias = int((self.initial_data.get("months") or 0))
+                alias = int(init_data.get("months") or 0)
                 if alias in (3, 6, 9):
                     attrs["installments_months"] = alias
             except Exception:
                 pass
 
-        months = attrs.get("installments_months")
+        months = cast(Optional[int], attrs.get("installments_months"))
         if attrs["payment_method"] == "card_installments":
             if months is None or months not in (3, 6, 9):
                 raise serializers.ValidationError({"installments_months": "Choose 3, 6, or 9 months for card installments."})
@@ -864,19 +917,22 @@ class OrderCreateSerializer(serializers.Serializer):
 
     # --- pricing & coupon ---
 
-    def _calc_subtotal(self, items_validated):
+    def _calc_subtotal(self, items_validated: List[Dict[str, Any]]) -> Decimal:
         total = Decimal("0.00")
         for it in items_validated:
-            prod = Product.objects.get(pk=it["product_id"])
+            pid = int(it["product_id"])  # validated by OrderItemIn
+            qty = int(it["qty"])
+            prod = Product.objects.get(pk=pid)
             unit = Decimal(str(getattr(prod, "final_price_gross", None) or prod.price_gross))
-            total += unit * it["qty"]
+            total += unit * qty
         return quant2(total)
 
-    def _apply_coupon(self, subtotal: Decimal, code: str, user):
-        """
-        Apply Coupon model logic.
-        Returns (total_after_discount, discount_amount, coupon_instance_or_None)
-        """
+    def _apply_coupon(
+    self,
+    subtotal: Decimal,
+    code: str,
+    user: Optional[Any],
+) -> Tuple[Decimal, Decimal, Optional["Coupon"]]:
         if not code:
             return subtotal, Decimal("0.00"), None
 
@@ -884,11 +940,18 @@ class OrderCreateSerializer(serializers.Serializer):
         if not coup or not coup.active:
             return subtotal, Decimal("0.00"), None
 
-        ok, reason = coup.can_apply(user, self.validated_data["items"], subtotal)
+        # validated_data may be “empty” at type time; guard + cast to Mapping
+        vd: Mapping[str, Any] = cast(Mapping[str, Any], getattr(self, "validated_data", {}) or {})
+        raw_items = vd.get("items") or []  # safe even if missing/None
+
+        # ensure a concrete list[dict] for the coupon API
+        items_for_coupon: List[Dict[str, Any]] = cast(List[Dict[str, Any]], raw_items)
+
+        ok, _ = coup.can_apply(user, items_for_coupon, subtotal)
         if not ok:
             return subtotal, Decimal("0.00"), None
 
-        discount = quant2(coup.discount_amount(user, self.validated_data["items"], subtotal))
+        discount = quant2(coup.discount_amount(user, items_for_coupon, subtotal))
         total = quant2(subtotal - discount)
         if total < Decimal("0.00"):
             total = Decimal("0.00")
@@ -896,16 +959,18 @@ class OrderCreateSerializer(serializers.Serializer):
 
     # --- creation ---
 
-    def create(self, validated_data):
-        request = self.context.get("request")
-        user = request.user if request and request.user.is_authenticated else None
+    def create(self, validated_data: Dict[str, Any]) -> Order:
+        req = self.context.get("request")
+        user = getattr(req, "user", None)
+        if not (user and getattr(user, "is_authenticated", False)):
+            user = None
 
-        items_data = validated_data.pop("items", [])
-        shipping_data = validated_data.pop("shipping", {})
-        coupon_code = (validated_data.get("coupon_code") or "").strip()
-        payment_method = validated_data.get("payment_method")
-        installments_months = validated_data.get("installments_months")
-        idempotency_key = (validated_data.get("idempotency_key") or "").strip() or None
+        items_data: List[Dict[str, Any]] = cast(List[Dict[str, Any]], validated_data.pop("items", []))
+        shipping_data: Dict[str, Any] = cast(Dict[str, Any], validated_data.pop("shipping", {}) or {})
+        coupon_code = str((validated_data.get("coupon_code") or "")).strip()
+        payment_method = str(validated_data.get("payment_method") or "")
+        installments_months = cast(Optional[int], validated_data.get("installments_months"))
+        idempotency_key = str((validated_data.get("idempotency_key") or "")).strip() or None  # noqa: F841 if unused
 
         # totals (preliminary)
         subtotal = self._calc_subtotal(items_data)
@@ -917,16 +982,19 @@ class OrderCreateSerializer(serializers.Serializer):
                 "detail": "Your total is 0.00 € after discounts. We can't create an online payment for 0 €. Please remove the full discount or add another item."
             })
 
+
         with transaction.atomic():
             order = Order.objects.create(
                 user=user if user else None,
-                email=validated_data.get("email"),
+                email=str(validated_data.get("email") or ""),
+
                 # money fields (shipping/vat will be recomputed below)
                 subtotal=subtotal,
                 discount_total=discount,
                 shipping_price=Decimal("0.00"),
                 vat_total=Decimal("0.00"),
                 total_price=total_after_discount,
+
                 # payment
                 payment_method=payment_method,
                 installments_months=installments_months if installments_months else None,
@@ -934,31 +1002,31 @@ class OrderCreateSerializer(serializers.Serializer):
                 stock_released=False,
                 status="pending",
                 # snapshot shipping
-                ship_first_name=shipping_data.get("first_name") or "",
-                ship_last_name=shipping_data.get("last_name") or "",
-                ship_line1=shipping_data.get("line1") or "",
-                ship_line2=shipping_data.get("line2") or "",
-                ship_postal=shipping_data.get("postal_code") or "",
-                ship_city=shipping_data.get("city") or "",
-                ship_country=shipping_data.get("country") or "",
-                ship_phone=shipping_data.get("phone") or "",
-                ship_street_name=shipping_data.get("street_name") or "",
-                ship_house_number=shipping_data.get("house_number") or "",
+                ship_first_name=str(shipping_data.get("first_name") or ""),
+                ship_last_name=str(shipping_data.get("last_name") or ""),
+                ship_line1=str(shipping_data.get("line1") or ""),
+                ship_line2=str(shipping_data.get("line2") or ""),
+                ship_postal=str(shipping_data.get("postal_code") or ""),
+                ship_city=str(shipping_data.get("city") or ""),
+                ship_country=str(shipping_data.get("country") or ""),
+                ship_phone=str(shipping_data.get("phone") or ""),
+                ship_street_name=str(shipping_data.get("street_name") or ""),
+                ship_house_number=str(shipping_data.get("house_number") or ""),
             )
 
             # Create items and compute using product.final_price_gross
-            items_created = []
             for it in items_data:
-                prod = Product.objects.select_for_update().get(pk=it["product_id"])
+                pid = int(it["product_id"])
+                qty = int(it["qty"])
+                prod = Product.objects.select_for_update().get(pk=pid)
                 unit = Decimal(str(getattr(prod, "final_price_gross", None) or prod.price_gross))
-                item = OrderItem.objects.create(
+                OrderItem.objects.create(
                     order=order,
                     product=prod,
                     product_name_snapshot=(prod.title_en or prod.title_de or str(prod)),
-                    quantity=it["qty"],
+                    quantity=qty,
                     unit_price=unit,
                 )
-                items_created.append(item)
 
             # If you want to attach coupon to order via CouponRedemption, do it in your view/service:
             #   CouponRedemption.objects.create(coupon=coupon_obj, user=user if user else None, order=order)

@@ -1,5 +1,6 @@
 # server/signals.py
 from __future__ import annotations
+from typing import Any, cast
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -14,6 +15,11 @@ from .utils.emails import (
     send_stock_alert_email,send_invoice_email
 )
 
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def ensure_profile(sender, instance, created, **kwargs):
+    if created:
+        Profile.objects.get_or_create(user=instance)
+        
 # --------------------------------------------------------------------
 # Order status tracking and notifications
 # --------------------------------------------------------------------
@@ -23,14 +29,15 @@ def _capture_prev_status(sender, instance: Order, **kwargs):
     Stash previous status on instance._prev_status before save,
     so we can detect transitions (e.g., pending -> paid).
     """
+    inst_any = cast(Any, instance)
     if instance.pk:
         try:
             prev = Order.objects.only("status").get(pk=instance.pk)
-            instance._prev_status = prev.status
+            inst_any._prev_status = prev.status
         except Order.DoesNotExist:
-            instance._prev_status = None
+            inst_any._prev_status = None
     else:
-        instance._prev_status = None
+        inst_any._prev_status = None
 
 def create_or_update_user_profile(sender, instance, created, **kwargs):
     """
@@ -45,17 +52,18 @@ def remember_old_status(sender, instance: Order, **kwargs):
     """
     Store old status on instance._old_status before saving. Compared in post_save.
     """
+    inst_any = cast(Any, instance)
     if not instance.pk:
-        instance._old_status = None
-        instance._old_payment_status = None
+        inst_any._old_status = None
+        inst_any._old_payment_status = None
         return
     try:
         old = Order.objects.get(pk=instance.pk)
-        instance._old_status = old.status
-        instance._old_payment_status = old.payment_status
+        inst_any._old_status = old.status
+        inst_any._old_payment_status = old.payment_status
     except Order.DoesNotExist:
-        instance._old_status = None
-        instance._old_payment_status = None
+        inst_any._old_status = None
+        inst_any._old_payment_status = None
 
 def handle_payment_status_notifications(sender, instance: Order, created, **kwargs):
     """
@@ -167,14 +175,15 @@ def _stash_old_qty(sender, instance: Product, **kwargs):
     """
     Before save, remember previous quantity so we can detect restock events.
     """
+    inst_any = cast(Any, instance)
     if instance.pk:
         try:
             old = sender.objects.get(pk=instance.pk)
-            instance._old_qty = int(getattr(old, "quantity", 0) or 0)
-        except sender.DoesNotExist:
-            instance._old_qty = None
+            inst_any._old_qty = int(getattr(old, "quantity", 0) or 0)
+        except sender.DoesNotExist:  # type: ignore[attr-defined]
+            inst_any._old_qty = None
     else:
-        instance._old_qty = None
+        inst_any._old_qty = None
 
 def _build_unsub_url(alert: StockAlert) -> str:
     base = getattr(settings, "FRONTEND_URL", "").rstrip("/")

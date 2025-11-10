@@ -1,6 +1,6 @@
 # server/admin.py
-from typing import Any, Optional
-from decimal import Decimal, InvalidOperation
+from typing import Any, Callable, cast
+from decimal import Decimal
 
 from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
@@ -8,35 +8,28 @@ from django.db import IntegrityError
 from django.db.models.deletion import ProtectedError
 from django.utils.html import format_html_join, format_html
 from django.utils.translation import gettext_lazy as _
-from django.db.models import Q
+from django.db.models import Q,Count,F
 from .utils.invoices import generate_invoice_pdf as _gen_inv_pdf
 from django.utils import timezone
 
-
 from .models import (
-    Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage, OnDemandOrderRequest,
+    Cart, CartItem, Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage, OnDemandOrderRequest,ProductEvent,
     StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber, Coupon, StockAlert,
     Address, Order, Review, OrderItem, Invoice, ReturnRequest, ReturnAttachment, PromotionBanner
 )
-
 # --------------------------------------------------------------------------------------
 # Optional utilities (safe fallbacks if utils are missing)
 # --------------------------------------------------------------------------------------
-def generate_invoice_pdf(*args, **kwargs):
-    return None  # default no-op
-
-def send_invoice_email(*args, **kwargs):
-    return None  # default no-op
-
-def send_shipping_update(*args, **kwargs):
-    return None  # default no-op
-
-def send_cancellation_email(*args, **kwargs):
-    return None  # default no-op
+# Always treat these as "fire-and-forget" in admin flows.
+generate_invoice_pdf: Callable[..., None] = lambda *args, **kwargs: None
+send_invoice_email:   Callable[..., None] = lambda *args, **kwargs: None
+send_shipping_update: Callable[..., None] = lambda *args, **kwargs: None
+send_cancellation_email: Callable[..., None] = lambda *args, **kwargs: None
 
 try:
-   
-    generate_invoice_pdf = _gen_inv_pdf
+    from .utils.invoices import generate_invoice_pdf as _gen_inv_pdf
+    # Under the hood it may return an Invoice/bytes/etc., but we treat as None here.
+    generate_invoice_pdf = cast(Callable[..., None], _gen_inv_pdf)
 except Exception:
     pass
 
@@ -46,20 +39,34 @@ try:
         send_shipping_update as _send_shipping_update,
         send_cancellation_email as _send_cancellation_email,
     )
-    send_invoice_email = _send_invoice_email
-    send_shipping_update = _send_shipping_update
-    send_cancellation_email = _send_cancellation_email
+    # Real functions might return bool; we don't use the return in admin actions.
+    send_invoice_email     = cast(Callable[..., None], _send_invoice_email)
+    send_shipping_update   = cast(Callable[..., None], _send_shipping_update)
+    send_cancellation_email= cast(Callable[..., None], _send_cancellation_email)
 except Exception:
     pass
 
 # --------------------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------------------
+def to_decimal_or_zero(val: Any) -> Decimal:
+    try:
+        if isinstance(val, Decimal):
+            return val
+        if isinstance(val, (int, float, str)):
+            return Decimal(str(val))
+        # allow objects that stringify reasonably
+        return Decimal(str(val))
+    except Exception:
+        return Decimal("0.00")
+    
 def shipping_fee(self, obj):
-    try: return f"{Decimal(getattr(obj, 'shipping_price', 0) or 0):.2f} €"
-    except (InvalidOperation, TypeError, ValueError): return "0.00 €"
+    try:
+        return f"{to_decimal_or_zero(getattr(obj, 'shipping_price', 0)):.2f} €"
+    except Exception:
+        return "0.00 €"
 
-def fmt_eur(v: Optional[Any]) -> str:
+def fmt_eur(v: Any) -> str:
     try:
         return f"{float(v):.2f} €"
     except Exception:
@@ -167,6 +174,7 @@ class OrderItemInline(admin.TabularInline):
     def has_add_permission(self, request, obj=None):
         return False
 
+    @admin.display(description="Item")
     def item_name(self, obj):
         # prefer stored snapshot
         name = getattr(obj, "product_name", None) or getattr(obj, "product_name_snapshot", None)
@@ -176,15 +184,15 @@ class OrderItemInline(admin.TabularInline):
         if prod:
             return getattr(prod, "title_en", None) or getattr(prod, "title_de", None) or str(prod)
         return "-"
-    item_name.short_description = "Item"
 
+    @admin.display(description="Unit price")
     def unit_price_display(self, obj):
         unit = getattr(obj, "unit_price_gross", None)
         if unit is None:
             unit = getattr(obj, "unit_price", None)
         return fmt_eur(unit)
-    unit_price_display.short_description = "Unit price"
 
+    @admin.display(description="Line total")
     def line_total_display(self, obj):
         if hasattr(obj, "line_total") and callable(obj.line_total):
             try:
@@ -196,11 +204,10 @@ class OrderItemInline(admin.TabularInline):
             unit = getattr(obj, "unit_price", 0)
         qty = getattr(obj, "quantity", 1) or 1
         return fmt_eur((unit or 0) * qty)
-    line_total_display.short_description = "Line total"
-
-# --------------------------------------------------------------------------------------
-# Order admin
-# --------------------------------------------------------------------------------------
+    
+    # --------------------------------------------------------------------------------------
+    # Order admin
+    # --------------------------------------------------------------------------------------
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
@@ -233,55 +240,58 @@ class OrderAdmin(admin.ModelAdmin):
     inlines = [OrderItemInline]
 
     # ---- list_display helpers ----
-    def release_stock(self):
-        if not self.stock_locked:
-            # still mark released if you consider it a no-op
-            self.stock_released = True
-            self.save(update_fields=["stock_released"])
-            return
-        self.stock_locked = False
-        self.stock_released = True
-        self.save(update_fields=["stock_locked", "stock_released"])
+    @admin.action(description="Release stock for selected orders")
+    def release_stock_action(self, request, queryset):
+        for order in queryset:
+            fn = getattr(order, "release_stock", None) or getattr(order, "release_stock_atomic", None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
+        self.message_user(request, "Released stock for selected orders.", level=messages.SUCCESS)
     
+    @admin.display(description="Email")
     def customer_email(self, obj):
         return getattr(obj, "email", None) or getattr(getattr(obj, "user", None), "email", None) or "-"
-    customer_email.short_description = "Email"
 
+    @admin.display(description="Total price")
     def total_price_display(self, obj):
         val = getattr(obj, "total_price", None)
-        try:
-            return f"{Decimal(val):.2f} €" if val is not None else "-"
-        except (InvalidOperation, TypeError, ValueError):
-            return "-"
+        d = to_decimal_or_zero(val) if val is not None else None
+        return f"{d:.2f} €" if d is not None else "-"
 
     # ---- totals (readonly) ----
+    @admin.display(description="Subtotal")
     def subtotal_readonly(self, obj):
-        try: return f"{Decimal(getattr(obj, 'subtotal', 0) or 0):.2f} €"
-        except (InvalidOperation, TypeError, ValueError): return "0.00 €"
-    subtotal_readonly.short_description = "Subtotal"
+        return f"{to_decimal_or_zero(getattr(obj, 'subtotal', 0)):.2f} €"
 
+    @admin.display(description="Discount")
     def discount_readonly(self, obj):
-        try: return f"-{Decimal(getattr(obj, 'discount_amount', 0) or 0):.2f} €"
-        except (InvalidOperation, TypeError, ValueError): return "0.00 €"
-    discount_readonly.short_description = "Discount"
+        raw = getattr(obj, "discount_total", None)
+        if raw is None:
+            raw = getattr(obj, "discount_amount", 0)
+        return f"-{to_decimal_or_zero(raw):.2f} €"
 
+    @admin.display(description="Shipping fee")
     def shipping_fee_readonly(self, obj):
-        try: return f"{Decimal(getattr(obj, 'shipping_fee', 0) or 0):.2f} €"
-        except (InvalidOperation, TypeError, ValueError): return "0.00 €"
-    shipping_fee_readonly.short_description = "Shipping"
+        raw = getattr(obj, "shipping_price", None)
+        if raw is None:
+            raw = getattr(obj, "shipping_fee", 0)
+        return f"{to_decimal_or_zero(raw):.2f} €"
 
+    @admin.display(description="VAT")
     def vat_readonly(self, obj):
-        vat = getattr(obj, "vat_amount", None)
+        vat = getattr(obj, "vat_total", None)
+        if vat is None:
+            vat = getattr(obj, "vat_amount", None)
         if vat is None:
             vat = getattr(obj, "tax_amount", 0)
-        try: return f"{Decimal(vat or 0):.2f} €"
-        except (InvalidOperation, TypeError, ValueError): return "0.00 €"
-    vat_readonly.short_description = "VAT"
+        return f"{to_decimal_or_zero(vat):.2f} €"
 
+    @admin.display(description="Total price")
     def total_price_readonly(self, obj):
-        try: return f"{Decimal(getattr(obj, 'total_price', 0) or 0):.2f} €"
-        except (InvalidOperation, TypeError, ValueError): return "0.00 €"
-    total_price_readonly.short_description = "Grand total"
+        return f"{to_decimal_or_zero(getattr(obj, 'total_price', 0)):.2f} €"
 
     # ---- payment/refs read-only helpers (exist as model fields) ----
     def payment_ref(self, obj): return getattr(obj, "payment_ref", "") or "-"
@@ -291,6 +301,7 @@ class OrderAdmin(admin.ModelAdmin):
     def cancelled_at(self, obj):  return getattr(obj, "cancelled_at", None)
 
     # ---- pretty shipping snapshot ----
+    @admin.display(description="Shipping snapshot")
     def shipping_snapshot_readonly(self, obj):
         fn  = (getattr(obj, "ship_first_name", "") or "").strip()
         ln  = (getattr(obj, "ship_last_name", "") or "").strip()
@@ -337,42 +348,47 @@ class OrderAdmin(admin.ModelAdmin):
             fn=fn, ln=ln, l1=l1, l2=l2, pc=pc, city=city, cty=cty, ph=ph,
             street=format_html("<div>Street: {}</div>", street_line) if street_line else "",
         )
-    shipping_snapshot_readonly.short_description = "Shipping snapshot"
+    
 
     # ---- items pretty table ----
+    @admin.display(description="Items")
     def items_readonly(self, obj):
-        items = getattr(obj, "items", None)
-        if not hasattr(items, "all"):
+        items_mgr = getattr(obj, "items", None)
+        if items_mgr is None or not hasattr(items_mgr, "all"):
             return "-"
         rows = []
-        for it in items.all():
+        all_items = items_mgr.all()
+
+        for it in all_items:
             name = getattr(it, "product_name", None) or getattr(it, "product_name_snapshot", None)
             if not name:
                 prod = getattr(it, "product", None)
                 name = (getattr(prod, "title_en", None) or
                         getattr(prod, "title_de", None) or
                         (str(prod) if prod else "-"))
+
             qty = getattr(it, "quantity", 1) or 1
-            unit = getattr(it, "unit_price_gross", None)
-            if unit is None:
-                unit = getattr(it, "unit_price", None)
-            try:
-                unit_fmt = f"{Decimal(unit):.2f} €" if unit is not None else "-"
-            except (InvalidOperation, TypeError, ValueError):
-                unit_fmt = "-"
+            unit_raw = getattr(it, "unit_price_gross", None)
+            if unit_raw is None:
+                unit_raw = getattr(it, "unit_price", None)
+
+            # format unit
+            unit_dec = to_decimal_or_zero(unit_raw) if unit_raw is not None else None
+            unit_fmt = f"{unit_dec:.2f} €" if unit_dec is not None else "-"
+
             # line total
-            total_val = None
+            total_dec = None
             try:
                 if hasattr(it, "line_total") and callable(it.line_total):
-                    total_val = it.line_total()
+                    # line_total may return Decimal|float|str; normalize
+                    total_dec = to_decimal_or_zero(it.line_total())
                 else:
-                    total_val = (Decimal(unit or 0) * qty)
+                    total_dec = to_decimal_or_zero(unit_raw or 0) * int(qty)
             except Exception:
-                total_val = None
-            try:
-                total_fmt = f"{Decimal(total_val):.2f} €" if total_val is not None else "-"
-            except (InvalidOperation, TypeError, ValueError):
-                total_fmt = "-"
+                total_dec = None
+
+            total_fmt = f"{total_dec:.2f} €" if total_dec is not None else "-"
+
             rows.append((f"{name} × {qty}", unit_fmt, total_fmt))
 
         if not rows:
@@ -386,7 +402,6 @@ class OrderAdmin(admin.ModelAdmin):
                 rows
             )
         )
-    items_readonly.short_description = "Items"
 
 # --------------------------------------------------------------------------------------
 # Invoice
@@ -397,6 +412,21 @@ class InvoiceAdmin(admin.ModelAdmin):
     search_fields = ("number", "order__number", "order__user__email")
     list_select_related = ("order",)
     ordering = ("-created_at",)
+
+# --------------------------------------------------------------------------------------
+# Cart
+# --------------------------------------------------------------------------------------
+class CartItemInline(admin.TabularInline):
+    model = CartItem
+    extra = 0
+    readonly_fields = ("product","name","price","qty","color","dimensions","category")
+
+@admin.register(Cart)
+class CartAdmin(admin.ModelAdmin):
+    list_display = ("id","user","cart_token","is_active","currency","updated_at")
+    list_filter = ("is_active","currency")
+    search_fields = ("cart_token","user__email")
+    inlines = [CartItemInline]
 
 # --------------------------------------------------------------------------------------
 # User & Profile
@@ -469,16 +499,25 @@ class ProfileAdmin(admin.ModelAdmin):
     search_fields = ("user__email", "full_name")
     list_select_related = ("user",)
 
+    @admin.display(description="Mobile")
     def mobile_col(self, obj):   return getattr(obj, "mobile", None) or "-"
-    mobile_col.short_description = "Mobile"
+    
 
+    @admin.display(boolean=True, description="Verified")
     def verified_col(self, obj): return bool(getattr(obj, "verified", False))
-    verified_col.boolean = True
-    verified_col.short_description = "Verified"
+    
 
 # --------------------------------------------------------------------------------------
 # Product & Media
 # --------------------------------------------------------------------------------------
+@admin.register(ProductEvent)
+class ProductEventAdmin(admin.ModelAdmin):
+    list_display = ("id", "product", "action", "user", "created_at")
+    list_filter = ("action", "created_at")
+    search_fields = ("product__title_en", "product__title_de", "user__email")
+    date_hierarchy = "created_at"
+    autocomplete_fields = ("product", "user")
+
 class ProductMediaInline(admin.TabularInline):
     model = ProductMedia
     extra = 1
@@ -487,22 +526,51 @@ class ProductMediaInline(admin.TabularInline):
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
     inlines = [ProductMediaInline]
-    list_display = ["title_en", "category", "price_col", "quantity_col"]
+    list_display = ["title_en", "category", "price_col", "quantity_col", "demand_score_display", "add_to_carts_display", "wishlists_display","views_display",]
     search_fields = ("title_en", "title_de", "category")
+    list_filter = ()
+    ordering = ("-id",)
 
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        # Add per-product counts
+        qs = qs.annotate(
+            views=Count("events", filter=Q(events__action="view"), distinct=False),
+            wishlists=Count("events", filter=Q(events__action="wishlist"), distinct=False),
+            add_to_carts=Count("events", filter=Q(events__action="add_to_cart"), distinct=False),
+        ).annotate(
+            demand_score=F("add_to_carts") * 3 + F("wishlists") * 2 + F("views")
+        ).order_by("-demand_score", "-id")
+        return qs
+
+    @admin.display(ordering="demand_score", description="Demand score")
+    def demand_score_display(self, obj):
+        return int(getattr(obj, "demand_score", 0) or 0)
+
+    @admin.display(ordering="add_to_carts", description="Adds to cart")
+    def add_to_carts_display(self, obj):
+        return int(getattr(obj, "add_to_carts", 0) or 0)
+
+    @admin.display(ordering="wishlists", description="Wishlists")
+    def wishlists_display(self, obj):
+        return int(getattr(obj, "wishlists", 0) or 0)
+
+    @admin.display(ordering="views", description="Views")
+    def views_display(self, obj):
+        return int(getattr(obj, "views", 0) or 0)
+
+    @admin.display(description="Price")
     def price_col(self, obj):
         # prefer gross if present
         val = getattr(obj, "price_gross", None)
         if val is None:
             val = getattr(obj, "price", None)
         return fmt_eur(val)
-    price_col.short_description = "Price"
 
+    @admin.display(description="Quantity")
     def quantity_col(self, obj):
         q = getattr(obj, "quantity", None)
         return q if q is not None else "-"
-    quantity_col.short_description = "Qty"
-
 # --------------------------------------------------------------------------------------
 # Natural stones
 # --------------------------------------------------------------------------------------
@@ -600,11 +668,10 @@ class OnDemandOrderRequestAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at",)
     list_select_related = ("product",)
 
+    @admin.display(description="Product")
     def product_display(self, obj):
         title = getattr(obj.product, "title_en", None) or getattr(obj.product, "title_de", None) or str(obj.product)
         return f"{title} ({obj.product_id})"
-    product_display.short_description = "Product"
-
 # --------------------------------------------------------------------------------------
 # Coupon
 # --------------------------------------------------------------------------------------
@@ -616,6 +683,8 @@ class CouponAdmin(admin.ModelAdmin):
     Optionally show usage_limit/times_used if present.
     """
     base_fields = ["code", "kind", "value", "active", "starts_at", "ends_at", "is_birthday", "usage_limit", "times_used"]
+
+    @staticmethod
     def _has(model, f): return hasattr(model, f)
 
     fields = [f for f in base_fields if hasattr(Coupon, f)]

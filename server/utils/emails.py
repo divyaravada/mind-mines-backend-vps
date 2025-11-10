@@ -266,6 +266,9 @@ def _send_bilingual(subject: str, to_email: str, en_html: str, de_html: str, tex
 # ---------------- SEPA ----------------
 def send_sepa_pending_email(order, user_locale: str = "en", to: Optional[str] = None) -> bool:
     to_email = to or order_recipient_email(order)
+    if not to_email:
+        logger.warning("Skipping SEPA pending email for order %s – no recipient", getattr(order, "id", None))
+        return False
     subject_en = _tr("en", "subject_sepa_pending")
     subject_de = _tr("de", "subject_sepa_pending")
     body_en = f"""
@@ -300,7 +303,10 @@ def send_return_request_emails(return_request):
         f"<p>Wir haben Ihre Rücksendeanfrage für die Bestellung <b>{order.number}</b> erhalten.</p>"
         f"<p>Nachricht:</p><blockquote>{_strip_html(return_request.message)}</blockquote>"
     )
-    _send_bilingual("Return request received / Rücksendeanfrage erhalten", customer, en, de)
+    if customer:
+        _send_bilingual("Return request received / Rücksendeanfrage erhalten", customer, en, de)
+    else:
+        logger.warning("Return request %s has no customer email; skipping user notification", getattr(return_request, "id", None))
 
     # Admin notice
     try:
@@ -311,7 +317,7 @@ def send_return_request_emails(return_request):
                 message=(
                     f"Order: {order.number}\n"
                     f"User: {getattr(order.user, 'id', '-')}\n"
-                    f"Email: {customer}\n\n"
+                    f"Email: {customer or '-'}\n\n"
                     f"Message:\n{return_request.message}"
                 ),
                 from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
@@ -333,7 +339,10 @@ def send_cancel_request_emails(return_request):
         f"<p>Wir haben Ihre Stornierungsanfrage für die Bestellung <b>{order.number}</b> erhalten.</p>"
         f"<p>Nachricht:</p><blockquote>{_strip_html(return_request.message)}</blockquote>"
     )
-    _send_bilingual("Cancellation request received / Stornierungsanfrage erhalten", customer, en, de)
+    if customer:
+        _send_bilingual("Cancellation request received / Stornierungsanfrage erhalten", customer, en, de)
+    else:
+        logger.warning("Cancel request %s has no customer email; skipping user notification", getattr(return_request, "id", None))
 
     try:
         admin_to = getattr(settings, "ADMIN_EMAIL", None) or DEFAULT_FROM
@@ -343,7 +352,7 @@ def send_cancel_request_emails(return_request):
                 message=(
                     f"Order: {order.number}\n"
                     f"User: {getattr(order.user, 'id', '-')}\n"
-                    f"Email: {customer}\n\n"
+                    f"Email: {customer or '-'}\n\n"
                     f"Message:\n{return_request.message}"
                 ),
                 from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),

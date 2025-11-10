@@ -1,18 +1,23 @@
 # server/views.py
+from os import truncate
 import json, re, requests as http
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta as td
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
-from typing import List, Optional
-
+from typing import Any, Dict, List, Mapping, MutableMapping, Iterable, Optional, Tuple, Protocol, runtime_checkable, cast,Type
+from django.db.models.functions import TruncDate
+from django.core.files.uploadedfile import UploadedFile
+from django.utils.datastructures import MultiValueDict
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import EmailMultiAlternatives, send_mail
 from django.db import transaction
-from django.db.models import Q, Avg, Count
+from django.db.models import Q, F, Avg, Count
+from django.db.models.query import QuerySet
+from rest_framework.request import Request
 from django.db.models.functions import Lower
-from django.http import JsonResponse, Http404, HttpResponse, FileResponse, HttpResponseBadRequest
+from django.http import JsonResponse, Http404, HttpResponse, FileResponse
 from django.shortcuts import get_object_or_404
 from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.utils import timezone
@@ -21,7 +26,6 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.timezone import make_aware
 from django.views.decorators.csrf import csrf_exempt
-from django.utils.decorators import method_decorator
 
 from rest_framework import generics, permissions, serializers, filters, status
 from rest_framework.decorators import api_view, permission_classes
@@ -31,22 +35,21 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
 
 from google.oauth2 import id_token
 from google.auth.transport.requests import Request as GoogleRequest
 
-from dateutil.relativedelta import relativedelta
 
 # --- local imports (models/serializers/utils) ---
 from .models import (
-    Address, Product, Review, Order, Wishlist,Coupon,
+    Address, Cart, Product, Review, Order, Wishlist,Coupon,
     OnDemandOrderRequest, NewsletterSubscriber, ContactMessage,
-    PromotionBanner, StockAlert, ReturnRequest, ReturnAttachment,
-    NaturalStone, NaturalStoneImage
+    PromotionBanner, StockAlert, ReturnRequest, ReturnAttachment, ProductEvent,
+    NaturalStone, NaturalStoneImage, StoneEnquiry, Invoice, OrderItem
 )
 from .serializers import (
-    MyTokenObtainPairSerializer, ProfileSerializer, RegisterSerializer, AccountSerializer,
+    CartSerializer, MyTokenObtainPairSerializer, ProfileSerializer, RegisterSerializer, AccountSerializer,
     AddressSerializer, NaturalStoneSerializer, StoneEnquirySerializer,
     ProductSerializer, ProductMiniSerializer,
     ReviewWriteSerializer, ReviewSerializer,
@@ -74,15 +77,28 @@ from server.utils.installments import build_installments_schedule
 
 import stripe
 try:
-    stripe_error = stripe.error
-except AttributeError:
-    from stripe import _error as stripe_error
+    # Preferred if available
+    from stripe import error as stripe_error  # type: ignore[attr-defined]
+except Exception:
+    # Fallback shim so code like `except stripe_error.StripeError:` still type-checks
+    class _StripeError(Exception):
+        pass
+    class _SignatureVerificationError(_StripeError):
+        pass
+    class _DummyStripeErrorNamespace:
+        StripeError = _StripeError
+        SignatureVerificationError = _SignatureVerificationError
+    stripe_error = _DummyStripeErrorNamespace()
 
 # -----------------------------------------------------------------------------
 # Setup / constants
 # -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+@runtime_checkable
+class _HasRequest(Protocol):
+    request: Request
 
 def _safe(func, *args, **kwargs):
     try:
@@ -141,20 +157,28 @@ def _send_bilingual(subject, to, en_html, de_html):
     msg.attach_alternative(html, "text/html")
     msg.send(fail_silently=not settings.DEBUG)
 
-def _ensure_order_from_checkout_token(pi_data) -> Optional[Order]:
+def _ensure_order_from_checkout_token(pi_data: Mapping[str, Any]) -> Optional[Order]:
     # Already tied to an order?
-    oid = (pi_data.get("metadata") or {}).get("order_id")
-    if oid:
-        try: return Order.objects.get(pk=oid)
-        except Order.DoesNotExist: return None
+    # Safely read metadata
+    meta = cast(Mapping[str, Any], pi_data.get("metadata") or {})
 
-    token = (pi_data.get("metadata") or {}).get("checkout_token")
+    # Already tied to an order?
+    oid = meta.get("order_id")
+    if oid:
+        try:
+            return Order.objects.get(pk=oid)
+        except Order.DoesNotExist:
+            return None
+
+    token = meta.get("checkout_token")
     if not token: return None
 
     # Idempotent: if we already created an order for this PI
-    pi_id = pi_data.get("id")
-    exists = Order.objects.filter(stripe_pi=pi_id).first()
-    if exists: return exists
+    pi_id = cast(Optional[str], pi_data.get("id")) or ""
+    if pi_id:
+        existing = Order.objects.filter(stripe_pi=pi_id).first()
+        if existing:
+            return existing
 
     try:
         payload = unpack_checkout_payload(token)
@@ -164,7 +188,7 @@ def _ensure_order_from_checkout_token(pi_data) -> Optional[Order]:
     ser = OrderCreateSerializer(
         data={
             "email": payload.get("email"),
-            "payment_method": (pi_data.get("metadata") or {}).get("pm") or "unknown",
+            "payment_method": (meta.get("pm") or "unknown"),
             "coupon_code": payload.get("coupon_code") or "",
             "items": payload.get("items") or [],
             "shipping": payload.get("shipping") or {},
@@ -177,12 +201,13 @@ def _ensure_order_from_checkout_token(pi_data) -> Optional[Order]:
         return None
 
     with transaction.atomic():
-        order = ser.save()
-        order.payment_ref = pi_id
-        order.stripe_pi = pi_id
+        order: Order = cast(Order, ser.save())
+        if pi_id:
+            order.payment_ref = pi_id
+            order.stripe_pi = pi_id
         order.status = "pending"
         order.payment_status = "pending"
-        order.save(update_fields=["payment_ref","stripe_pi","status","payment_status"])
+        order.save(update_fields=["payment_ref", "stripe_pi", "status", "payment_status"])
         return order
     
 # -----------------------------------------------------------------------------
@@ -207,8 +232,11 @@ class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
 
 class IsOwnerOrAdmin(permissions.BasePermission):
-    def has_object_permission(self, request, view, obj):
-        return bool(request.user and (obj.user_id == request.user.id or request.user.is_staff))
+    def has_object_permission(self, request, view, obj):  # type: ignore[override]
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return False
+        return bool(getattr(obj, "user_id", None) == getattr(user, "id", None) or getattr(user, "is_staff", False))
 
 # -----------------------------------------------------------------------------
 # Account
@@ -278,13 +306,21 @@ class AccountDeleteConfirmView(APIView):
 class AddressListCreateAPIView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = AddressSerializer
-    def get_queryset(self):
-        return Address.objects.filter(user=self.request.user).order_by("-is_default", "-updated_at", "-id")
-    def perform_create(self, serializer):
-        addr = serializer.save()
+
+    def get_queryset(self) -> QuerySet[Address]:  # type: ignore[override]
+        return (
+            Address.objects
+            .filter(user=self.request.user)
+            .order_by("-is_default", "-updated_at", "-id")
+        )
+
+    def perform_create(self, serializer: AddressSerializer) -> None:
+        addr = serializer.save()  # AddressSerializer.create pulls user from context
+        # First address becomes default
         if not Address.objects.filter(user=self.request.user).exclude(pk=addr.pk).exists():
             addr.set_default_for_user()
-    def get_serializer_context(self):
+
+    def get_serializer_context(self) -> dict[str, Any]:
         ctx = super().get_serializer_context()
         ctx["request"] = self.request
         return ctx
@@ -292,18 +328,24 @@ class AddressListCreateAPIView(generics.ListCreateAPIView):
 class AddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = AddressSerializer
-    def get_queryset(self):
+    def get_queryset(self) -> QuerySet[Address]:  # type: ignore[override]
         return Address.objects.filter(user=self.request.user)
-    def get_serializer_context(self):
+
+    def get_serializer_context(self) -> dict[str, Any]:
         ctx = super().get_serializer_context()
         ctx["request"] = self.request
         return ctx
-    def perform_destroy(self, instance):
+
+    def perform_destroy(self, instance: Address) -> None:
         user = instance.user
         was_default = instance.is_default
         instance.delete()
         if was_default:
-            new_default = Address.objects.filter(user=user).order_by("-updated_at", "-created_at").first()
+            new_default = (
+                Address.objects.filter(user=user)
+                .order_by("-updated_at", "-created_at")
+                .first()
+            )
             if new_default:
                 new_default.set_default_for_user()
 
@@ -324,25 +366,38 @@ class GoogleLoginAPIView(APIView):
         if not token:
             return Response({"detail": "Missing token"}, status=400)
         try:
-            idinfo = id_token.verify_oauth2_token(
-                token, GoogleRequest(), settings.SOCIAL_AUTH_GOOGLE_OAUTH2_KEY,
+             # Verify Google ID token
+            idinfo: Mapping[str, Any] = id_token.verify_oauth2_token(
+                token, GoogleRequest(), settings.SOCIAL_AUTH_GOOGLE_OAUTH2_KEY
             )
             if idinfo.get("iss") not in {"accounts.google.com", "https://accounts.google.com"}:
                 return Response({"detail": "Invalid issuer"}, status=400)
-            email = idinfo["email"]
+
+            email: str = idinfo["email"]
             username = email.split("@")[0]
-            full_name = idinfo.get("name", "")
+            full_name = str(idinfo.get("name", "") or "")
+
             user, created = User.objects.get_or_create(
-                email=email, defaults={"username": username, "is_active": True},
+                email=email, defaults={"username": username, "is_active": True}
             )
-            if created and hasattr(user, "profile"):
-                user.profile.full_name = full_name
-                user.profile.save()
+
+            # Profile may not exist on stubbed AbstractUser; guard with getattr
+            prof = getattr(user, "profile", None)
+            if created and prof is not None:
+                setattr(prof, "full_name", full_name)
+                prof.save(update_fields=["full_name"])
+
+            # Avoid stub issue on .access_token: create explicitly
             refresh = RefreshToken.for_user(user)
+            access = AccessToken.for_user(user)
             return Response({
                 "refresh": str(refresh),
-                "access": str(refresh.access_token),
-                "user": {"id": user.id, "email": user.email, "username": user.username},
+                "access": str(access),
+                "user": {
+                    "id": user.pk,  # pk avoids 'id' stub complaints
+                    "email": getattr(user, "email", ""),
+                    "username": getattr(user, "username", ""),
+                },
             })
         except ValueError as e:
             return Response({"detail": f"Google token invalid: {e}"}, status=400)
@@ -416,18 +471,23 @@ class UploadStoneImagesView(APIView):
 class StoneEnquiryCreateView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
-        data = request.data.copy()
-        user = request.user if request.user.is_authenticated else None
-        if user:
-            if not user.email:
+        data = cast(MutableMapping[str, Any], request.data.copy())
+
+        user = getattr(request, "user", None)
+        if user and getattr(user, "is_authenticated", False):
+            email = (getattr(user, "email", "") or "").strip()
+            if not email:
                 return Response({"email": ["Your account has no email on file."]}, status=400)
-            data["email"] = user.email
+            data["email"] = email
         else:
             if not data.get("email"):
                 return Response({"email": ["This field is required."]}, status=400)
+
         serializer = StoneEnquirySerializer(data=data)
         serializer.is_valid(raise_exception=True)
-        enquiry = serializer.save()
+
+        # Tell the type checker this is a StoneEnquiry instance
+        enquiry: StoneEnquiry = cast(StoneEnquiry, serializer.save())
         # user confirmation
         try:
             send_mail(
@@ -472,28 +532,31 @@ class TestPostView(APIView):
 # Products / Reviews
 # -----------------------------------------------------------------------------
 class ProductFilterMixin:
-    def _parse_multi(self, key: str):
-        q = self.request.query_params
+    def _parse_multi(self, key: str) -> List[str]:
+        req = cast(_HasRequest, self)
+        q = req.request.query_params
+
         vals = q.getlist(key) or ([q.get(key)] if q.get(key) else [])
-        out = []
+        out: List[str] = []
         for v in vals:
             if not v or not isinstance(v, str):
                 continue
             s = v.strip()
-            if s.startswith('[') and s.endswith(']'):
+            # support JSON arrays like ["a","b"]
+            if s.startswith("[") and s.endswith("]"):
                 try:
                     arr = json.loads(s)
                     out.extend([str(x).strip().lower() for x in arr if str(x).strip()])
                     continue
                 except Exception:
                     pass
-            out.extend([p.strip().lower() for p in s.split(',') if p.strip()])
+            out.extend([p.strip().lower() for p in s.split(",") if p.strip()])
         return out
 
-    def _to_decimal(self, val):
+    def _to_decimal(self, val: Any) -> Optional[Decimal]:
         if val is None:
             return None
-        s = str(val).strip().replace('€', '').replace(',', '')
+        s = str(val).strip().replace("€", "").replace(",", "")
         if not s:
             return None
         try:
@@ -501,62 +564,72 @@ class ProductFilterMixin:
         except (InvalidOperation, ValueError, TypeError):
             return None
 
-    def _parse_price_range(self):
-        q = self.request.query_params
-        min_in = q.get('min_price') or q.get('price_min') or q.get('price_gte')
-        max_in = q.get('max_price') or q.get('price_max') or q.get('price_lte')
-        rng = q.get('price') or q.get('range')
+    def _parse_price_range(self) -> Tuple[Optional[Decimal], Optional[Decimal]]:
+        req = cast(_HasRequest, self)
+        q = req.request.query_params
+
+        min_in = q.get("min_price") or q.get("price_min") or q.get("price_gte")
+        max_in = q.get("max_price") or q.get("price_max") or q.get("price_lte")
+        rng = q.get("price") or q.get("range")
+
         if rng:
             s = str(rng).strip().lower()
-            m = re.match(r'^\s*(\d+(?:\.\d{1,2})?)\s*-\s*(\d+(?:\.\d{1,2})?)\s*$', s)
+            m = re.match(r"^\s*(\d+(?:\.\d{1,2})?)\s*-\s*(\d+(?:\.\d{1,2})?)\s*$", s)
             if m:
                 min_in = min_in or m.group(1)
                 max_in = max_in or m.group(2)
-            m = re.match(r'^\s*(below|under|lt|lte)\s+(\d+(?:\.\d{1,2})?)\s*$', s)
+            m = re.match(r"^\s*(below|under|lt|lte)\s+(\d+(?:\.\d{1,2})?)\s*$", s)
             if m:
                 max_in = max_in or m.group(2)
-            m = re.match(r'^\s*(above|over|gt|gte)\s+(\d+(?:\.\d{1,2})?)\s*$', s)
+            m = re.match(r"^\s*(above|over|gt|gte)\s+(\d+(?:\.\d{1,2})?)\s*$", s)
             if m:
                 min_in = min_in or m.group(2)
+
         lo = self._to_decimal(min_in)
         hi = self._to_decimal(max_in)
         if lo is not None and hi is not None and lo > hi:
             lo, hi = hi, lo
         return lo, hi
 
-    def filtered_products_qs(self):
-        qs = Product.objects.all()
-        category = self.request.query_params.get("category")
+    def filtered_products_qs(self) -> QuerySet[Product]:
+        qs: QuerySet[Product] = Product.objects.all()
+
+        req = cast(_HasRequest, self)
+        category = req.request.query_params.get("category")
         if category:
             qs = qs.filter(category=category)
+
         materials = self._parse_multi("material")
         if materials:
             qs = qs.filter(material__in=materials)
+
         colors = self._parse_multi("color")
         if colors:
             qs = qs.filter(color__in=colors)
 
-        # filter on stored gross price
         min_price, max_price = self._parse_price_range()
         if min_price is not None:
             qs = qs.filter(price_gross__gte=min_price)
         if max_price is not None:
             qs = qs.filter(price_gross__lte=max_price)
 
-        qs = qs.annotate(
+        return qs.annotate(
             reviews_count=Count("reviews", distinct=True),
             average_rating=Avg("reviews__rating"),
         )
-        return qs
-
+    
 class ProductListCreate(ProductFilterMixin, generics.ListCreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = [AllowAny]
     authentication_classes = []
     filter_backends = [filters.SearchFilter]
-    search_fields = ['title_en', 'title_de']
+    search_fields = ["title_en", "title_de"]
     parser_classes = [MultiPartParser, FormParser]
-    def get_queryset(self):
+
+    # helps DRF & type checkers
+    queryset = Product.objects.all()
+
+    def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
         return self.filtered_products_qs()
 
 class ProductListView(ProductFilterMixin, generics.ListAPIView):
@@ -566,13 +639,20 @@ class ProductListView(ProductFilterMixin, generics.ListAPIView):
     search_fields = ["title_en", "title_de"]
     ordering_fields = ("created_at", "price_gross", "id", "title_en", "title_de")
     ordering = ("-created_at", "id")
-    def get_queryset(self):
+    # helps DRF & type checkers
+    queryset = Product.objects.all()
+
+    def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
         return self.filtered_products_qs()
 
 class ProductDetailView(generics.RetrieveAPIView):
     serializer_class = ProductSerializer
     permission_classes = [AllowAny]
-    def get_queryset(self):
+    # helps DRF and type checkers
+    queryset = Product.objects.all()
+
+    # No return annotation => no incompatible override warning
+    def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
         return Product.objects.annotate(
             reviews_count=Count("reviews", distinct=True),
             average_rating=Avg("reviews__rating"),
@@ -583,41 +663,71 @@ class ProductSuggestList(generics.ListAPIView):
     serializer_class = ProductMiniSerializer
     filter_backends = [filters.SearchFilter]
     pagination_class = None
-    def get_queryset(self):
-        term = (self.request.query_params.get("search") or "").strip()
+    
+    # helps DRF & type checkers
+    queryset = Product.objects.all()
+
+    def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
+        # Support both DRF Request (query_params) and Django HttpRequest (GET)
+        req = cast(Request, self.request)
+        qparams: Mapping[str, Any] = getattr(req, "query_params", None) or req.GET
+
+        term = (qparams.get("search") or "").strip()
         if not term:
             return Product.objects.none()
-        return Product.objects.filter(
-            Q(title_en__icontains=term) | Q(title_de__icontains=term)
-        ).order_by(Lower("title_en")).all()[:10]
+
+        return (
+            Product.objects
+            .filter(Q(title_en__icontains=term) | Q(title_de__icontains=term))
+            .order_by(Lower("title_en"))[:10]
+        )
 
 class ProductReviewListCreate(generics.ListCreateAPIView):
     parser_classes = [MultiPartParser, FormParser]
+    
+    # helps DRF & type checkers
+    queryset = Review.objects.all()
+
     def get_permissions(self):
         return [permissions.IsAuthenticated()] if self.request.method == "POST" else [permissions.AllowAny()]
-    def get_queryset(self):
-        return Review.objects.filter(product_id=self.kwargs["pk"]).order_by("-created_at")
-    def get_serializer_class(self):
+    
+    def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
+        # use .get to avoid Optional subscript warnings in stubs
+        pk = self.kwargs.get("pk")
+        return Review.objects.filter(product_id=pk).order_by("-created_at")
+
+    def get_serializer_class(self) -> Type[Any]:  # type: ignore[override]
+        # DRF stubs sometimes declare Never; return Type[Any] and ignore override
         return ReviewWriteSerializer if self.request.method == "POST" else ReviewSerializer
-    def get_serializer_context(self):
+    
+    def get_serializer_context(self) -> Dict[str, Any]:
         return {"request": self.request}
-    def create(self, request, *args, **kwargs):
+
+    def create(self, request, *args, **kwargs) -> Response:
         write_ser = ReviewWriteSerializer(data=request.data)
         write_ser.is_valid(raise_exception=True)
-        product = get_object_or_404(Product, pk=kwargs["pk"])
+
+        # safe kwarg access for type checkers
+        pk = kwargs.get("pk")
+        product = get_object_or_404(Product, pk=pk)
+
         review_user = request.user
-        if request.user.is_staff:
-            maybe_user = write_ser.validated_data.pop("user", None)
+        # validated_data is Dict after is_valid(); cast to keep Pylance happy
+        vd: Dict[str, Any] = cast(Dict[str, Any], getattr(write_ser, "validated_data", {}) or {})
+
+        if getattr(request.user, "is_staff", False):
+            maybe_user = vd.pop("user", None)
             if maybe_user:
                 review_user = maybe_user
+
         instance = Review.objects.create(
             user=review_user,
             product=product,
-            rating=write_ser.validated_data["rating"],
-            message=write_ser.validated_data.get("message", ""),
-            image=write_ser.validated_data.get("image"),
-            author_name=write_ser.validated_data.get("author_name", ""),
-            author_avatar=write_ser.validated_data.get("author_avatar"),
+            rating=vd["rating"],
+            message=vd.get("message", "") or "",
+            image=vd.get("image"),
+            author_name=vd.get("author_name", "") or "",
+            author_avatar=vd.get("author_avatar"),
         )
         read_ser = ReviewSerializer(instance, context={"request": request})
         headers = self.get_success_headers(read_ser.data)
@@ -626,19 +736,222 @@ class ProductReviewListCreate(generics.ListCreateAPIView):
 class ReviewListAPIView(generics.ListAPIView):
     serializer_class = ReviewSerializer
     permission_classes = [permissions.IsAuthenticated]
-    def get_queryset(self):
+     # help DRF & type checkers
+    queryset = Review.objects.all()
+
+    def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
         return Review.objects.filter(user=self.request.user).order_by("-created_at")
-    def get_serializer_context(self):
+    def get_serializer_context(self) -> dict[str, Any]:
         return {"request": self.request}
 
 class ReviewDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Review.objects.all()
     permission_classes = [permissions.IsAuthenticated, IsOwnerOrAdmin]
     parser_classes = [MultiPartParser, FormParser]
-    def get_serializer_class(self):
+    def get_serializer_class(self) -> Type[Any]:  # type: ignore[override]
         return ReviewWriteSerializer if self.request.method in ("PUT", "PATCH") else ReviewSerializer
-    def get_serializer_context(self):
+    def get_serializer_context(self) -> dict[str, Any]:
         return {"request": self.request}
+
+#-----------------------------------------------------------------------------
+# Admin Product Management
+#-----------------------------------------------------------------------------
+class ProductDemandSummaryAPIView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        # date range (optional)
+        dfrom = request.query_params.get("from")
+        dto = request.query_params.get("to")
+
+        def _parse(dt: str | None):
+            if not dt:
+                return None
+            try:
+                return make_aware(datetime.fromisoformat(dt))
+            except ValueError:
+                return None
+            
+        start = _parse(dfrom)
+        end = _parse(dto)
+
+        ev_filter = Q()
+        if start:
+            ev_filter &= Q(events__created_at__gte=start)
+        if end:
+            ev_filter &= Q(events__created_at__lte=end)
+
+        # Annotate then project to dicts
+        qs = (
+            Product.objects
+            .annotate(
+                views=Count("events", filter=ev_filter & Q(events__action="view")),
+                wishlists=Count("events", filter=ev_filter & Q(events__action="wishlist")),
+                add_to_carts=Count("events", filter=ev_filter & Q(events__action="add_to_cart")),
+            )
+            .annotate(
+                demand_score=F("add_to_carts") * 3 + F("wishlists") * 2 + F("views")
+            )
+            .values(
+                "id", "title_en", "views", "wishlists", "add_to_carts", "demand_score"
+            )
+            .order_by("-demand_score")
+        )
+
+        limit = int(request.query_params.get("limit") or 20)
+        rows: List[Dict[str, Any]] = list(qs[:limit])
+
+        data = [
+            {
+                "product_id": row["id"],
+                "title": row.get("title_en") or f"Product {row['id']}",
+                "views": int(row.get("views") or 0),
+                "wishlists": int(row.get("wishlists") or 0),
+                "add_to_carts": int(row.get("add_to_carts") or 0),
+                "demand_score": int(row.get("demand_score") or 0),
+            }
+            for row in rows
+        ]
+        return Response({"results": data})
+    
+class ProductDemandTimeseriesAPIView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        dfrom = request.query_params.get("from")
+        dto = request.query_params.get("to")
+        start = make_aware(datetime.fromisoformat(dfrom)) if dfrom else None
+        end = make_aware(datetime.fromisoformat(dto)) if dto else None
+        limit = int(request.query_params.get("limit") or 5)
+
+        base = ProductEvent.objects.all()
+        if start: base = base.filter(created_at__gte=start)
+        if end:   base = base.filter(created_at__lte=end)
+
+        # Find top products by weighted score in the window
+        top = (
+            base.values("product_id")
+            .annotate(
+                views=Count("id", filter=Q(action="view")),
+                wishlists=Count("id", filter=Q(action="wishlist")),
+                add_to_carts=Count("id", filter=Q(action="add_to_cart")),
+            )
+            .annotate(score=F("add_to_carts")*3 + F("wishlists")*2 + F("views"))
+            .order_by("-score")[:limit]
+        )
+        top_ids = [row["product_id"] for row in top]
+
+        # Daily buckets per product
+        daily = (
+            base.filter(product_id__in=top_ids)
+            .annotate(day=TruncDate("created_at"))
+            .values("product_id", "day")
+            .annotate(
+                views=Count("id", filter=Q(action="view")),
+                wishlists=Count("id", filter=Q(action="wishlist")),
+                add_to_carts=Count("id", filter=Q(action="add_to_cart")),
+            )
+            .order_by("day", "product_id")
+        )
+
+        # Shape the payload: {labels:[...days], series:[{product_id, title, data:[scores]}]}
+        days = sorted({row["day"].isoformat() for row in daily})
+        title_map = dict(Product.objects.filter(id__in=top_ids).values_list("id", "title_en"))
+
+        # init series map
+        series_map = {
+            pid: {"product_id": pid, "title": title_map.get(pid, str(pid)), "data": [0]*len(days)}
+            for pid in top_ids
+        }
+        day_index = {d:i for i, d in enumerate(days)}
+        for row in daily:
+            idx = day_index[row["day"].isoformat()]
+            score = row["add_to_carts"]*3 + row["wishlists"]*2 + row["views"]
+            series_map[row["product_id"]]["data"][idx] = int(score)
+
+        return Response({"labels": days, "series": list(series_map.values())})   
+
+# -----------------------------------------------------------------------------
+# Cart
+# -----------------------------------------------------------------------------
+def _get_or_create_active_cart(request):
+    user = request.user if request.user.is_authenticated else None
+    token = request.data.get("cart_token") or request.query_params.get("cart_token")
+    qs = Cart.objects.filter(is_active=True)
+    if user:
+        cart = qs.filter(user=user).order_by("-updated_at").first()
+        if not cart:
+            cart = Cart.objects.create(user=user)
+        return cart
+    if token:
+        cart = qs.filter(cart_token=token).order_by("-updated_at").first()
+        if not cart:
+            cart = Cart.objects.create(cart_token=token)
+        return cart
+    # last resort for guests: require token
+    raise ValueError("cart_token missing for guest")
+
+class CartSyncView(APIView):
+    """
+    Upsert the caller's active cart (guest or user).
+    Request body: { cart_token?: string, currency?: 'EUR', items: [{product_id, name, image, price, qty, ...}] }
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        try:
+            cart = _get_or_create_active_cart(request)
+        except ValueError:
+            return Response({"detail": "cart_token required for guests"}, status=400)
+        return Response(CartSerializer(cart).data)
+
+    def post(self, request):
+        try:
+            cart = _get_or_create_active_cart(request)
+        except ValueError:
+            return Response({"detail": "cart_token required for guests"}, status=400)
+
+        ser = CartSerializer(instance=cart, data={
+            "currency": request.data.get("currency") or "EUR",
+            "is_active": True,
+            "items": request.data.get("items", []),
+            "cart_token": request.data.get("cart_token")
+        })
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(ser.data, status=200)
+
+class AdminCartListView(generics.ListAPIView):
+    """
+    Admin view to see all active carts, with items.
+    Filters: ?active=true/false & ?q=email_or_token
+    """
+    serializer_class = CartSerializer
+    permission_classes = [permissions.IsAdminUser]
+
+    queryset = Cart.objects.all()
+    
+
+    def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
+        request = cast(Request, self.request)
+
+        qs = (
+            Cart.objects.all()
+            .order_by("-updated_at")
+            .prefetch_related("items")
+            .select_related("user")
+        )
+
+        active = request.query_params.get("active")
+        if active in ("true", "false"):
+            qs = qs.filter(is_active=(active == "true"))
+
+        q = request.query_params.get("q")
+        if q:
+            qs = qs.filter(Q(cart_token__icontains=q) | Q(user__email__icontains=q))
+
+        return qs
+
 
 # -----------------------------------------------------------------------------
 # Contact / Newsletter
@@ -716,7 +1029,9 @@ class WishlistView(generics.ListCreateAPIView):
     serializer_class = WishlistSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination
-    def get_queryset(self):
+    queryset = Wishlist.objects.all()
+
+    def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
         return Wishlist.objects.filter(user=self.request.user).order_by("id")
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
@@ -724,8 +1039,14 @@ class WishlistView(generics.ListCreateAPIView):
 class WishlistDetailView(generics.DestroyAPIView):
     serializer_class = WishlistSerializer
     permission_classes = [IsAuthenticated]
-    def get_object(self):
-        return Wishlist.objects.get(user=self.request.user, product_id=self.kwargs["pk"])
+    queryset = Wishlist.objects.all()
+
+    def get_object(self) -> Wishlist:  # type: ignore[override]
+        return get_object_or_404(
+            Wishlist,
+            user=self.request.user,
+            product_id=self.kwargs["pk"],
+        )
 
 # -----------------------------------------------------------------------------
 # Orders (read/create/invoice)
@@ -733,7 +1054,9 @@ class WishlistDetailView(generics.DestroyAPIView):
 class OrderListAPIView(generics.ListAPIView):
     serializer_class = OrderReadSerializer
     permission_classes = [IsAuthenticated]
-    def get_queryset(self):
+    queryset = Order.objects.all()
+
+    def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
         return Order.objects.filter(user=self.request.user).order_by("-created_at")
     def list(self, request, *args, **kwargs):
         ser = self.get_serializer(self.get_queryset(), many=True, context={"request": request})
@@ -765,7 +1088,9 @@ class OrderDetailPublicAPIView(APIView):
 class OrderDetailAPIView(generics.RetrieveAPIView):
     serializer_class = OrderReadSerializer
     permission_classes = [IsAuthenticated]
-    def get_queryset(self):
+    queryset = Order.objects.all()
+
+    def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
         return Order.objects.filter(user=self.request.user)
     def retrieve(self, request, *args, **kwargs):
         ser = self.get_serializer(self.get_object(), context={"request": request})
@@ -775,16 +1100,37 @@ class OrderInvoiceAPIView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request, pk):
         try:
-            order = Order.objects.get(pk=pk, user=request.user)
+            order = (
+                Order.objects
+                .select_related("invoice")  # avoids extra query when present
+                .get(pk=pk, user=request.user)
+            )
         except Order.DoesNotExist:
             raise Http404("Order not found")
-        if not hasattr(order, "invoice") or not order.invoice.pdf:
+
+        # Access related object in a type-checker-friendly way
+        inv: Optional[Invoice] = cast(Optional[Invoice], getattr(order, "invoice", None))  # type: ignore[attr-defined]
+
+        # If missing or missing file, (re)generate and refetch
+        if not inv or not getattr(inv, "pdf", None):
             generate_invoice_pdf(order)
-        inv = order.invoice
-        return FileResponse(inv.pdf.open("rb"),
-                            content_type="application/pdf",
-                            as_attachment=True,
-                            filename=f"invoice_{inv.number}.pdf")
+            # refresh the relation
+            try:
+                order.refresh_from_db(fields=[])  # ensure relation is up to date
+            except Exception:
+                pass
+            inv = cast(Optional[Invoice], getattr(order, "invoice", None))  # type: ignore[attr-defined]
+
+        if not inv or not getattr(inv, "pdf", None):
+            raise Http404("Invoice not available.")
+
+        filename = inv.number or f"invoice_{order.pk}"
+        return FileResponse(
+            inv.pdf.open("rb"),
+            content_type="application/pdf",
+            as_attachment=True,
+            filename=f"{filename}.pdf" if not filename.endswith(".pdf") else filename,
+        )
 
 class OrderAdminUpdateAPIView(APIView):
     permission_classes = [IsAdminUser]
@@ -829,51 +1175,97 @@ class SetTrackingAPIView(APIView):
 # -----------------------------------------------------------------------------
 class CouponPreviewAPIView(APIView):
     permission_classes = [AllowAny]
+
     def post(self, request):
         s = CouponPreviewIn(data=request.data)
         s.is_valid(raise_exception=True)
-        code  = s.validated_data["code"]
-        items = s.validated_data["items"]
+
+        vd: Dict[str, Any] = cast(Dict[str, Any], getattr(s, "validated_data", {}) or {})
+
+        code = str(vd.get("code") or "").strip()
+        items: List[Dict[str, Any]] = cast(List[Dict[str, Any]], vd.get("items") or [])
+
+        if not code:
+            return Response({"ok": False, "error": "Code is required"}, status=400)
+        if not items:
+            return Response({"ok": False, "error": "No items provided"}, status=400)
 
         subtotal = Decimal("0.00")
         for it in items:
-            p = get_object_or_404(Product, pk=it["product_id"])
-            subtotal += Decimal(p.final_price_gross) * int(it["qty"])
-       
-        coup = Coupon.objects.filter(code__iexact=code.strip()).first()
+            # Guard and coerce product_id
+            pid_raw = it.get("product_id")
+            if pid_raw is None:
+                return Response({"ok": False, "error": "Each item must include product_id"}, status=400)
+            try:
+                pid = int(pid_raw)
+            except (TypeError, ValueError):
+                return Response({"ok": False, "error": "product_id must be an integer"}, status=400)
+
+            # Guard and coerce qty (default 1)
+            qty_raw = it.get("qty", 1)
+            try:
+                qty = int(qty_raw)
+            except (TypeError, ValueError):
+                qty = 1
+            if qty <= 0:
+                return Response({"ok": False, "error": "qty must be >= 1"}, status=400)
+
+            p = get_object_or_404(Product, pk=pid)
+            unit = Decimal(str(getattr(p, "final_price_gross", None) or p.price_gross))
+            subtotal += unit * qty
+
+        coup = Coupon.objects.filter(code__iexact=code).first()
         if not coup:
             return Response({"ok": False, "error": "Coupon not found"}, status=404)
 
-        user_or_none = request.user if request.user.is_authenticated else None
+        user_or_none = (
+            request.user
+            if getattr(request, "user", None) and getattr(request.user, "is_authenticated", False)
+            else None
+        )
+
         ok, reason = coup.can_apply(user_or_none, items, subtotal)
         if not ok:
             return Response({"ok": False, "error": reason}, status=400)
 
         discount = coup.discount_amount(user_or_none, items, subtotal)
         total = (subtotal - discount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        return Response({
-            "ok": True,
-            "code": coup.code,
-            "kind": coup.kind,
-            "value": str(coup.value),
-            "discount": f"{discount:.2f}",
-            "subtotal": f"{subtotal:.2f}",
-            "total": f"{total:.2f}",
-        })
+
+        return Response(
+            {
+                "ok": True,
+                "code": coup.code,
+                "kind": coup.kind,
+                "value": str(coup.value),
+                "discount": f"{discount:.2f}",
+                "subtotal": f"{subtotal:.2f}",
+                "total": f"{total:.2f}",
+            }
+        )
 
 class ActivePromotionAPIView(APIView):
     permission_classes = [AllowAny]
+
     def get(self, request):
         now = timezone.now()
         country = (request.GET.get("country") or request.headers.get("X-Country") or "DE").upper()
-        qs = PromotionBanner.objects.filter(
-            is_enabled=True, start_at__lte=now, end_at__gte=now
-        ).order_by("-priority", "-updated_at")
-        qs = qs.filter(Q(country_whitelist=[]) | Q(country_whitelist__contains=[country]))
+
+        qs = (
+            PromotionBanner.objects.filter(
+                is_enabled=True,
+                start_at__lte=now,
+                end_at__gte=now,
+            )
+            .order_by("-priority", "-updated_at")
+            .filter(Q(country_whitelist=[]) | Q(country_whitelist__contains=[country]))
+        )
+
         promo = qs.first()
         if not promo:
             return Response({"active": False}, status=200)
-        data = PromotionSerializer(promo, context={"request": request}).data
+
+        ser = PromotionSerializer(promo, context={"request": request})
+        data: Dict[str, Any] = dict(ser.data)  # make it mutable for type checkers
         data["active"] = True
         return Response(data, status=200)
 
@@ -1024,7 +1416,7 @@ class PaypalCreateOrder(PaypalBase):
         # create local order
         try:
             with transaction.atomic():
-                order = ser.save()
+                order: Order = cast(Order, ser.save())
                 order.payment_method = "paypal"
                 order.status = "pending"
                 order.save(update_fields=["payment_method", "status"])
@@ -1169,30 +1561,42 @@ METHOD_MINS = {
     "klarna":  Decimal("1.00"),   # Klarna commonly requires >= €1.00 in many regions
 }
 
-
 def _amount_cents(value: Decimal) -> int:
-    return int((value * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return int((Decimal(value) * Decimal("100")).quantize(Decimal("1")))
 
-def _get_or_create_stripe_customer(user=None, email: Optional[str] = None) -> Optional[str]:
+def _get_or_create_stripe_customer(user: Optional[Any] = None, email: Optional[str] = None) -> Optional[str]:
     """
-    Create/reuse Stripe customer for authenticated checkout
-    (helps with installments/off-session).
-    Guests can just be None for one-shot PI.
+    Create/reuse Stripe customer for authenticated checkout.
+    Guests can just be None for a one-shot PI.
     """
-    if user and getattr(user, "is_authenticated", False):
-        prof = getattr(user, "profile", None)
-        if prof and getattr(prof, "stripe_customer_id", None):
-            return prof.stripe_customer_id
-        customer = stripe.Customer.create(
-            email=(getattr(user, "email", None) or email) or None,
-            name=(f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip() or None),
-            metadata={"user_id": str(user.id)},
-        )
-        if prof and hasattr(prof, "stripe_customer_id"):
-            prof.stripe_customer_id = customer.id
-            prof.save(update_fields=["stripe_customer_id"])
-        return customer.id
-    return None
+    if not (user and getattr(user, "is_authenticated", False)):
+        return None
+
+    prof = getattr(user, "profile", None)
+    existing = getattr(prof, "stripe_customer_id", None)
+    if existing:
+        return cast(str, existing)
+
+    # Build strictly-typed strings (no Nones)
+    email_str: str = str((getattr(user, "email", None) or email or "")).strip()
+    first = str(getattr(user, "first_name", "") or "").strip()
+    last  = str(getattr(user, "last_name", "") or "").strip()
+    name_str: str = f"{first} {last}".strip() or (email_str or f"User {getattr(user, 'id', '')}")
+
+    # metadata must be Dict[str, str]
+    meta: Dict[str, str] = {"user_id": str(getattr(user, "id", ""))}
+
+    customer = stripe.Customer.create(
+        email=email_str,          # always a str
+        name=name_str,            # always a str
+        metadata=meta,            # Dict[str, str]
+    )
+
+    if prof and hasattr(prof, "stripe_customer_id"):
+        prof.stripe_customer_id = customer.id  # type: ignore[attr-defined]
+        prof.save(update_fields=["stripe_customer_id"])
+
+    return customer.id
 
 def stripe_client():
     stripe.api_key = settings.STRIPE_SECRET_KEY
@@ -1214,41 +1618,38 @@ class StripeCreateIntent(APIView):
     def post(self, request):
         order_id = request.data.get("order_id")
 
-        # Path 1: Existing order (recommended for your current frontend)
+        # Path 1: Reuse existing order
         if order_id:
             try:
                 with transaction.atomic():
-                    order = (
-                        Order.objects
-                        .select_for_update()
-                        .get(pk=order_id)
-                    )
-                    # Only allow when still pending/processing and total > 0
+                    order: Order = cast(Order, Order.objects.select_for_update().get(pk=order_id))
+
                     if order.total_price is None or Decimal(order.total_price) <= Decimal("0.00"):
                         return Response({"detail": "Total must be > 0."}, status=400)
                     if order.status not in ("pending", "processing"):
                         return Response({"detail": f"Order not payable in status '{order.status}'"}, status=400)
 
-                    # Create or reuse a PI
                     if order.stripe_pi:
-                        # Optionally: retrieve and reuse existing PI
                         intent = stripe.PaymentIntent.retrieve(order.stripe_pi)
                     else:
-                        intent = stripe.PaymentIntent.create(
-                            amount=_amount_cents(Decimal(order.total_price)),
-                            currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                            payment_method_types=["card"],
-                            description=f"Order {order.number or order.id} — MindMines Payment",
-                            metadata={"order_id": str(order.id)},
-                            receipt_email=order.email or None,
-                        )
+                        create_kwargs = {
+                            "amount": _amount_cents(Decimal(order.total_price)),
+                            "currency": getattr(settings, "STRIPE_CURRENCY", "eur"),
+                            "payment_method_types": ["card"],
+                            "description": f"Order {order.number or order.id} — MindMines Payment",
+                            "metadata": {"order_id": str(order.id)},
+                        }
+                        email = (order.email or "").strip()
+                        if email:
+                            create_kwargs["receipt_email"] = email
+
+                        intent = stripe.PaymentIntent.create(**create_kwargs)
                         order.payment_method = "card"
                         order.status = "pending"
                         order.payment_ref = intent.id
                         order.stripe_pi = intent.id
                         order.save(update_fields=["payment_method", "status", "payment_ref", "stripe_pi"])
 
-                # IMPORTANT: return snake_case the frontend expects
                 return Response({"client_secret": intent.client_secret, "order_id": order.id}, status=200)
 
             except Order.DoesNotExist:
@@ -1256,8 +1657,7 @@ class StripeCreateIntent(APIView):
             except stripe_error.StripeError as e:
                 return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
 
-        # Path 2: (Optional fallback) No order_id -> create order + PI in one call
-        # Keep *only if* you still want to support the old flow somewhere else.
+        # Path 2: Create order + PI in one call
         ser = OrderCreateSerializer(data=request.data, context={"request": request})
         try:
             ser.is_valid(raise_exception=True)
@@ -1266,7 +1666,7 @@ class StripeCreateIntent(APIView):
 
         try:
             with transaction.atomic():
-                order = ser.save()
+                order: Order = cast(Order, ser.save())
                 order.payment_method = "card"
                 order.status = "pending"
                 order.save(update_fields=["payment_method", "status"])
@@ -1280,14 +1680,18 @@ class StripeCreateIntent(APIView):
             return Response({"detail": "Total must be > 0."}, status=400)
 
         try:
-            intent = stripe.PaymentIntent.create(
-                amount=_amount_cents(total),
-                currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                payment_method_types=["card"],
-                description=f"Order {order.number or order.id} — MindMines Payment",
-                metadata={"order_id": str(order.id)},
-                receipt_email=order.email or None,
-            )
+            create_kwargs = {
+                "amount": _amount_cents(total),
+                "currency": getattr(settings, "STRIPE_CURRENCY", "eur"),
+                "payment_method_types": ["card"],
+                "description": f"Order {order.number or order.id} — MindMines Payment",
+                "metadata": {"order_id": str(order.id)},
+            }
+            email = (order.email or "").strip()
+            if email:
+                create_kwargs["receipt_email"] = email
+
+            intent = stripe.PaymentIntent.create(**create_kwargs)
         except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
@@ -1297,7 +1701,6 @@ class StripeCreateIntent(APIView):
         order.stripe_pi = intent.id
         order.save(update_fields=["payment_ref", "stripe_pi"])
 
-        # IMPORTANT: snake_case here as well
         return Response({"client_secret": intent.client_secret, "order_id": order.id}, status=201)
 
 # ---------------------------
@@ -1316,30 +1719,29 @@ class StripeCreateRedirectIntent(APIView):
         if method not in {"klarna", "giropay"}:
             return Response({"detail": "method must be 'klarna' or 'giropay'."}, status=400)
 
-        order = None
+        order: Optional[Order] = None
 
         order_id = request.data.get("order_id")
         if order_id:
-            # reuse existing order (auth or guest)
             try:
                 with transaction.atomic():
-                    order = (Order.objects.select_for_update().get(pk=order_id))
+                    order = Order.objects.select_for_update().get(pk=order_id)
             except Order.DoesNotExist:
                 return Response({"detail": "Order not found."}, status=404)
         else:
-            # JIT CREATE order from payload (guest flow or if you prefer JIT for users)
             ser = OrderCreateSerializer(data=request.data, context={"request": request})
             try:
                 ser.is_valid(raise_exception=True)
             except serializers.ValidationError as ve:
                 return Response({"detail": "Order validation failed", "errors": ve.detail}, status=400)
             with transaction.atomic():
-                order = ser.save()
-                # mark intent to be for redirect method
+                order = cast(Order, ser.save())
                 order.payment_method = method
                 order.status = "pending"
                 order.save(update_fields=["payment_method", "status"])
 
+        # Tell the type checker we’re guaranteed to have an Order now
+        assert order is not None
         # sanity checks
         if order.total_price is None or Decimal(order.total_price) <= Decimal("0.00"):
             return Response({"detail": "Total must be > 0."}, status=400)
@@ -1347,10 +1749,10 @@ class StripeCreateRedirectIntent(APIView):
             return Response({"detail": f"Order not payable in status '{order.status}'"}, status=400)
 
         currency = getattr(settings, "STRIPE_CURRENCY", "eur")
-        email = (order.email or "").strip() or None
+        email_str: str = (order.email or "").strip()  # always a str
 
         # Reuse PI if it already matches this method/amount/currency; else create new
-        intent = None
+        intent: Optional[Any] = None
         try:
             if order.stripe_pi:
                 current = stripe.PaymentIntent.retrieve(order.stripe_pi)
@@ -1366,14 +1768,18 @@ class StripeCreateRedirectIntent(APIView):
 
         if not intent:
             try:
-                intent = stripe.PaymentIntent.create(
+                kwargs: Dict[str, Any] = dict(
                     amount=_amount_cents(Decimal(order.total_price)),
                     currency=currency,
                     payment_method_types=[method],
                     description=f"Order {order.number or order.id} — MindMines Payment",
                     metadata={"order_id": str(order.id)},
-                    receipt_email=email,
                 )
+                # Only include receipt_email if we actually have one (avoids Optional[str])
+                if email_str:
+                    kwargs["receipt_email"] = email_str
+
+                intent = stripe.PaymentIntent.create(**kwargs)
             except stripe_error.StripeError as e:
                 return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
 
@@ -1396,16 +1802,27 @@ class StripeCreateSetupIntent(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        email = (request.data.get("email") or "").strip() or None
+        # always keep these as plain strings for type checkers
+        email_str: str = (request.data.get("email") or "").strip()
         user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
+
         try:
-            customer_id = _get_or_create_stripe_customer(user=user, email=email)
-            si = stripe.SetupIntent.create(
-                customer=customer_id,
-                payment_method_types=["card"],
-                usage="off_session",  # saving for future charges
+            customer_id: Optional[str] = _get_or_create_stripe_customer(user=user, email=email_str or None)
+
+            # Build kwargs without Optional values
+            kwargs: Dict[str, Any] = {
+                "payment_method_types": ["card"],
+                "usage": "off_session",  # saving for future charges
+            }
+            if customer_id:  # only include when not None
+                kwargs["customer"] = customer_id
+
+            si = stripe.SetupIntent.create(**kwargs)
+
+            return Response(
+                {"client_secret": si.client_secret, "customer_id": customer_id},
+                status=201,
             )
-            return Response({"client_secret": si.client_secret, "customer_id": customer_id}, status=201)
         except stripe_error.StripeError as e:
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
         
@@ -1413,10 +1830,16 @@ class StripeCardInstallmentsView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        months = int(request.data.get("installments_months") or request.data.get("months") or 0)
+        # 1) Validate months early, as int
+        months_raw = request.data.get("installments_months") or request.data.get("months") or 0
+        try:
+            months = int(months_raw)
+        except (TypeError, ValueError):
+            months = 0
         if months not in (3, 6, 9):
             return Response({"installments_months": ["Choose 3, 6, or 9 months for card installments."]}, status=400)
 
+        # 2) Prepare serializer input
         data = request.data.copy()
         data["payment_method"] = "card_installments"
         data["installments_months"] = months
@@ -1424,46 +1847,57 @@ class StripeCardInstallmentsView(APIView):
         ser = OrderCreateSerializer(data=data, context={"request": request})
         ser.is_valid(raise_exception=True)
 
+        # 3) Cast validated_data so Pylance knows it’s a dict
+        vd: Dict[str, Any] = cast(Dict[str, Any], getattr(ser, "validated_data", {}) or {})
+
+        # 4) Create order with explicit type
         try:
             with transaction.atomic():
-                order = ser.create(ser.validated_data)
+                order: Order = cast(Order, ser.create(vd))
                 order.payment_method = "card_installments"
                 order.installments_months = months
                 order.status = "processing"
                 order.confirmation_sent_at = timezone.now()
-                order.save(update_fields=["payment_method","installments_months","status","confirmation_sent_at"])
-
+                order.save(update_fields=["payment_method", "installments_months", "status", "confirmation_sent_at"])
         except Exception as e:
             return Response({"detail": f"Order creation failed: {e}"}, status=500)
 
-        pm_id = request.data.get("payment_method_id")
+        # 5) Require payment_method_id as a non-empty string
+        pm_id = str(request.data.get("payment_method_id") or "").strip()
         if not pm_id:
             return Response({"detail": "payment_method_id is required"}, status=400)
 
         try:
+            # Retrieve PM and ensure we have a customer id (string)
             pm = stripe.PaymentMethod.retrieve(pm_id)
-            customer_id = pm.get("customer")
+            customer_id_any: Any = pm.get("customer")
+            customer_id: Optional[str] = customer_id_any if isinstance(customer_id_any, str) and customer_id_any else None
+
             if not customer_id:
                 customer_id = _get_or_create_stripe_customer(
                     user=request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
                     email=order.email,
                 )
-                stripe.PaymentMethod.attach(pm_id, customer=customer_id)
+                # Only attach if we truly have a string
+                if customer_id:
+                    stripe.PaymentMethod.attach(pm_id, customer=customer_id)
 
-            stripe.Customer.modify(
-                customer_id,
-                invoice_settings={"default_payment_method": pm_id},
-            )
+            # Set default PM (guard the call so we never pass None)
+            if customer_id:
+                stripe.Customer.modify(
+                    customer_id,
+                    invoice_settings={"default_payment_method": pm_id},
+                )
 
-            # Authoritative schedule for email + response
+            # 6) Build server-authoritative schedule for emails/response
             amounts_eur, dates = build_installments_schedule(Decimal(order.total_price), months, first_now=True)
 
-            # Stripe phases (last carries remainder)
+            # 7) Stripe subscription schedule (last item carries remainder)
             total_cents = int(Decimal(order.total_price) * 100)
             base = total_cents // months
             remainder = total_cents - base * months
 
-            def mk_price(amount_int, label):
+            def mk_price(amount_int: int, label: str):
                 return stripe.Price.create(
                     unit_amount=amount_int,
                     currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
@@ -1475,31 +1909,36 @@ class StripeCardInstallmentsView(APIView):
             def ts(dt): return int(dt.timestamp())
 
             title_base = f"Installments for Order {order.number or order.id}"
-            phases = []
+            phases: list[dict[str, Any]] = []
+
             if remainder:
                 if months > 1:
                     price_base = mk_price(base, f"{title_base} (monthly)")
                     phases.append({
                         "items": [{"price": price_base.id, "quantity": 1}],
-                        "end_date": ts(now_ + timezone.timedelta(days=30*(months-1))),
+                        "end_date": ts(now_ + td(days=30 * (months - 1))),
                     })
                 price_last = mk_price(base + remainder, f"{title_base} (final)")
                 phases.append({
                     "items": [{"price": price_last.id, "quantity": 1}],
-                    "end_date": ts(now_ + timezone.timedelta(days=30*months)),
+                    "end_date": ts(now_ + td(days=30 * months)),
                 })
             else:
                 price_all = mk_price(base, f"{title_base} (monthly)")
                 phases.append({
                     "items": [{"price": price_all.id, "quantity": 1}],
-                    "end_date": ts(now_ + timezone.timedelta(days=30*months)),
+                    "end_date": ts(now_ + td(days=30 * months)),
                 })
+
+            # 8) Create the subscription schedule (customer_id must be a str)
+            if not customer_id:
+                return Response({"detail": "Could not determine a Stripe customer for this payment method."}, status=400)
 
             schedule = stripe.SubscriptionSchedule.create(
                 customer=customer_id,
                 start_date="now",
                 end_behavior="cancel",
-                phases=phases,
+                phases=cast(Any, phases),
                 default_settings={
                     "default_payment_method": pm_id,
                     "collection_method": "charge_automatically",
@@ -1510,11 +1949,12 @@ class StripeCardInstallmentsView(APIView):
             order.payment_ref = schedule.id
             order.save(update_fields=["payment_ref"])
 
-            # invoice + installments email (and suppress generic one)
+            # 9) Create invoice PDF + send installments email; suppress generic “processing”
             try:
                 generate_invoice_pdf(order)
             except Exception:
                 pass
+
             type(order).objects.filter(pk=order.pk).update(confirmation_sent_at=timezone.now())
             setattr(order, "confirmation_sent_at", timezone.now())
 
@@ -1556,8 +1996,8 @@ class StripeCreateSepaIntent(APIView):
         ser = OrderCreateSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
 
-        with transaction.atomic():
-            order = ser.save()
+        with transaction.atomic():            
+            order: Order = cast(Order, ser.save())
             order.payment_method = "sepa_debit"
             order.status = "pending"
             order.save(update_fields=["payment_method", "status"])
@@ -1568,20 +2008,26 @@ class StripeCreateSepaIntent(APIView):
             return Response({"detail": "Email is required for SEPA payments."}, status=400)
 
         try:
-            customer_id = _get_or_create_stripe_customer(
+            customer_id: Optional[str] = _get_or_create_stripe_customer(
                 user=request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
                 email=email,
             )
-            intent = stripe.PaymentIntent.create(
-                amount=_amount_cents(order.total_price),
-                currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
-                payment_method_types=["sepa_debit"],
-                description=f"Order {order.number or order.id} — MindMines Payment",
-                metadata={"order_id": str(order.id)},
-                customer=customer_id or None,
-                receipt_email=email,
-                confirm=False,
-            )
+
+            create_kwargs: Dict[str, Any] = {
+                "amount": _amount_cents(Decimal(order.total_price)),
+                "currency": getattr(settings, "STRIPE_CURRENCY", "eur"),
+                "payment_method_types": ["sepa_debit"],
+                "description": f"Order {order.number or order.id} — MindMines Payment",
+                "metadata": {"order_id": str(order.id)},
+                "receipt_email": email,
+                "confirm": False,
+            }
+            # Only pass customer if we actually have a string
+            if customer_id:
+                create_kwargs["customer"] = customer_id
+
+            intent = stripe.PaymentIntent.create(**create_kwargs)
+
         except stripe_error.StripeError as e:
             order.status = "failed"
             order.save(update_fields=["status"])
@@ -1591,10 +2037,7 @@ class StripeCreateSepaIntent(APIView):
         order.stripe_pi = intent.id
         order.save(update_fields=["payment_ref", "stripe_pi"])
 
-        return Response(
-            {"clientSecret": intent.client_secret, "order_id": order.id},
-            status=201,
-        )
+        return Response({"clientSecret": intent.client_secret, "order_id": order.id}, status=201)
 
 # ---------------------------
 # STRIPE: SEPA installments (DE only)
@@ -1610,13 +2053,22 @@ class StripeCreateSepaSetupIntent(APIView):
         email = (request.data.get("email") or "").strip() or None
         user = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
         try:
-            customer_id = _get_or_create_stripe_customer(user=user, email=email)
-            si = stripe.SetupIntent.create(
-                customer=customer_id,
-                payment_method_types=["sepa_debit"],
-                usage="off_session",
+            customer_id: Optional[str] = _get_or_create_stripe_customer(user=user, email=email)
+
+            # Build kwargs and add "customer" only if it's a non-empty string
+            create_kwargs: Dict[str, Any] = {
+                "payment_method_types": ["sepa_debit"],
+                "usage": "off_session",
+            }
+            if customer_id:
+                create_kwargs["customer"] = customer_id
+
+            si = stripe.SetupIntent.create(**create_kwargs)
+
+            return Response(
+                {"client_secret": si.client_secret, "customer_id": customer_id},
+                status=201
             )
-            return Response({"client_secret": si.client_secret, "customer_id": customer_id}, status=201)
         except stripe_error.StripeError as e:
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
         
@@ -1628,15 +2080,21 @@ class StripeSepaInstallmentsView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        months = int(request.data.get("installments_months") or request.data.get("months") or 0)
+        # --- validate inputs early ---
+        months_raw = request.data.get("installments_months") or request.data.get("months") or 0
+        try:
+            months = int(months_raw)
+        except (TypeError, ValueError):
+            months = 0
+
         country = (request.data.get("country") or "").upper()[:2]
 
         if months not in (3, 6, 9):
             return Response({"installments_months": ["Choose 3, 6, or 9 months for SEPA installments."]}, status=400)
         if country != "DE":
             return Response({"detail": "Installments are available in DE only."}, status=400)
-
-        # Feed serializer both the method + months so validation passes
+        
+        # --- run serializer with explicit inputs for validation ---
         data = request.data.copy()
         data["payment_method"] = "sepa_installments"
         data["installments_months"] = months
@@ -1644,8 +2102,12 @@ class StripeSepaInstallmentsView(APIView):
         ser = OrderCreateSerializer(data=data, context={"request": request})
         ser.is_valid(raise_exception=True)
 
+        # help the type checker: validated_data is a Dict
+        vd: Dict[str, Any] = cast(Dict[str, Any], ser.validated_data or {})
+
+        # --- create order inside transaction; tell the checker its type is Order ---
         with transaction.atomic():
-            order = ser.create(ser.validated_data)
+            order: Order = cast(Order, ser.create(vd))
             order.payment_method = "sepa_installments"
             order.installments_months = months
             order.status = "processing"
@@ -1657,30 +2119,33 @@ class StripeSepaInstallmentsView(APIView):
             return Response({"detail": "payment_method_id is required"}, status=400)
 
         try:
-            # Make sure customer exists and PM is attached
-            pm = stripe.PaymentMethod.retrieve(pm_id)
-            customer_id = pm.get("customer")
+            # Retrieve PM; ensure we end up with a string customer_id
+            pm: Dict[str, Any] = stripe.PaymentMethod.retrieve(pm_id)  # type: ignore[no-redef]
+            cid_any: Any = pm.get("customer")
+            customer_id: Optional[str] = cid_any if isinstance(cid_any, str) and cid_any else None
+
+            # If not attached, create/reuse a Stripe customer and attach PM
             if not customer_id:
                 customer_id = _get_or_create_stripe_customer(
                     user=request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
                     email=order.email,
                 )
-                stripe.PaymentMethod.attach(pm_id, customer=customer_id)
+                if customer_id:  # only call attach with a real string
+                    stripe.PaymentMethod.attach(pm_id, customer=customer_id)
 
-            stripe.Customer.modify(
-                customer_id,
-                invoice_settings={"default_payment_method": pm_id},
-            )
+            # Set default PM (only if we truly have a string)
+            if customer_id:
+                stripe.Customer.modify(customer_id, invoice_settings={"default_payment_method": pm_id})
 
-            # Build server-authoritative schedule (email + response)
+            # --- compute server-authoritative schedule (for emails/response) ---
             amounts_eur, dates = build_installments_schedule(Decimal(order.total_price), months, first_now=True)
 
-            # Stripe SubscriptionSchedule (last item takes remainder)
+            # --- build subscription schedule phases; keep types happy ---
             total_cents = int(Decimal(order.total_price) * 100)
             base = total_cents // months
             remainder = total_cents - base * months
 
-            def mk_price(amount_int, label):
+            def mk_price(amount_int: int, label: str):
                 return stripe.Price.create(
                     unit_amount=amount_int,
                     currency=getattr(settings, "STRIPE_CURRENCY", "eur"),
@@ -1692,31 +2157,38 @@ class StripeSepaInstallmentsView(APIView):
             def ts(dt): return int(dt.timestamp())
 
             title_base = f"SEPA installments for Order {order.number or order.id}"
-            phases = []
+
+            # Build phases as a plain list of dicts, then cast to Any for strict stubs
+            raw_phases: List[Dict[str, Any]] = []
             if remainder:
                 if months > 1:
                     base_price = mk_price(base, f"{title_base} (monthly)")
-                    phases.append({
+                    raw_phases.append({
                         "items": [{"price": base_price.id, "quantity": 1}],
-                        "end_date": ts(now_ + timezone.timedelta(days=30*(months-1))),
+                        "end_date": ts(now_ + td(days=30 * (months - 1))),
                     })
                 last_price = mk_price(base + remainder, f"{title_base} (final)")
-                phases.append({
+                raw_phases.append({
                     "items": [{"price": last_price.id, "quantity": 1}],
-                    "end_date": ts(now_ + timezone.timedelta(days=30*months)),
+                    "end_date": ts(now_ + td(days=30 * months)),
                 })
             else:
-                price_all = mk_price(base, f"{title_base} (monthly)")
-                phases.append({
-                    "items": [{"price": price_all.id, "quantity": 1}],
-                    "end_date": ts(now_ + timezone.timedelta(days=30*months)),
+                only_price = mk_price(base, f"{title_base} (monthly)")
+                raw_phases.append({
+                    "items": [{"price": only_price.id, "quantity": 1}],
+                    "end_date": ts(now_ + td(days=30 * months)),
                 })
+
+
+            # SubscriptionSchedule.create requires "customer" to be a str — guard for None
+            if not customer_id:
+                return Response({"detail": "Could not determine a Stripe customer for this payment method."}, status=400)
 
             schedule = stripe.SubscriptionSchedule.create(
                 customer=customer_id,
                 start_date="now",
                 end_behavior="cancel",
-                phases=phases,
+                phases=cast(Any, raw_phases),  # satisfy strict stripe type stubs
                 default_settings={
                     "default_payment_method": pm_id,
                     "collection_method": "charge_automatically",
@@ -1815,6 +2287,12 @@ def stripe_webhook(request):
     etype = event.get("type")
     data = event["data"]["object"]
 
+    # ---- define oid once so it’s always bound ----
+    oid = None
+    meta = data.get("metadata") if isinstance(data, dict) else None
+    if isinstance(meta, dict):
+        oid = meta.get("order_id")
+
     def _mark_paid(order: Order, pi_data: dict):
         changed = False
         if order.status != "paid":
@@ -1860,7 +2338,6 @@ def stripe_webhook(request):
             pass
 
     elif etype == "invoice.payment_succeeded":
-        oid = (data.get("metadata") or {}).get("order_id")
         if oid:
             try:
                 with transaction.atomic():
@@ -1871,7 +2348,6 @@ def stripe_webhook(request):
 
     # payment_intent.processing => SEPA direct debit / waiting bank
     elif etype == "payment_intent.processing":
-        oid = (data.get("metadata") or {}).get("order_id")
         try:
             with transaction.atomic():
                 if oid:
@@ -1910,14 +2386,22 @@ class InvoiceDownloadView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request, pk):
         order = get_object_or_404(Order, pk=pk, user=request.user)
-        if not hasattr(order, "invoice") or not order.invoice.pdf:
+        # Query directly instead of accessing reverse attribute
+        inv: Optional[Invoice] = Invoice.objects.filter(order=order).first()
+        if not inv or not getattr(inv, "pdf", None):
             return Response({"detail": "Invoice not available."}, status=404)
-        return FileResponse(order.invoice.pdf.open("rb"), as_attachment=True, filename=f"{order.invoice.number}.pdf")
+
+        filename = inv.number or f"invoice_{order.pk}"
+        return FileResponse(
+            inv.pdf.open("rb"),
+            as_attachment=True,
+            filename=f"{filename}.pdf" if not filename.endswith(".pdf") else filename,
+        )
 
 # -----------------------------------------------------------------------------
 # Returns / Cancellations
 # -----------------------------------------------------------------------------
-def _can_return(order: Order) -> tuple[bool, str]:
+def _can_return(order: Order) -> Tuple[bool, Optional[str]]:
     if order.status != "delivered":
         return False, "Returns are only possible after delivery."
     if not order.delivered_at:
@@ -1931,24 +2415,47 @@ def _can_return(order: Order) -> tuple[bool, str]:
 class OrderRequestReturnAPIView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
+
     @transaction.atomic
-    def post(self, request, pk: int, *args, **kwargs):
-        order = get_object_or_404(Order.objects.select_related("user"), pk=pk, user=request.user)
+    def post(self, request: Request, pk: int, *args, **kwargs) -> Response:
+        order: Order = get_object_or_404(
+            Order.objects.select_related("user"), pk=pk, user=request.user
+        )
+
         allowed, reason = _can_return(order)
         if not allowed:
-            return Response({"detail": reason}, status=status.HTTP_403_FORBIDDEN)
-        message = (request.data.get("message") or "").strip()
-        rr = ReturnRequest.objects.create(order=order, user=request.user, request_type="return", message=message)
-        for f in request.FILES.getlist("files"):
+            return Response({"detail": reason or ""}, status=status.HTTP_403_FORBIDDEN)
+
+        # 🔧 Give Pylance concrete types
+        data: Mapping[str, Any] = cast(Mapping[str, Any], request.data)
+        files: MultiValueDict[str, UploadedFile] = cast(
+            MultiValueDict[str, UploadedFile], request.FILES
+        )
+
+        message = str(data.get("message") or "").strip()
+
+        rr: ReturnRequest = ReturnRequest.objects.create(
+            order=order,
+            user=request.user,
+            request_type="return",
+            message=message,
+        )
+
+        for f in files.getlist("files"):
             ReturnAttachment.objects.create(request=rr, file=f)
-        email_err = None
+
+        email_sent = False
+        email_err: Optional[str] = None
         try:
             send_return_request_emails(rr)
             email_sent = True
         except Exception as e:
-            email_sent = False
             email_err = f"{e.__class__.__name__}: {e}"
-        return Response({"ok": True, "request_id": rr.id, "email_sent": email_sent, "error": email_err}, status=201)
+
+        return Response(
+            {"ok": True, "request_id": rr.pk, "email_sent": email_sent, "error": email_err},
+            status=201,
+        )
 
 class OrderCancelRequestAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -2102,7 +2609,7 @@ class SendBirthdayCouponAPIView(APIView):
 
         mmdd = run_dt.strftime("%m%d")
         starts_at = run_dt
-        ends_at = run_dt + timedelta(days=valid_days)
+        ends_at = run_dt + timezone.timedelta(days=valid_days)
 
         candidates = []
         qs = User.objects.select_related("profile").filter(is_active=True)
@@ -2194,50 +2701,89 @@ class SendBirthdayCouponAPIView(APIView):
 # Guest order lookup + invoice download (signed)
 # -----------------------------------------------------------------------------
 class GuestOrderLookupAPIView(APIView):
+    """
+    Public endpoint: look up an order by (email, order_number) and return a summary
+    plus a signed invoice download URL (when available).
+    """
     permission_classes = [AllowAny]
+
     def post(self, request):
         email = (request.data.get("email") or "").strip().lower()
         number = (request.data.get("order_number") or "").strip()
         if not email or not number:
             return Response({"detail": "email and order_number are required."}, status=400)
 
-        order = Order.objects.filter(email__iexact=email, number__iexact=number).first()
+        qs: QuerySet[Order] = Order.objects.filter(email__iexact=email)
+        order: Optional[Order] = qs.filter(number__iexact=number).first()
         if not order:
-            order = Order.objects.filter(email__iexact=email, pk__iexact=number.replace("ORD-", "")).first()
+            pk_guess = number.replace("ORD-", "")
+            order = qs.filter(pk__iexact=pk_guess).first()
         if not order:
             return Response({"detail": "No order found for this email and order number."}, status=404)
 
-        items_data = []
-        for it in order.items.all():
-            items_data.append({
-                "product_id": it.product_id,
-                "name": it.product_name,  # uses snapshot property
-                "quantity": it.quantity,
-                "unit_price": f"{it.unit_price:.2f}",
-                "line_total": f"{it.line_total():.2f}",
-            })
+        # -- items helper that never touches unknown attributes statically
+        def _iter_items(o: Order) -> Iterable[Any]:
+            rel_any: Any = getattr(o, "items", None) or getattr(o, "orderitem_set", None)
+            if rel_any is None:
+                return []  # no related name known to us at type time
+            try:
+                return cast(Iterable[Any], rel_any.all())
+            except Exception:
+                return []
 
-        invoice_url = None
-        if hasattr(order, "invoice") and order.invoice and order.invoice.pdf:
+        def _fmt_money(x: Any) -> str:
+            try:
+                return f"{float(x):.2f}"
+            except Exception:
+                return "0.00"
+
+        items_data: list[Dict[str, Any]] = []
+        for it in _iter_items(order):
+            # Safely fetch fields/methods without upsetting the type checker
+            product_id = getattr(it, "product_id", None)
+            name = (
+                getattr(it, "product_name", None)
+                or getattr(it, "product_name_snapshot", None)
+                or ""
+            )
+            quantity = getattr(it, "quantity", 0)
+            unit_price = _fmt_money(getattr(it, "unit_price", 0))
+            line_total_fn = getattr(it, "line_total", None)
+            line_total_val = line_total_fn() if callable(line_total_fn) else getattr(it, "line_total", 0)
+
+            items_data.append(
+                {
+                    "product_id": it.product_id,
+                    "name": getattr(it, "product_name", None) or getattr(it, "product_name_snapshot", ""),
+                    "quantity": it.quantity,
+                    "unit_price": f"{it.unit_price:.2f}",
+                    "line_total": f"{it.line_total():.2f}",
+                }
+            )
+
+        # Invoice URL (optional)
+        invoice_url: Optional[str] = None
+        inv = getattr(order, "invoice", None)
+        if inv is not None and getattr(inv, "pdf", None):
             invoice_url = build_guest_invoice_download_url(order)
 
         data = {
-            "order_id": order.id,
-            "order_number": order.number,
-            "status": order.status,
-            "payment_method": getattr(order, "payment_method_label", None) or order.payment_method,
-            "total_price": f"{order.total_price:.2f}",
+            "order_id": getattr(order, "id", None),
+            "order_number": getattr(order, "number", ""),
+            "status": getattr(order, "status", ""),
+            "payment_method": getattr(order, "payment_method_label", None) or getattr(order, "payment_method", ""),
+            "total_price": _fmt_money(getattr(order, "total_price", 0)),
             "currency": "EUR",
-            "created_at": order.created_at,
+            "created_at": getattr(order, "created_at", None),
             "shipping": {
-                "first_name": order.ship_first_name,
-                "last_name": order.ship_last_name,
-                "line1": order.ship_line1,
-                "line2": order.ship_line2,
-                "postal_code": order.ship_postal,
-                "city": order.ship_city,
-                "country": order.ship_country,
-                "phone": order.ship_phone,
+                "first_name": getattr(order, "ship_first_name", ""),
+                "last_name": getattr(order, "ship_last_name", ""),
+                "line1": getattr(order, "ship_line1", ""),
+                "line2": getattr(order, "ship_line2", ""),
+                "postal_code": getattr(order, "ship_postal", ""),
+                "city": getattr(order, "ship_city", ""),
+                "country": getattr(order, "ship_country", ""),
+                "phone": getattr(order, "ship_phone", ""),
             },
             "items": items_data,
             "invoice_download_url": invoice_url,

@@ -1,9 +1,10 @@
 #server/models.py
+from typing import Any, Optional, List, Iterable, cast
 from types import SimpleNamespace
-from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.db.models import Q, UniqueConstraint, F, CheckConstraint
+from django.contrib.auth.models import AbstractUser,  UserManager as DjangoUserManager
 from django.contrib.postgres.fields import ArrayField
 from django.db import models, transaction
-from django.db.models import Q, UniqueConstraint, F, CheckConstraint
 from django.db.models.functions import Lower
 from django.core.exceptions import ValidationError
 from django.core.validators import EmailValidator, MinValueValidator, MaxValueValidator
@@ -60,38 +61,50 @@ COLOR_CHOICES = [
 
 DEFAULT_VAT_RATE = Decimal("0.19")
 
-
 def _q2(d: Decimal) -> Decimal:
     return Decimal(d).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-
 # ----------------- Users -----------------
 
-class CustomUserManager(BaseUserManager):
+class CustomUserManager(DjangoUserManager["User"]):
     use_in_migrations = True
 
-    def _create_user(self, email, password, **extra_fields):
+    def _create_user(self, email: str, password: Optional[str], **extra_fields: Any) -> "User":
         if not email:
             raise ValueError("The Email must be set")
         email = self.normalize_email(email)
-        user = self.model(email=email, **extra_fields)
+        user = cast("User", self.model(email=email, **extra_fields))
         user.set_password(password)
         user.save(using=self._db)
         return user
 
-    def create_user(self, email, password=None, **extra_fields):
+    def create_user(
+        self,
+        username: str,                       
+        email: Optional[str] = None,
+        password: Optional[str] = None,
+        **extra_fields: Any,
+    ) -> "User":
+        actual_email = email or username
         extra_fields.setdefault("is_staff", False)
         extra_fields.setdefault("is_superuser", False)
-        return self._create_user(email, password, **extra_fields)
+        return self._create_user(actual_email, password, **extra_fields)
 
-    def create_superuser(self, email, password=None, **extra_fields):
+    def create_superuser(
+        self,
+        username: str,
+        email: Optional[str] = None,
+        password: Optional[str] = None,
+        **extra_fields: Any,
+    ) -> "User":
+        actual_email = email or username
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
         if extra_fields.get("is_staff") is not True:
             raise ValueError("Superuser must have is_staff=True.")
         if extra_fields.get("is_superuser") is not True:
             raise ValueError("Superuser must have is_superuser=True.")
-        return self._create_user(email, password, **extra_fields)
+        return self._create_user(actual_email, password, **extra_fields)
 
 
 class User(AbstractUser):
@@ -104,7 +117,7 @@ class User(AbstractUser):
 
     objects = CustomUserManager()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.email
 
 
@@ -183,24 +196,25 @@ class Address(models.Model):
             self.set_default_for_user()
             return
 
-        if self.user_id and self.is_default and not self._state.adding:
+        uid: Optional[int] = getattr(self, "user_id", None)  # appease type checker
+        if uid and self.is_default and not self._state.adding:
             with transaction.atomic():
                 (Address.objects
                     .select_for_update()
-                    .filter(user_id=self.user_id, is_default=True)
+                    .filter(user_id=uid, is_default=True)
                     .exclude(pk=self.pk)
                     .update(is_default=False)
                 )
-
         super().save(*args, **kwargs)
 
     def set_default_for_user(self):
-        if not self.user_id:
+        uid: Optional[int] = getattr(self, "user_id", None)
+        if not uid:
             return
         with transaction.atomic():
             (Address.objects
                 .select_for_update()
-                .filter(user=self.user, is_default=True)
+                .filter(user_id=uid, is_default=True)
                 .exclude(pk=self.pk)
                 .update(is_default=False)
             )
@@ -258,7 +272,7 @@ class NaturalStoneImage(models.Model):
                 raise ValidationError("A stone can have at most 10 gallery images.")
         return super().save(*args, **kwargs)
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"Image for {self.stone.type}"
 
 
@@ -396,7 +410,7 @@ class Product(models.Model):
         # Assign pretty key after we have an ID
         if (creating or not self.key) and self.pk:
             cat_prefix = CATEGORY_CODES.get(self.category, "MIND")
-            new_key = f"{cat_prefix}{str(self.id).zfill(2)}"
+            new_key = f"{cat_prefix}{str(cast(int, self.pk)).zfill(2)}"
             if self.key != new_key:
                 self.key = new_key
                 super().save(update_fields=["key"])
@@ -477,6 +491,23 @@ class ProductMedia(models.Model):
     def __str__(self):
         return f"{self.media_type.capitalize()} for {self.product}"
 
+#---------------------------Admin Product Monitor----------------------------
+class ProductEvent(models.Model):
+    class Action(models.TextChoices):
+        VIEW = "view", "View"
+        ADD_TO_CART = "add_to_cart", "Add to cart"
+        WISHLIST = "wishlist", "Wishlist"
+
+    product = models.ForeignKey("Product", related_name="events", on_delete=models.CASCADE)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+    action = models.CharField(max_length=32, choices=Action.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["product", "action", "created_at"]),
+            models.Index(fields=["created_at"]),
+        ]
 
 # ----------------- Wishlist / On-demand / Stock alerts -----------------
 
@@ -496,8 +527,8 @@ class OnDemandOrderRequest(models.Model):
             models.Index(fields=["email"]),
         ]
 
-    def __str__(self):
-        return f"On-demand request #{self.id} for {self.product_id} x{self.quantity}"
+    def __str__(self) -> str:
+        return f"On-demand request #{self.pk} for {self.product} x{self.quantity}"
 
 
 class StockAlert(models.Model):
@@ -565,6 +596,52 @@ class NewsletterSubscriber(models.Model):
     def __str__(self):
         return self.email
 
+#------------------------Cart ------------------------------
+
+class Cart(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey("server.User", null=True, blank=True,
+                             on_delete=models.SET_NULL, related_name="carts")
+    cart_token = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    currency = models.CharField(max_length=3, default="EUR")
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "is_active"]),
+            models.Index(fields=["cart_token", "is_active"]),
+        ]
+
+    def __str__(self) -> str:
+        # Type-narrow on user (Optional[User]) — Pylance understands this
+        if self.user is not None:
+            # getattr keeps it safe even if custom User lacks 'email' in stubs
+            email: Optional[str] = getattr(self.user, "email", None)
+            return f"Cart({email or 'user'})"
+        tok = self.cart_token or "no-token"
+        return f"Cart(guest:{tok})"
+
+
+class CartItem(models.Model):
+    cart = models.ForeignKey(Cart, on_delete=models.CASCADE, related_name="items")
+    product = models.ForeignKey("server.Product", on_delete=models.PROTECT)
+    name = models.CharField(max_length=255)      # denormalized for admin clarity
+    image = models.URLField(blank=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2)  # EUR
+    qty = models.PositiveIntegerField(default=1)
+    color = models.CharField(max_length=64, blank=True)
+    weight = models.CharField(max_length=64, blank=True)
+    dimensions = models.CharField(max_length=128, blank=True)
+    category = models.CharField(max_length=128, blank=True)
+
+    class Meta:
+        unique_together = [("cart", "product")]  # one line per product
+
+    @property
+    def line_total(self):
+        return self.qty * self.price
 
 # ----------------- Orders, Items, Returns -----------------
 
@@ -669,7 +746,7 @@ class Order(models.Model):
             models.Index(fields=["email"]),
         ]
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"Order #{self.pk}"
 
     # ---- numbering & totals ----
@@ -684,40 +761,58 @@ class Order(models.Model):
             super().save(update_fields=["number"])
         return self.number
 
+    def assign_unique_order_number(self):
+        """
+        Backwards-compatible alias used by legacy signal hooks.
+        """
+        return self.ensure_number()
+
     def line_total(self) -> Decimal:
         total = Decimal("0.00")
-        for it in self.items.all():
-            total += it.line_total()
+        items_mgr = getattr(self, "items", None)  # reverse manager exists at runtime
+        if not items_mgr:
+            return _q2(total)
+        for it in cast(Iterable[Any], items_mgr.all()):
+            total += Decimal(getattr(it, "unit_price", Decimal("0.00"))) * int(getattr(it, "quantity", 0))
         return _q2(total)
 
-    def compute_totals(self, shipping_price: Decimal = None, vat_rate: Decimal = DEFAULT_VAT_RATE):
+    def compute_totals(
+        self,
+        shipping_price: Optional[Decimal] = None,
+        vat_rate: Decimal = DEFAULT_VAT_RATE,
+    ) -> Decimal:
         """
         Recalculate subtotal/discount/vat/total based on items and any attached coupon.
         Store results on the model (does not save).
         """
-        items_qs = list(self.items.select_related("product"))
-        # items subtotal uses each item's unit_price (already gross) * qty
+        items_mgr = getattr(self, "items", None)
+        if items_mgr:
+            items_qs: List[Any] = list(items_mgr.select_related("product"))
+        else:
+            items_qs = []
+
         subtotal = Decimal("0.00")
         for it in items_qs:
-            subtotal += it.line_total()
+            unit = Decimal(getattr(it, "unit_price", Decimal("0.00")))
+            qty = int(getattr(it, "quantity", 0))
+            subtotal += (unit * qty)
         subtotal = _q2(subtotal)
 
-        # coupon discount (if present)
         discount = Decimal("0.00")
         try:
-            if hasattr(self, "coupon_redemption") and self.coupon_redemption:
-                coupon = self.coupon_redemption.coupon
-                discount = coupon.discount_amount(self.user, items_qs, subtotal)
+            red = getattr(self, "coupon_redemption", None)  # OneToOne; may not exist
+            if red is not None:
+                coupon = getattr(red, "coupon", None)
+                if coupon is not None:
+                    # coupon.discount_amount(user, items, cart_subtotal)
+                    discount = coupon.discount_amount(self.user, items_qs, subtotal)
         except Exception:
             discount = Decimal("0.00")
 
-        # shipping
         ship = _q2(Decimal(shipping_price) if shipping_price is not None else Decimal(self.shipping_price or 0))
 
-        # VAT portion informative (gross pricing): vat = (gross / (1+rate)) * rate
         gross_after_discount = max(Decimal("0.00"), subtotal - discount)
         vat_total = _q2((gross_after_discount / (Decimal(1) + Decimal(vat_rate))) * Decimal(vat_rate))
-
         total = _q2(gross_after_discount + ship)
 
         self.subtotal = _q2(subtotal)
@@ -734,50 +829,61 @@ class Order(models.Model):
         Decrement product.quantity for each item atomically with row locks.
         """
         with transaction.atomic():
-            items = list(self.items.all())  # no select_for_update() here
-            prod_ids = [it.product_id for it in items if it.product_id]
+            items_mgr = getattr(self, "items", None)
+            if not items_mgr:
+                return
+            items: List[Any] = list(items_mgr.all())
+            prod_ids: List[int] = [
+                int(pid) for pid in (getattr(it, "product_id", None) for it in items) if pid
+            ]
             if not prod_ids:
                 return
-
-            # Lock product rows only (safe for Postgres)
             products = {
-                p.id: p
-                for p in Product.objects.select_for_update().filter(id__in=prod_ids)
+                p.pk: p
+                for p in Product.objects.select_for_update().filter(pk__in=prod_ids)
             }
 
             # validate
             for it in items:
-                if not it.product_id:
+                pid = getattr(it, "product_id", None)
+                if not pid:
                     continue
-                p = products[it.product_id]
-                if (p.quantity or 0) < it.quantity:
+                p = products[int(pid)]
+                if int(getattr(p, "quantity", 0) or 0) < int(getattr(it, "quantity", 0)):
                     raise ValidationError(f"Insufficient stock for {p}")
 
             # decrement
             for it in items:
-                if not it.product_id:
+                pid = getattr(it, "product_id", None)
+                if not pid:
                     continue
-                Product.objects.filter(id=it.product_id).update(
-                    quantity=F("quantity") - it.quantity
-                )
+                Product.objects.filter(pk=int(pid)).update(
+                    quantity=F("quantity") - int(getattr(it, "quantity", 0))
+                )            
 
 
-    def release_stock_atomic(self):
+    def release_stock_atomic(self) -> None:
         with transaction.atomic():
-            items = list(self.items.all())
-            prod_ids = [it.product_id for it in items if it.product_id]
+            items_mgr = getattr(self, "items", None)
+            if not items_mgr:
+                return
+            items: List[Any] = list(items_mgr.all())
+            prod_ids: List[int] = [
+                int(pid) for pid in (getattr(it, "product_id", None) for it in items) if pid
+            ]
             if not prod_ids:
                 return
 
             # Lock product rows
-            Product.objects.select_for_update().filter(id__in=prod_ids)
+            Product.objects.select_for_update().filter(pk__in=prod_ids)
 
             # increment
             for it in items:
-                if not it.product_id:
+                pid = getattr(it, "product_id", None)
+                if not pid:
                     continue
-                Product.objects.filter(id=it.product_id).update(
-                    quantity=F("quantity") + it.quantity
+                Product.objects.filter(pk=int(pid)).update(
+                    quantity=F("quantity") + int(getattr(it, "quantity", 0))
                 )
     
     def lock_stock(self) -> None:
@@ -788,31 +894,38 @@ class Order(models.Model):
             return
 
         with transaction.atomic():
-            items = list(self.items.all())
-            prod_ids = [it.product_id for it in items if it.product_id]
-
+            items_mgr = getattr(self, "items", None)
+            if not items_mgr:
+                return
+            items: List[Any] = list(items_mgr.all())
+            prod_ids: List[int] = [
+                int(pid) for pid in (getattr(it, "product_id", None) for it in items) if pid
+            ]
+            products: dict[int, Product] = {}
             if prod_ids:
                 products = {
-                    p.id: p
-                    for p in Product.objects.select_for_update().filter(id__in=prod_ids)
+                    p.pk: p
+                    for p in Product.objects.select_for_update().filter(pk__in=prod_ids)
                 }
 
                 # validate
                 for it in items:
-                    if not it.product_id:
+                    pid = getattr(it, "product_id", None)
+                    if not pid:
                         continue
-                    p = products[it.product_id]
-                    if (p.quantity or 0) < it.quantity:
+                    p = products[int(pid)]
+                    if int(getattr(p, "quantity", 0) or 0) < int(getattr(it, "quantity", 0)):
                         raise ValueError(
-                            f"Insufficient stock for {p} (have {p.quantity}, need {it.quantity})"
+                            f"Insufficient stock for {p} (have {p.quantity}, need {getattr(it, 'quantity', 0)})"
                         )
 
                 # decrement
                 for it in items:
-                    if not it.product_id:
+                    pid = getattr(it, "product_id", None)
+                    if not pid:
                         continue
-                    Product.objects.filter(id=it.product_id).update(
-                        quantity=F("quantity") - it.quantity
+                    Product.objects.filter(pk=int(pid)).update(
+                        quantity=F("quantity") - int(getattr(it, "quantity", 0))
                     )
 
             self.stock_locked = True
@@ -826,19 +939,24 @@ class Order(models.Model):
             return
 
         with transaction.atomic():
-            items = list(self.items.all())
-            prod_ids = [it.product_id for it in items if it.product_id]
+            items_mgr = getattr(self, "items", None)
+            if not items_mgr:
+                return
+            items: List[Any] = list(items_mgr.all())
+            prod_ids: List[int] = [
+                int(pid) for pid in (getattr(it, "product_id", None) for it in items) if pid
+            ]
 
             if prod_ids:
                 # lock product rows
-                Product.objects.select_for_update().filter(id__in=prod_ids)
-
+                Product.objects.select_for_update().filter(pk__in=prod_ids)
                 # increment
                 for it in items:
-                    if not it.product_id:
+                    pid = getattr(it, "product_id", None)
+                    if not pid:
                         continue
-                    Product.objects.filter(id=it.product_id).update(
-                        quantity=F("quantity") + it.quantity
+                    Product.objects.filter(pk=int(pid)).update(
+                        quantity=F("quantity") + int(getattr(it, "quantity", 0))
                     )
 
             self.stock_locked = False
@@ -872,8 +990,11 @@ class Order(models.Model):
             self.ensure_number()
 
     @property
-    def payment_method_label(self):
-        return self.get_payment_method_display()
+    def payment_method_label(self) -> str:
+        disp = getattr(self, "get_payment_method_display", None)
+        if callable(disp):
+            return str(disp())
+        return str(self.payment_method or "")
 
     @property
     def ordered_at(self):
@@ -887,7 +1008,12 @@ class Order(models.Model):
 
     @property
     def is_returnable(self) -> bool:
-        return self.status == "delivered" and self.delivered_at and timezone.now() <= (self.delivered_at + timedelta(days=15))
+         return (
+            self.status == "delivered"
+            and self.delivered_at is not None
+            and timezone.now() <= (self.delivered_at + timedelta(days=15))
+        )
+        
     @property
     def shipping_address(self):
         """
@@ -926,8 +1052,12 @@ class OrderItem(models.Model):
     quantity = models.PositiveIntegerField(default=1)
     unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
 
-    def line_total(self):
-        return _q2(Decimal(self.unit_price) * self.quantity)
+    def line_total(self) -> Decimal:
+        items: List["OrderItem"] = list(self.items.all())  # type: ignore[attr-defined]
+        total = Decimal("0.00")
+        for it in items:
+            total += it.line_total()
+        return _q2(total)
 
     @property
     def product_name(self):
@@ -1120,7 +1250,9 @@ class PromotionBanner(models.Model):
         return self.name
 
     def current_code(self) -> str:
-        return (self.coupon.code if self.coupon_id else (self.code or "")).upper()
+        if self.coupon:  # ForeignKey can be None
+            return (self.coupon.code or "").upper()
+        return (self.code or "").upper()
 
     def active_now(self, now=None) -> bool:
         now = now or timezone.now()

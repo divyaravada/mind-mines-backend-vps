@@ -1,5 +1,6 @@
 # server/utils/invoices.py
 from io import BytesIO
+from typing import Any, List, Union, cast, Sequence
 from decimal import Decimal
 from django.core.files.base import ContentFile
 from django.contrib.staticfiles import finders
@@ -8,19 +9,19 @@ from django.utils.timezone import localtime
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Flowable
 from reportlab.lib.styles import getSampleStyleSheet
 
 from pdfrw import PdfReader, PdfWriter, PageMerge
 
 from server.models import Invoice
 
-def _eur(v) -> str:
+def _eur(v: Any) -> str:
     d = Decimal(str(v))
     return f"{d:.2f} €"
 
 
-def _build_invoice_content(order) -> bytes:
+def _build_invoice_content(order:Any) -> bytes:
     """Build a nice-looking single-page invoice content (no background)."""
     buf = BytesIO()
     doc = SimpleDocTemplate(
@@ -30,7 +31,7 @@ def _build_invoice_content(order) -> bytes:
         bottomMargin=18 * mm,
         leftMargin=18 * mm,
         rightMargin=18 * mm,
-        title=f"Invoice {order.invoice_number or order.number}",
+        title=f"Invoice {getattr(order, 'invoice_number', None) or getattr(order, 'number', '')}",
     )
 
     styles = getSampleStyleSheet()
@@ -41,7 +42,7 @@ def _build_invoice_content(order) -> bytes:
     created = localtime(order.created_at).strftime("%Y-%m-%d")
 
     # Company block – adjust if you want to pull from settings
-    company_lines = [
+    company_lines: List[str] = [
         "<b>MindMines GbR</b>",
         "Feldstr. 11",
         "21640 Horneburg, Germany",
@@ -52,24 +53,28 @@ def _build_invoice_content(order) -> bytes:
 
     # Bill-to (prefers new fields, falls back to legacy)
     a = order.shipping_address
-    full_name = (" ".join([getattr(a, "first_name", "") or "", getattr(a, "last_name", "") or ""]).strip()
-                 or getattr(a, "full_name", "") or order.user.email)
-    line1 = getattr(a, "address_line1", "") or (f"{getattr(a, 'street_name','')} {getattr(a,'house_number','')}".strip())
+    full_name = (
+        (" ".join([getattr(a, "first_name", "") or "", getattr(a, "last_name", "") or ""]).strip())
+        or getattr(a, "full_name", "")
+        or getattr(getattr(order, "user", None), "email", ""))
+    line1 = getattr(a, "address_line1", "") or (
+        f"{getattr(a, 'street_name','')} {getattr(a,'house_number','')}".strip()
+    )
     city_line = f"{getattr(a,'postal_code', getattr(a,'pincode',''))} {getattr(a,'city', getattr(a,'state',''))}".strip()
 
-    bill_lines = [
+    bill_lines_raw: List[str] = [
         f"<b>{full_name}</b>",
         line1,
         (getattr(a, "address_line2", "") or getattr(a, "apartment", "") or "").strip(),
         city_line,
         getattr(a, "country", "") or "",
-        getattr(a, "phone", "") and f"Phone: {getattr(a,'phone')}" or "",
+        (f"Phone: {getattr(a,'phone')}" if getattr(a, "phone", "") else ""),
     ]
-    bill_lines = [x for x in bill_lines if x]
+    bill_lines = [x for x in bill_lines_raw if x]
 
     # Meta block
-    status_label = order.status.upper()
-    meta_lines = [
+    status_label = str(order.status).upper()
+    meta_lines: List[str] = [
         f"Invoice no.: <b>{order.invoice_number or '-'}</b>",
         f"Order no.: <b>{order.number}</b>",
         f"Date: <b>{created}</b>",
@@ -78,7 +83,7 @@ def _build_invoice_content(order) -> bytes:
     ]
 
     # Header + meta grid (2 columns)
-    elems = []
+    elems: List[Flowable] = []
     elems.append(Paragraph("INVOICE", H1))
     elems.append(Spacer(1, 4))
 
@@ -106,11 +111,12 @@ def _build_invoice_content(order) -> bytes:
     elems.append(Spacer(1, 8))
 
     # Line items
-    data = [["Item", "Qty", "Unit", "Total"]]
-    for oi in order.items.all():
+    row0: List[Union[str, Paragraph]] = ["Item", "Qty", "Unit", "Total"]
+    data: List[List[Union[str, Paragraph]]] = [row0]
+    for oi in order.items.all():  # type: ignore[attr-defined]
         data.append(
             [
-                Paragraph(oi.product_name[:80], N),
+                Paragraph(str(oi.product_name)[:80], N),
                 str(oi.quantity),
                 _eur(oi.unit_price),
                 _eur(oi.line_total()),
@@ -205,17 +211,23 @@ def generate_invoice_pdf(order):
     template_path = finders.find("pdf/Mindmines template.pdf")
     if template_path:
         try:
-            tpl = PdfReader(template_path)
-            overlay_reader = PdfReader(BytesIO(content_bytes))
-            base_page = tpl.pages[0]
-            overlay_page = overlay_reader.pages[0]
-            PageMerge(base_page).add(overlay_page).render()
+            tpl = PdfReader(template_path)  # type: ignore[call-arg]
+            overlay_reader = PdfReader(BytesIO(content_bytes))  # type: ignore[call-arg]
 
-            out = BytesIO()
-            writer = PdfWriter()
-            writer.addpage(base_page)
-            writer.write(out)
-            pdf_bytes = out.getvalue()
+            tpl_pages: Sequence[Any] = cast(Sequence[Any], getattr(tpl, "pages", []) or [])
+            ovl_pages: Sequence[Any] = cast(Sequence[Any], getattr(overlay_reader, "pages", []) or [])
+
+            if tpl_pages and ovl_pages:
+                base_page = tpl_pages[0]
+                overlay_page = ovl_pages[0]
+                PageMerge(base_page).add(overlay_page).render()
+                out = BytesIO()
+                writer = PdfWriter()
+                writer.addpage(base_page)
+                writer.write(out)
+                pdf_bytes = out.getvalue()
+            else:
+                pdf_bytes = content_bytes
         except Exception:
             pdf_bytes = content_bytes
 
