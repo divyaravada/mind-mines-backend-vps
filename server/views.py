@@ -4,7 +4,7 @@ import json, re, requests as http
 import logging
 from datetime import datetime, timedelta as td
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
-from typing import Any, Dict, List, Mapping, MutableMapping, Iterable, Optional, Tuple, Protocol, runtime_checkable, cast,Type
+from typing import Any, Dict, List, Mapping, MutableMapping, Iterable, Optional, Tuple, Protocol, TypedDict, runtime_checkable, cast,Type
 from django.db.models.functions import TruncDate
 from django.core.files.uploadedfile import UploadedFile
 from django.utils.datastructures import MultiValueDict
@@ -1693,6 +1693,12 @@ class StripeCreateIntent(APIView):
 # ---------------------------
 # STRIPE: immediate one-shot ( klarna / giropay )
 # ---------------------------
+class _PaymentIntent(TypedDict, total=False):
+    id: str
+    client_secret: str
+    amount: int
+    currency: str
+    payment_method_types: List[str]
 
 class StripeCreateRedirectIntent(APIView):
     """
@@ -1739,17 +1745,19 @@ class StripeCreateRedirectIntent(APIView):
         email_str: str = (order.email or "").strip()  # always a str
 
         # Reuse PI if it already matches this method/amount/currency; else create new
-        intent: Optional[Any] = None
+        intent: Optional[_PaymentIntent] = None
         try:
             if order.stripe_pi:
-                current = stripe.PaymentIntent.retrieve(order.stripe_pi)
-                if (
-                    isinstance(current.get("payment_method_types"), list)
-                    and current["payment_method_types"] == [method]
-                    and current["currency"] == currency
-                    and int(current["amount"]) == _amount_cents(Decimal(order.total_price))
-                ):
-                    intent = current
+                current: Any = stripe.PaymentIntent.retrieve(order.stripe_pi)
+                if isinstance(current, dict):
+                    pmt_types = current.get("payment_method_types") or []
+                    if (
+                        isinstance(pmt_types, list)
+                        and pmt_types == [method]
+                        and current.get("currency") == currency
+                        and int(current.get("amount") or -1) == _amount_cents(Decimal(order.total_price))
+                    ):
+                        intent = cast(_PaymentIntent, current)
         except stripe_error.StripeError:
             intent = None
 
@@ -1766,16 +1774,25 @@ class StripeCreateRedirectIntent(APIView):
                 if email_str:
                     kwargs["receipt_email"] = email_str
 
-                intent = stripe.PaymentIntent.create(**kwargs)
+                created: Any = stripe.PaymentIntent.create(**kwargs)
+                # stripe returns dict-like; narrow to our minimal shape
+                intent = cast(_PaymentIntent, created)
             except stripe_error.StripeError as e:
                 return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
 
             order.payment_method = method
-            order.payment_ref = intent.id
-            order.stripe_pi = intent.id
+            order.payment_ref = intent.get("id", "")  # safe even if missing
+            order.stripe_pi = intent.get("id", "")
             order.save(update_fields=["payment_method", "payment_ref", "stripe_pi"])
 
-        return Response({"client_secret": intent.client_secret, "order_id": order.id}, status=200)
+        # Final guard for type-checkers and runtime
+        if not intent or "client_secret" not in intent or "id" not in intent:
+            return Response({"detail": "Failed to obtain PaymentIntent."}, status=502)
+
+        return Response(
+            {"client_secret": intent["client_secret"], "order_id": order.id},
+            status=200,
+        )
 
 # ---------------------------
 # STRIPE: card installments (authenticated only)
