@@ -877,50 +877,56 @@ class ProductDemandTimeseriesAPIView(APIView):
 def _get_or_create_active_cart(request):
     user = request.user if request.user.is_authenticated else None
     token = request.data.get("cart_token") or request.query_params.get("cart_token")
+
     qs = Cart.objects.filter(is_active=True)
     if user:
         cart = qs.filter(user=user).order_by("-updated_at").first()
-        if not cart:
-            cart = Cart.objects.create(user=user)
-        return cart
+        return cart or Cart.objects.create(user=user)
+
     if token:
         cart = qs.filter(cart_token=token).order_by("-updated_at").first()
-        if not cart:
-            cart = Cart.objects.create(cart_token=token)
-        return cart
-    # last resort for guests: require token
-    raise ValueError("cart_token missing for guest")
+        return cart or Cart.objects.create(cart_token=token)
+
+    # guests must provide a token
+    raise ValueError("cart_token required for guests")
 
 class CartSyncView(APIView):
-    """
-    Upsert the caller's active cart (guest or user).
-    Request body: { cart_token?: string, currency?: 'EUR', items: [{product_id, name, image, price, qty, ...}] }
-    """
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
         try:
             cart = _get_or_create_active_cart(request)
-        except ValueError:
-            return Response({"detail": "cart_token required for guests"}, status=400)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(CartSerializer(cart).data)
 
     def post(self, request):
         try:
             cart = _get_or_create_active_cart(request)
-        except ValueError:
-            return Response({"detail": "cart_token required for guests"}, status=400)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        ser = CartSerializer(instance=cart, data={
+        data = {
             "currency": request.data.get("currency") or "EUR",
             "is_active": True,
             "items": request.data.get("items", []),
-            "cart_token": request.data.get("cart_token")
-        })
-        ser.is_valid(raise_exception=True)
-        ser.save()
-        return Response(ser.data, status=200)
+            "cart_token": request.data.get("cart_token"),
+        }
 
+        ser = CartSerializer(instance=cart, data=data)
+        try:
+            ser.is_valid(raise_exception=True)
+            ser.save()
+            return Response(ser.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            # prevent a 500 loop; log full traceback server-side
+            logger.exception("CartSyncView POST failed")
+            # short message to client (don’t leak stack traces in prod)
+            return Response(
+                {"detail": "cart_save_failed"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
 class AdminCartListView(generics.ListAPIView):
     """
     Admin view to see all active carts, with items.
