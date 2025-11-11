@@ -123,7 +123,7 @@ urlpatterns = [
     path("products/list/", ProductListView.as_view(), name="product_list"),
     path("products/<int:pk>/", ProductDetailView.as_view(), name="product_detail"),
     path("products/suggest/", ProductSuggestList.as_view(), name="product_suggest"),
-    path("api/admin/analytics/product-demand/", ProductDemandSummaryAPIView.as_view(), name="admin-product-demand"),
+    path("admin/analytics/product-demand/", ProductDemandSummaryAPIView.as_view(), name="admin-product-demand"),
 
     #cart
     path("cart/", CartSyncView.as_view(), name="cart-sync"),
