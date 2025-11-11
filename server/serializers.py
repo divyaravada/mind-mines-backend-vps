@@ -575,11 +575,23 @@ class NewsletterSubscriberSerializer(serializers.ModelSerializer):
 # Cart detail / items
 # -----------------
 class CartItemSerializer(serializers.ModelSerializer):
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
     product_id = serializers.IntegerField(source="product_id")
 
     class Meta:
         model = CartItem
         fields = ( "product", "product_id","name","image","price","qty","color","weight","dimensions","category")
+
+    # def validate(self, attrs):
+    #     pid = attrs.pop("product", None)
+    #     if pid is None:
+    #         raise serializers.ValidationError({"product": "This field is required."})
+    #     try:
+    #         prod = Product.objects.only("id").get(pk=pid)
+    #     except Product.DoesNotExist:
+    #         raise serializers.ValidationError({"product": f"Invalid product id: {pid}"})
+    #     attrs["product"] = prod  # replace int with actual instance for model save
+    #     return attrs
 
 class CartSerializer(serializers.ModelSerializer):
     items = CartItemSerializer(many=True)
