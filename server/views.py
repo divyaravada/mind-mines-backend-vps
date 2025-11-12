@@ -24,7 +24,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
-from django.utils.timezone import make_aware
+from django.utils.timezone import make_aware,now
 from django.views.decorators.csrf import csrf_exempt
 
 from rest_framework import generics, permissions, serializers, filters, status
@@ -1237,35 +1237,13 @@ class ActivePromotionAPIView(APIView):
     renderer_classes = [JSONRenderer]
 
     def get(self, request):
-        try:
-            now = timezone.now()
-            country = (request.GET.get("country") or request.headers.get("X-Country") or "DE").upper()
-
-            qs = (
-                    PromotionBanner.objects
-                    .filter(is_enabled=True)
-                    .filter(Q(start_at__lte=now) | Q(start_at__isnull=True))
-                    .filter(Q(end_at__gte=now) | Q(end_at__isnull=True))
-                    .order_by("-priority", "-updated_at")
-                ).filter(
-                    Q(country_whitelist__isnull=True) |
-                    Q(country_whitelist__len=0) |
-                    Q(country_whitelist__contains=[country])
-                )
-
-            promo = qs.first()
-            if not promo:
-                return Response({"active": False}, status=200)
-
-            ser = PromotionSerializer(promo, context={"request": request})
-            data: Dict[str, Any] = dict(ser.data)  # make it mutable for type checkers
-            data["active"] = True
-            # expose explicit code for the promo bar click-to-apply UX
-            data["code"] = promo.current_code()
-            return Response(data, status=200)
-        except Exception:
-            logger.exception("Failed to get active promotion")
-            return Response({"active": False}, status=200)
+        qs = PromotionBanner.objects.filter(
+            is_enabled=True,
+            start_at__lte=now(),
+            end_at__gte=now(),
+        ).order_by("-priority", "-updated_at", "-id")
+        data = PromotionSerializer(qs, many=True, context={"request": request}).data
+        return Response({"results": data})
 
 # -----------------------------------------------------------------------------
 # Misc
