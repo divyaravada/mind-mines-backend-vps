@@ -1102,30 +1102,17 @@ class CouponPreviewIn(serializers.Serializer):
 class PromotionSerializer(serializers.ModelSerializer):
     code = serializers.SerializerMethodField()
     image = serializers.SerializerMethodField()
-    remaining_seconds = serializers.SerializerMethodField()
 
     class Meta:
         model = PromotionBanner
         fields = [
-            "id","name"
-            "headline",
-            "subheadline",
-            "code",
-            "start_at",
-            "end_at",
-            "remaining_seconds",
-            "bg_color",
-            "text_color",
-            "link_url",
-            "image",
+            "id", "name",
+            "headline", "subheadline",
+            "bg_color", "text_color",
+            "link_url", "image_url",
+            "start_at", "end_at", "is_enabled",
+            "priority", "code",
         ]
-
-    def _abs(self, request, url: str) -> str:
-        if not url:
-            return ""
-        if request and not str(url).startswith(("http://", "https://")):
-            return request.build_absolute_uri(url)
-        return url
 
     def get_code(self, obj):
         return obj.current_code()
@@ -1141,13 +1128,6 @@ class PromotionSerializer(serializers.ModelSerializer):
         if request and not str(url).startswith(("http://", "https://")):
             return request.build_absolute_uri(url)
         return url
-
-    def get_remaining_seconds(self, obj):
-        n = timezone.now()
-        if obj.end_at <= n:
-            return 0
-        delta = obj.end_at - n
-        return max(0, int(delta.total_seconds()))
 
 
 # -----------------
