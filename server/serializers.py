@@ -1,4 +1,5 @@
 from decimal import Decimal, ROUND_HALF_UP
+from sqlite3 import IntegrityError
 from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 
 from django.conf import settings
@@ -8,7 +9,7 @@ from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.utils import timezone
 from django.utils.http import urlsafe_base64_encode
 from django.utils.encoding import force_bytes
-from django.db import transaction
+from django.db import transaction, IntegrityError
 
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -978,7 +979,13 @@ class OrderCreateSerializer(serializers.Serializer):
         coupon_code = str((validated_data.get("coupon_code") or "")).strip()
         payment_method = str(validated_data.get("payment_method") or "")
         installments_months = cast(Optional[int], validated_data.get("installments_months"))
-        idempotency_key = str((validated_data.get("idempotency_key") or "")).strip() or None  # noqa: F841 if unused
+        idempotency_key = str((validated_data.get("idempotency_key") or "")).strip() or None 
+
+        # If a key is supplied and an order already exists, return it (idempotent)
+        if idempotency_key:
+            existing = Order.objects.filter(idempotency_key=idempotency_key).first()
+            if existing:
+                return existing
 
         # totals (preliminary)
         subtotal = self._calc_subtotal(items_data)
@@ -992,35 +999,43 @@ class OrderCreateSerializer(serializers.Serializer):
 
 
         with transaction.atomic():
-            order = Order.objects.create(
-                user=user if user else None,
-                email=str(validated_data.get("email") or ""),
+            try:
+                order = Order.objects.create(
+                    user=user if user else None,
+                    email=str(validated_data.get("email") or ""),
 
-                # money fields (shipping/vat will be recomputed below)
-                subtotal=subtotal,
-                discount_total=discount,
-                shipping_price=Decimal("0.00"),
-                vat_total=Decimal("0.00"),
-                total_price=total_after_discount,
+                    # money fields (shipping/vat will be recomputed below)
+                    subtotal=subtotal,
+                    discount_total=discount,
+                    shipping_price=Decimal("0.00"),
+                    vat_total=Decimal("0.00"),
+                    total_price=total_after_discount,
 
-                # payment
-                payment_method=payment_method,
-                installments_months=installments_months if installments_months else None,
-                stock_locked=False,
-                stock_released=False,
-                status="pending",
-                # snapshot shipping
-                ship_first_name=str(shipping_data.get("first_name") or ""),
-                ship_last_name=str(shipping_data.get("last_name") or ""),
-                ship_line1=str(shipping_data.get("line1") or ""),
-                ship_line2=str(shipping_data.get("line2") or ""),
-                ship_postal=str(shipping_data.get("postal_code") or ""),
-                ship_city=str(shipping_data.get("city") or ""),
-                ship_country=str(shipping_data.get("country") or ""),
-                ship_phone=str(shipping_data.get("phone") or ""),
-                ship_street_name=str(shipping_data.get("street_name") or ""),
-                ship_house_number=str(shipping_data.get("house_number") or ""),
-            )
+                    # payment
+                    payment_method=payment_method,
+                    installments_months=installments_months if installments_months else None,
+                    stock_locked=False,
+                    stock_released=False,
+                    status="pending",
+                    # snapshot shipping
+                    ship_first_name=str(shipping_data.get("first_name") or ""),
+                    ship_last_name=str(shipping_data.get("last_name") or ""),
+                    ship_line1=str(shipping_data.get("line1") or ""),
+                    ship_line2=str(shipping_data.get("line2") or ""),
+                    ship_postal=str(shipping_data.get("postal_code") or ""),
+                    ship_city=str(shipping_data.get("city") or ""),
+                    ship_country=str(shipping_data.get("country") or ""),
+                    ship_phone=str(shipping_data.get("phone") or ""),
+                    ship_street_name=str(shipping_data.get("street_name") or ""),
+                    ship_house_number=str(shipping_data.get("house_number") or ""),
+                    idempotency_key=idempotency_key,
+                )
+            except IntegrityError:
+                # Race: another request created the order with the same key just now.
+                if idempotency_key:
+                    order = Order.objects.get(idempotency_key=idempotency_key)
+                else:
+                    raise
 
             # Create items and compute using product.final_price_gross
             for it in items_data:

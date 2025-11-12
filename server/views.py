@@ -1238,14 +1238,20 @@ class ActivePromotionAPIView(APIView):
         now = timezone.now()
         country = (request.GET.get("country") or request.headers.get("X-Country") or "DE").upper()
 
+        # Be forgiving: handle NULL start/end and NULL/empty country_whitelist
         qs = (
-            PromotionBanner.objects.filter(
-                is_enabled=True,
-                start_at__lte=now,
-                end_at__gte=now,
-            )
+            PromotionBanner.objects
+            .filter(is_enabled=True)
+            .filter(Q(start_at__lte=now) | Q(start_at__isnull=True))
+            .filter(Q(end_at__gte=now) | Q(end_at__isnull=True))
             .order_by("-priority", "-updated_at")
-            .filter(Q(country_whitelist=[]) | Q(country_whitelist__contains=[country]))
+        )
+
+        # Allow promos for everyone (NULL or empty) OR containing the country code
+        qs = qs.filter(
+            Q(country_whitelist__isnull=True) |
+            Q(country_whitelist__len=0) |
+            Q(country_whitelist__contains=[country])
         )
 
         promo = qs.first()
