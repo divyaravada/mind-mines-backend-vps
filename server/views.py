@@ -1198,7 +1198,8 @@ class CouponPreviewAPIView(APIView):
                 return Response({"ok": False, "error": "qty must be >= 1"}, status=400)
 
             p = get_object_or_404(Product, pk=pid)
-            unit = Decimal(str(getattr(p, "final_price_gross", None) or p.price_gross))
+            unit = getattr(p, "final_price_gross", None) or p.price_gross
+            unit = Decimal(str(unit))
             subtotal += unit * qty
 
         coup = Coupon.objects.filter(code__iexact=code).first()
@@ -1254,6 +1255,8 @@ class ActivePromotionAPIView(APIView):
         ser = PromotionSerializer(promo, context={"request": request})
         data: Dict[str, Any] = dict(ser.data)  # make it mutable for type checkers
         data["active"] = True
+        # expose explicit code for the promo bar click-to-apply UX
+        data["code"] = promo.current_code()
         return Response(data, status=200)
 
 # -----------------------------------------------------------------------------

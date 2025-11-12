@@ -703,11 +703,12 @@ class CouponAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 @admin.register(PromotionBanner)
 class PromotionBannerAdmin(admin.ModelAdmin):
-    list_display = tuple([f for f in ["id", "headline", "is_enabled", "start_at", "end_at", "priority"] if hasattr(PromotionBanner, f)])
+    list_display = tuple([f for f in ["id", "name", "headline", "is_enabled", "start_at", "end_at", "priority"] if hasattr(PromotionBanner, f)])
     list_filter  = tuple([f for f in ["is_enabled", "start_at", "end_at"] if hasattr(PromotionBanner, f)])
-    search_fields = tuple([f for f in ["headline", "subheadline"] if hasattr(PromotionBanner, f)])
+    search_fields = tuple([f for f in ["name", "headline", "subheadline"] if hasattr(PromotionBanner, f)])
 
     base_fields = [
+        "name", "coupon", "code",
         "headline", "subheadline", "is_enabled", "priority",
         "start_at", "end_at", "bg_color", "text_color",
         "link_url", "country_whitelist", "image"

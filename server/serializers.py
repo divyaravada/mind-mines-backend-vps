@@ -17,6 +17,7 @@ from django.core.mail import EmailMultiAlternatives
 from .models import (
     Cart,
     CartItem,
+    CouponRedemption,
     PromotionBanner,
     StockAlert,
     ReturnRequest,
@@ -939,12 +940,7 @@ class OrderCreateSerializer(serializers.Serializer):
             total += unit * qty
         return quant2(total)
 
-    def _apply_coupon(
-    self,
-    subtotal: Decimal,
-    code: str,
-    user: Optional[Any],
-) -> Tuple[Decimal, Decimal, Optional["Coupon"]]:
+    def _apply_coupon(self, subtotal: Decimal, code: str, user: Optional[Any]) -> Tuple[Decimal, Decimal, Optional["Coupon"]]:
         if not code:
             return subtotal, Decimal("0.00"), None
 
@@ -1040,6 +1036,14 @@ class OrderCreateSerializer(serializers.Serializer):
                     unit_price=unit,
                 )
 
+            # attach coupon to order NOW so UI can show it under the input
+            if coupon_obj:
+                CouponRedemption.objects.create(
+                    coupon=coupon_obj,
+                    user=user if user else None,
+                    order=order,
+                )
+
             # If you want to attach coupon to order via CouponRedemption, do it in your view/service:
             #   CouponRedemption.objects.create(coupon=coupon_obj, user=user if user else None, order=order)
             # Here we just recompute totals to populate vat_total, etc.
@@ -1088,7 +1092,7 @@ class PromotionSerializer(serializers.ModelSerializer):
     class Meta:
         model = PromotionBanner
         fields = [
-            "id",
+            "id","name"
             "headline",
             "subheadline",
             "code",
@@ -1111,14 +1115,17 @@ class PromotionSerializer(serializers.ModelSerializer):
     def get_code(self, obj):
         return obj.current_code()
 
-    def get_image(self, obj):
-        req = self.context.get("request")
-        try:
-            if obj.image and hasattr(obj.image, "url"):
-                return self._abs(req, obj.image.url)
-        except Exception:
-            pass
-        return ""
+    def get_image_url(self, obj):
+        request = self.context.get("request")
+        img = getattr(obj, "image", None)
+        if not img:
+            return None
+        url = getattr(img, "url", None)
+        if not url:
+            return None
+        if request and not str(url).startswith(("http://", "https://")):
+            return request.build_absolute_uri(url)
+        return url
 
     def get_remaining_seconds(self, obj):
         n = timezone.now()

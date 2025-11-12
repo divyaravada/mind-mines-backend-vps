@@ -1078,6 +1078,8 @@ class OrderItem(models.Model):
 
 # ----------------- Coupons & Promotions -----------------
 
+
+
 DISCOUNT_TYPES = [("percent", "Percent"), ("fixed", "Fixed amount")]
 
 
@@ -1136,12 +1138,13 @@ class Coupon(models.Model):
                 pid = it.product_id
                 qty = it.quantity
                 unit = it.unit_price  # already gross
-                cat = it.product.category if it.product else None
+                cat = it.product.category if getattr(it, "product", None) else None
             else:
                 pid = int(it.get("product_id"))
-                qty = int(it.get("qty"))
+                qty = int(it.get("qty", 1))
                 p = Product.objects.get(pk=pid)
-                unit = p.final_price_gross
+                unit = getattr(p, "final_price_gross", None) or p.price_gross
+                unit = Decimal(str(unit))
                 cat = p.category
 
             ok = True
@@ -1166,6 +1169,7 @@ class Coupon(models.Model):
         if Decimal(cart_subtotal) < self.min_subtotal:
             return False, f"Minimum order amount is {self.min_subtotal:.2f} €."
 
+        # count only paid redemptions towards limits
         paid_q = CouponRedemption.objects.filter(coupon=self, order__status="paid")
 
         if self.max_uses is not None and paid_q.count() >= self.max_uses:
@@ -1173,7 +1177,8 @@ class Coupon(models.Model):
 
         if user and self.max_uses_per_user is not None:
             user_paid = paid_q.filter(user=user).count()
-            has_open = Order.objects.filter(user=user, couponredemption__coupon=self).exclude(status__in=["cancelled", "failed"]).exists()
+            has_open = Order.objects.filter(user=user, coupon_redemption__coupon=self)\
+                                    .exclude(status__in=["cancelled", "failed"]).exists()
             if user_paid >= self.max_uses_per_user or has_open:
                 return False, "You have already used this coupon."
 
