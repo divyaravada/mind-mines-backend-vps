@@ -1101,7 +1101,7 @@ class CouponPreviewIn(serializers.Serializer):
 
 class PromotionSerializer(serializers.ModelSerializer):
     code = serializers.SerializerMethodField()
-    image = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
 
     class Meta:
         model = PromotionBanner

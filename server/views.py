@@ -33,6 +33,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.renderers import JSONRenderer
 
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
@@ -1233,37 +1234,38 @@ class CouponPreviewAPIView(APIView):
 
 class ActivePromotionAPIView(APIView):
     permission_classes = [AllowAny]
+    renderer_classes = [JSONRenderer]
 
     def get(self, request):
-        now = timezone.now()
-        country = (request.GET.get("country") or request.headers.get("X-Country") or "DE").upper()
+        try:
+            now = timezone.now()
+            country = (request.GET.get("country") or request.headers.get("X-Country") or "DE").upper()
 
-        # Be forgiving: handle NULL start/end and NULL/empty country_whitelist
-        qs = (
-            PromotionBanner.objects
-            .filter(is_enabled=True)
-            .filter(Q(start_at__lte=now) | Q(start_at__isnull=True))
-            .filter(Q(end_at__gte=now) | Q(end_at__isnull=True))
-            .order_by("-priority", "-updated_at")
-        )
+            qs = (
+                    PromotionBanner.objects
+                    .filter(is_enabled=True)
+                    .filter(Q(start_at__lte=now) | Q(start_at__isnull=True))
+                    .filter(Q(end_at__gte=now) | Q(end_at__isnull=True))
+                    .order_by("-priority", "-updated_at")
+                ).filter(
+                    Q(country_whitelist__isnull=True) |
+                    Q(country_whitelist__len=0) |
+                    Q(country_whitelist__contains=[country])
+                )
 
-        # Allow promos for everyone (NULL or empty) OR containing the country code
-        qs = qs.filter(
-            Q(country_whitelist__isnull=True) |
-            Q(country_whitelist__len=0) |
-            Q(country_whitelist__contains=[country])
-        )
+            promo = qs.first()
+            if not promo:
+                return Response({"active": False}, status=200)
 
-        promo = qs.first()
-        if not promo:
+            ser = PromotionSerializer(promo, context={"request": request})
+            data: Dict[str, Any] = dict(ser.data)  # make it mutable for type checkers
+            data["active"] = True
+            # expose explicit code for the promo bar click-to-apply UX
+            data["code"] = promo.current_code()
+            return Response(data, status=200)
+        except Exception:
+            logger.exception("Failed to get active promotion")
             return Response({"active": False}, status=200)
-
-        ser = PromotionSerializer(promo, context={"request": request})
-        data: Dict[str, Any] = dict(ser.data)  # make it mutable for type checkers
-        data["active"] = True
-        # expose explicit code for the promo bar click-to-apply UX
-        data["code"] = promo.current_code()
-        return Response(data, status=200)
 
 # -----------------------------------------------------------------------------
 # Misc
