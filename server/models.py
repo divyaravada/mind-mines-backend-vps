@@ -1228,8 +1228,8 @@ class PromotionBanner(models.Model):
     coupon = models.ForeignKey("Coupon", null=True, blank=True, on_delete=models.SET_NULL, related_name="promotions")
     code = models.CharField(max_length=32, blank=True, help_text="Optional manual code (used if coupon FK empty)")
 
-    headline = models.CharField(max_length=120)
-    subheadline = models.CharField(max_length=180, blank=True)
+    headline = models.CharField(max_length=1020)
+    subheadline = models.CharField(max_length=1080, blank=True)
     start_at = models.DateTimeField()
     end_at = models.DateTimeField()
     is_enabled = models.BooleanField(default=True)
