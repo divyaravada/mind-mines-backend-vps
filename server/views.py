@@ -1716,9 +1716,8 @@ class StripeCreateRedirectIntent(APIView):
                     return Response({"detail": "Order validation failed", "errors": ve.detail}, status=400)
                 with transaction.atomic():
                     order = cast(Order, ser.save())
-                    order.payment_method = method
                     order.status = "pending"
-                    order.save(update_fields=["payment_method", "status"])
+                    order.save(update_fields=["status"])
 
             # Tell the type checker we’re guaranteed to have an Order now
             assert order is not None
