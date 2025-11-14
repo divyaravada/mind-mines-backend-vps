@@ -21,8 +21,8 @@ def _eur(v: Any) -> str:
     return f"{d:.2f} €"
 
 
-def _build_invoice_content(order:Any) -> bytes:
-    """Build a nice-looking single-page invoice content (no background)."""
+def _build_invoice_content(order: Any, lang: str = "en") -> bytes:
+    """Build a single-page invoice content in the given language (no background)."""
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf,
@@ -41,6 +41,54 @@ def _build_invoice_content(order:Any) -> bytes:
 
     created = localtime(order.created_at).strftime("%Y-%m-%d")
 
+    # Static texts per language
+    if lang == "de":
+        title_text = "RECHNUNG"
+        from_label = "Von"
+        bill_to_label = "Rechnung an"
+        details_label = "Details"
+        item_col = "Artikel"
+        qty_col = "Menge"
+        unit_col = "Einzelpreis"
+        total_col = "Gesamt"
+        subtotal_label = "Zwischensumme"
+        shipping_label = "Versand"
+        total_label = "Gesamtbetrag"
+        free_shipping_text = "Kostenlos"
+        thankyou_text = (
+            "Vielen Dank für Ihren Einkauf. Wenn Sie per Banküberweisung bezahlt haben, "
+            "geben Sie bitte die Referenznummer aus Ihrer Bestellbestätigung an. "
+            "Rückgaben sind innerhalb von 15 Tagen im Originalzustand möglich."
+        )
+        invoice_no_label = "Rechnungs-Nr."
+        order_no_label = "Bestell-Nr."
+        date_label = "Datum"
+        payment_method_label = "Zahlungsart"
+        status_label_txt = "Status"
+    else:
+        title_text = "INVOICE"
+        from_label = "From"
+        bill_to_label = "Bill to"
+        details_label = "Details"
+        item_col = "Item"
+        qty_col = "Qty"
+        unit_col = "Unit"
+        total_col = "Total"
+        subtotal_label = "Subtotal"
+        shipping_label = "Shipping"
+        total_label = "Total"
+        free_shipping_text = "Free"
+        thankyou_text = (
+            "Thank you for your purchase. If you paid by bank transfer, please include the "
+            "reference number from your order confirmation. Returns accepted within 15 days "
+            "in original condition."
+        )
+        invoice_no_label = "Invoice no."
+        order_no_label = "Order no."
+        date_label = "Date"
+        payment_method_label = "Payment method"
+        status_label_txt = "Status"
+
     # Company block – adjust if you want to pull from settings
     company_lines: List[str] = [
         "<b>MindMines GbR</b>",
@@ -56,7 +104,8 @@ def _build_invoice_content(order:Any) -> bytes:
     full_name = (
         (" ".join([getattr(a, "first_name", "") or "", getattr(a, "last_name", "") or ""]).strip())
         or getattr(a, "full_name", "")
-        or getattr(getattr(order, "user", None), "email", ""))
+        or getattr(getattr(order, "user", None), "email", "")
+    )
     line1 = getattr(a, "address_line1", "") or (
         f"{getattr(a, 'street_name','')} {getattr(a,'house_number','')}".strip()
     )
@@ -75,24 +124,24 @@ def _build_invoice_content(order:Any) -> bytes:
     # Meta block
     status_label = str(order.status).upper()
     meta_lines: List[str] = [
-        f"Invoice no.: <b>{order.invoice_number or '-'}</b>",
-        f"Order no.: <b>{order.number}</b>",
-        f"Date: <b>{created}</b>",
-        f"Payment method: <b>{order.payment_method.title()}</b>",
-        f"Status: <b>{status_label}</b>",
+        f"{invoice_no_label}: <b>{order.invoice_number or '-'}</b>",
+        f"{order_no_label}: <b>{order.number}</b>",
+        f"{date_label}: <b>{created}</b>",
+        f"{payment_method_label}: <b>{order.payment_method.title()}</b>",
+        f"{status_label_txt}: <b>{status_label}</b>",
     ]
 
-    # Header + meta grid (2 columns)
     elems: List[Flowable] = []
-    elems.append(Paragraph("INVOICE", H1))
+    elems.append(Paragraph(title_text, H1))
     elems.append(Spacer(1, 4))
 
+    # Header + meta grid (2 columns)
     meta_tbl = Table(
         [
-            [Paragraph("<b>From</b>", N), Paragraph("<b>Bill to</b>", N)],
+            [Paragraph(f"<b>{from_label}</b>", N), Paragraph(f"<b>{bill_to_label}</b>", N)],
             [Paragraph("<br/>".join(company_lines), N), Paragraph("<br/>".join(bill_lines), N)],
             ["", ""],
-            [Paragraph("<b>Details</b>", N), ""],
+            [Paragraph(f"<b>{details_label}</b>", N), ""],
             [Paragraph("<br/>".join(meta_lines), N), ""],
         ],
         colWidths=[90 * mm, 90 * mm],
@@ -111,7 +160,7 @@ def _build_invoice_content(order:Any) -> bytes:
     elems.append(Spacer(1, 8))
 
     # Line items
-    row0: List[Union[str, Paragraph]] = ["Item", "Qty", "Unit", "Total"]
+    row0: List[Union[str, Paragraph]] = [item_col, qty_col, unit_col, total_col]
     data: List[List[Union[str, Paragraph]]] = [row0]
     for oi in order.items.all():  # type: ignore[attr-defined]
         data.append(
@@ -147,16 +196,21 @@ def _build_invoice_content(order:Any) -> bytes:
     elems.append(Spacer(1, 10))
 
     # Totals box
-    ship_display = "Free" if not getattr(order, "shipping_price", None) or Decimal(order.shipping_price) == 0 else _eur(order.shipping_price)
-    def bold(text):
-        return f'''{text}'''
+    ship_display = (
+        free_shipping_text
+        if not getattr(order, "shipping_price", None) or Decimal(order.shipping_price) == 0
+        else _eur(order.shipping_price)
+    )
+
+    def bold(text: str) -> str:
+        return f"{text}"
 
     totals_tbl = Table(
         [
-            ["Subtotal", _eur(order.subtotal)],
-            ["Shipping", ship_display],
+            [subtotal_label, _eur(order.subtotal)],
+            [shipping_label, ship_display],
             ["", ""],
-            ['Total', bold(f"{_eur(order.total_price)}")],
+            [total_label, bold(f"{_eur(order.total_price)}")],
         ],
         colWidths=[120 * mm, 50 * mm],
         hAlign="RIGHT",
@@ -168,7 +222,6 @@ def _build_invoice_content(order:Any) -> bytes:
                 ("FONTNAME", (0, 3), (-1, 3), "Helvetica-Bold"),
                 ("TOPPADDING", (0, 0), (-1, -1), 2),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                
             ]
         ),
     )
@@ -176,11 +229,7 @@ def _build_invoice_content(order:Any) -> bytes:
     elems.append(Spacer(1, 10))
 
     # Notes
-    note = Paragraph(
-        "Thank you for your purchase. If you paid by bank transfer, please include the "
-        "reference number from your order confirmation. Returns accepted within 15 days in original condition.",
-        N,
-    )
+    note = Paragraph(thankyou_text, N)
     elems.append(note)
 
     # Build
@@ -191,8 +240,8 @@ def _build_invoice_content(order:Any) -> bytes:
 def generate_invoice_pdf(order):
     """
     Idempotent. If an invoice with a file exists, returns it.
-    Otherwise, builds a polished content PDF and overlays it onto
-    static/pdf/Mindmines template.pdf when available.
+    Otherwise, builds a polished content PDF in German (page 1)
+    and English (page 2), optionally overlaid on a static template.
     """
     # Reuse if already generated
     inv = getattr(order, "invoice", None)
@@ -203,33 +252,49 @@ def generate_invoice_pdf(order):
     order.assign_unique_invoice_number()
     number = order.invoice_number
 
-    # Build content
-    content_bytes = _build_invoice_content(order)
+    # Build content for both languages
+    content_de_bytes = _build_invoice_content(order, lang="de")
+    content_en_bytes = _build_invoice_content(order, lang="en")
 
-    # Try to overlay on brand template (optional)
-    pdf_bytes = content_bytes
+    # Read as PDFs
+    de_reader = PdfReader(BytesIO(content_de_bytes))  # type: ignore[call-arg]
+    en_reader = PdfReader(BytesIO(content_en_bytes))  # type: ignore[call-arg]
+
+    pages: List[Any] = []
+    pages.extend(getattr(de_reader, "pages", []) or [])
+    pages.extend(getattr(en_reader, "pages", []) or [])
+
+    pdf_bytes = b""
     template_path = finders.find("pdf/Mindmines template.pdf")
-    if template_path:
+    writer = PdfWriter()
+    out_buf = BytesIO()
+
+    if template_path and pages:
+        # For each page, overlay on a fresh copy of the first template page
         try:
-            tpl = PdfReader(template_path)  # type: ignore[call-arg]
-            overlay_reader = PdfReader(BytesIO(content_bytes))  # type: ignore[call-arg]
+            for overlay_page in pages:
+                tpl = PdfReader(template_path)  # fresh reader each time
+                tpl_pages: Sequence[Any] = cast(Sequence[Any], getattr(tpl, "pages", []) or [])
+                if not tpl_pages:
+                    # no pages in template, just use overlay
+                    writer.addpage(overlay_page)
+                    continue
 
-            tpl_pages: Sequence[Any] = cast(Sequence[Any], getattr(tpl, "pages", []) or [])
-            ovl_pages: Sequence[Any] = cast(Sequence[Any], getattr(overlay_reader, "pages", []) or [])
-
-            if tpl_pages and ovl_pages:
                 base_page = tpl_pages[0]
-                overlay_page = ovl_pages[0]
                 PageMerge(base_page).add(overlay_page).render()
-                out = BytesIO()
-                writer = PdfWriter()
                 writer.addpage(base_page)
-                writer.write(out)
-                pdf_bytes = out.getvalue()
-            else:
-                pdf_bytes = content_bytes
         except Exception:
-            pdf_bytes = content_bytes
+            # Fallback: no template overlay, just plain pages
+            writer = PdfWriter()
+            for p in pages:
+                writer.addpage(p)
+    else:
+        # No template, just use the content pages
+        for p in pages:
+            writer.addpage(p)
+
+    writer.write(out_buf)
+    pdf_bytes = out_buf.getvalue()
 
     # Save to FileField via Invoice model
     invoice = inv or Invoice(order=order, number=number)

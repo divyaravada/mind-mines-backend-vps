@@ -1046,9 +1046,6 @@ class OrderListAPIView(generics.ListAPIView):
 
     def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
         return Order.objects.filter(user=self.request.user).order_by("-created_at")
-    def list(self, request, *args, **kwargs):
-        ser = self.get_serializer(self.get_queryset(), many=True, context={"request": request})
-        return Response(ser.data)
 
 class OrderCreateView(APIView):
     permission_classes = [AllowAny]

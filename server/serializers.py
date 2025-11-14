@@ -751,20 +751,36 @@ class OrderReadSerializer(serializers.ModelSerializer):
         return url
 
     def get_invoice_pdf(self, obj):
-        request = self.context.get("request")
+        request = self.context.get("request") if hasattr(self, "context") else None
+
+        def _abs(url):
+            if not url:
+                return None
+            s = str(url)
+            if request and not s.startswith(("http://", "https://")):
+                return request.build_absolute_uri(s)
+            return s
+
         # Prefer related Invoice model (Invoice.pdf)
         try:
             inv = getattr(obj, "invoice", None)
-            f = getattr(inv, "pdf", None)
-            if f and getattr(f, "url", None):
-                return self._abs(request, f.url)
+            if inv is not None:
+                f = getattr(inv, "pdf", None)
+                if f is not None:
+                    url = getattr(f, "url", None)
+                    if url:
+                        return _abs(url)
         except Exception:
+            # don't break the whole orders endpoint if invoice is weird
             pass
+        
         # Fallback: legacy FileField on Order (if ever existed)
         try:
             f = getattr(obj, "invoice_pdf", None)
-            if f and getattr(f, "url", None):
-                return self._abs(request, f.url)
+            if f is not None:
+                url = getattr(f, "url", None)
+                if url:
+                    return _abs(url)
         except Exception:
             pass
         return None
