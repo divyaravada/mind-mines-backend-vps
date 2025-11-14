@@ -1694,99 +1694,83 @@ class StripeCreateRedirectIntent(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        try:
-            method = (request.data.get("method") or "").strip().lower()
-            if method not in {"klarna", "giropay"}:
-                return Response({"detail": "method must be 'klarna' or 'giropay'."}, status=400)
+        
+        method = (request.data.get("method") or "").strip().lower()
+        if method not in {"klarna", "giropay"}:
+            return Response({"detail": "method must be 'klarna' or 'giropay'."}, status=400)
 
-            order: Optional[Order] = None
-
-            order_id = request.data.get("order_id")
-            if order_id:
-                try:
-                    with transaction.atomic():
-                        order = Order.objects.select_for_update().get(pk=order_id)
-                except Order.DoesNotExist:
-                    return Response({"detail": "Order not found."}, status=404)
-            else:
-                ser = OrderCreateSerializer(data=request.data, context={"request": request})
-                try:
-                    ser.is_valid(raise_exception=True)
-                except serializers.ValidationError as ve:
-                    return Response({"detail": "Order validation failed", "errors": ve.detail}, status=400)
-                with transaction.atomic():
-                    order = cast(Order, ser.save())
-                    order.status = "pending"
-                    order.save(update_fields=["status"])
-
-            # Tell the type checker we’re guaranteed to have an Order now
-            assert order is not None
-            # sanity checks
-            if order.total_price is None or Decimal(order.total_price) <= Decimal("0.00"):
-                return Response({"detail": "Total must be > 0."}, status=400)
-            if order.status not in ("pending", "processing"):
-                return Response({"detail": f"Order not payable in status '{order.status}'"}, status=400)
-
-            currency = getattr(settings, "STRIPE_CURRENCY", "eur")
-            email_str: str = (order.email or "").strip()  # always a str
-
-            # Reuse PI if it already matches this method/amount/currency; else create new
-            intent: Optional[_PaymentIntent] = None
-            try:
-                if order.stripe_pi:
-                    current: Any = stripe.PaymentIntent.retrieve(order.stripe_pi)
-                    if isinstance(current, dict):
-                        pmt_types = current.get("payment_method_types") or []
-                        if (
-                            isinstance(pmt_types, list)
-                            and pmt_types == [method]
-                            and current.get("currency") == currency
-                            and int(current.get("amount") or -1) == _amount_cents(Decimal(order.total_price))
-                        ):
-                            intent = cast(_PaymentIntent, current)
-            except stripe_error.StripeError:
-                intent = None
-
-            if not intent:
-                try:
-                    kwargs: Dict[str, Any] = dict(
-                        amount=_amount_cents(Decimal(order.total_price)),
-                        currency=currency,
-                        payment_method_types=[method],
-                        description=f"Order {order.number or order.id} — MindMines Payment",
-                        metadata={"order_id": str(order.id)},
-                    )
-                    # Only include receipt_email if we actually have one (avoids Optional[str])
-                    if email_str:
-                        kwargs["receipt_email"] = email_str
-
-                    created: Any = stripe.PaymentIntent.create(**kwargs)
-                    # stripe returns dict-like; narrow to our minimal shape
-                    intent = cast(_PaymentIntent, created)
-                except stripe_error.StripeError as e:
-                    return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
-
-                order.payment_method = method
-                order.payment_ref = intent.get("id", "")  # safe even if missing
-                order.stripe_pi = intent.get("id", "")
-                order.save(update_fields=["payment_method", "payment_ref", "stripe_pi"])
-
-            # Final guard for type-checkers and runtime
-            if not intent or "client_secret" not in intent or "id" not in intent:
-                return Response({"detail": "Failed to obtain PaymentIntent."}, status=502)
-
+        order_id = request.data.get("order_id")
+        if order_id:
             return Response(
-                {"client_secret": intent["client_secret"], "order_id": order.id},
-                status=200,
+                {"detail": "order_id is required."},
+                status=400,
             )
-        except Exception as e:
-                # last-resort JSON error instead of HTML 500 page
-                logger.exception("StripeCreateRedirectIntent failed")
-                return Response(
-                    {"detail": "Internal error while creating redirect PaymentIntent.",
-                    "error": str(e)},
-                    status=500,
+        try:
+            with transaction.atomic():
+                order = Order.objects.select_for_update().get(pk=order_id)
+        except Order.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=404)
+
+        # sanity checks
+        if order.total_price is None or Decimal(order.total_price) <= Decimal("0.00"):
+            return Response({"detail": "Total must be > 0."}, status=400)
+        if order.status not in ("pending", "processing"):
+            return Response({"detail": f"Order not payable in status '{order.status}'"}, status=400)
+
+        
+        currency = getattr(settings, "STRIPE_CURRENCY", "eur")
+        email_str: str = (order.email or "").strip()  # always a str
+
+        # Reuse PI if it already matches this method/amount/currency; else create new
+        intent: Optional[_PaymentIntent] = None
+        try:
+            if order.stripe_pi:
+                current: Any = stripe.PaymentIntent.retrieve(order.stripe_pi)
+                if isinstance(current, dict):
+                    pmt_types = current.get("payment_method_types") or []
+                    if (
+                        isinstance(pmt_types, list)
+                        and pmt_types == [method]
+                        and current.get("currency") == currency
+                        and int(current.get("amount") or -1) == _amount_cents(Decimal(order.total_price))
+                    ):
+                        intent = cast(_PaymentIntent, current)
+        except stripe_error.StripeError:
+            intent = None
+
+        if not intent:
+            try:
+                kwargs: Dict[str, Any] = dict(
+                    amount=_amount_cents(Decimal(order.total_price)),
+                    currency=currency,
+                    payment_method_types=[method],
+                    description=f"Order {order.number or order.id} — MindMines Payment",
+                    metadata={"order_id": str(order.id)},
                 )
+                # Only include receipt_email if we actually have one (avoids Optional[str])
+                if email_str:
+                    kwargs["receipt_email"] = email_str
+
+                created: Any = stripe.PaymentIntent.create(**kwargs)
+                # stripe returns dict-like; narrow to our minimal shape
+                intent = cast(_PaymentIntent, created)
+            except stripe_error.StripeError as e:
+                return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
+
+            order.payment_method = method
+            order.payment_ref = intent.get("id", "")  # safe even if missing
+            order.stripe_pi = intent.get("id", "")
+            order.save(update_fields=["payment_method", "payment_ref", "stripe_pi"])
+
+        # Final guard for type-checkers and runtime
+        if not intent or "client_secret" not in intent or "id" not in intent:
+            return Response({"detail": "Failed to obtain PaymentIntent."}, status=502)
+
+        return Response(
+            {"client_secret": intent["client_secret"], "order_id": order.id},
+            status=200,
+        )
+       
 
 # ---------------------------
 # STRIPE: card installments (authenticated only)
