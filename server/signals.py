@@ -132,7 +132,7 @@ def ensure_order_number(sender, instance: Order, created, **kwargs):
         try:
             instance.assign_unique_order_number()
         except AttributeError:
-            instance.number = f"MM{instance.pk:08d}"
+            instance.number = f"MM2026{instance.pk:04d}"
         type(instance).objects.filter(pk=instance.pk).update(number=instance.number)
 
 def stamp_status_times(sender, instance: Order, created, **kwargs):

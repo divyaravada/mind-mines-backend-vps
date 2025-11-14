@@ -752,8 +752,8 @@ class Order(models.Model):
     # ---- numbering & totals ----
 
     def _generate_admin_number(self) -> str:
-        # MM######## using DB pk to avoid collisions
-        return f"MM{self.pk:08d}"
+        # MM#### using DB pk to avoid collisions
+        return f"MM2026{self.pk:04d}"
 
     def ensure_number(self):
         if not self.number and self.pk:
