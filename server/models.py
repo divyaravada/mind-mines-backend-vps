@@ -648,12 +648,13 @@ class CartItem(models.Model):
 class Order(models.Model):
     PAYMENT_METHODS = [
         ("card", "Card"),
-        ("card_installments", "Card installments"),
-        ("sepa_debit", "SEPA Direct Debit"),
-        ("sepa_installments", "SEPA Direct Debit Installments"),
-        ("klarna", "Klarna (Stripe Klarna)"),
-        ("paypal", "PayPal / PayPal Pay Later"),
+        ("card_installments", "Card Installments"),
+        ("sepa_debit", "SEPA Debit"),
+        ("sepa_installments", "SEPA Installments"),        
+        ("paypal", "PayPal"),
         ("giropay", "Giropay"),
+        ("klarna_single", "Klarna (single payment)"),
+        ("klarna_installments", "Klarna (installments)"),
             ]
 
     STATUS_CHOICES = [

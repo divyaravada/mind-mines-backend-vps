@@ -898,13 +898,11 @@ class OrderCreateSerializer(serializers.Serializer):
             "sepa_debit_installments": "sepa_installments",
             "sepa_installments": "sepa_installments",
             "sepa": "sepa_debit",
-            "manual_dd": "bank_transfer",
-            "direct_debit": "bank_transfer",
-            "bank": "bank_transfer",
-            "bank_transfer": "bank_transfer",
             "paypal": "paypal",
             "giropay": "giropay",
-            "klarna": "klarna",
+            "klarna": "klarna_single",        
+            "klarna_single": "klarna_single",
+            "klarna_installments": "klarna_installments",
         }
         key = str((attrs.get("payment_method") or "")).strip().lower() or "card"
         attrs["payment_method"] = aliases.get(key, key)
