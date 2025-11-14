@@ -9,6 +9,7 @@ from django.core.mail import EmailMultiAlternatives, send_mail, get_connection
 from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.utils import timezone
 from .guest_invoices import build_guest_invoice_download_url
+from .invoices import generate_invoice_pdf
 
 logger = logging.getLogger(__name__)
 CURRENCY = "€"
@@ -502,6 +503,14 @@ def send_installments_started_email(
     mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
 
     if attach_invoice:
+        # ✅ Ensure invoice exists before attaching
+        try:
+            generate_invoice_pdf(order)
+        except Exception:
+            logger.exception(
+                "send_installments_started_email: failed to (re)generate invoice for order %s",
+                getattr(order, "id", "?"),
+            )
         try:
             with get_connection() as conn:
                 msg = EmailMultiAlternatives(
@@ -572,6 +581,15 @@ def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None)
     to_email = (to or _order_email(order))
     if not to_email:
         return False
+
+    # ✅ Ensure invoice exists (idempotent – safe to call multiple times)
+    try:
+        generate_invoice_pdf(order)
+    except Exception:
+        logger.exception(
+            "send_invoice_email: failed to (re)generate invoice for order %s",
+            getattr(order, "id", "?"),
+        )
 
     num = getattr(order, "number", None) or f"#{order.id}"
     subject_en = _tr("en", "subject_invoice", num=num)
