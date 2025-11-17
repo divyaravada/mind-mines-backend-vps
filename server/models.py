@@ -310,18 +310,6 @@ class Product(models.Model):
     descriptionpara3_en = models.TextField(blank=True)
     descriptionpara3_de = models.TextField(blank=True)
 
-    # care / delivery / returns text content
-    carepara_en = models.TextField(blank=True)
-    carepara_de = models.TextField(blank=True)
-    delivery_en = models.TextField(blank=True)
-    delivery_de = models.TextField(blank=True)
-    returnspara1_en = models.TextField(blank=True)
-    returnspara1_de = models.TextField(blank=True)
-    returnspara2_en = models.TextField(blank=True)
-    returnspara2_de = models.TextField(blank=True)
-    returnspara3_en = models.TextField(blank=True)
-    returnspara3_de = models.TextField(blank=True)
-
     # attributes
     type_of_stone = models.CharField(max_length=50, choices=STONE_TYPES, blank=True, null=True)
     material = models.CharField(max_length=20, choices=MATERIAL_CHOICES, default="marble", blank=True, null=True)
