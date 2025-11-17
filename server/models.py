@@ -309,6 +309,8 @@ class Product(models.Model):
     descriptionpara2_de = models.TextField(blank=True)
     descriptionpara3_en = models.TextField(blank=True)
     descriptionpara3_de = models.TextField(blank=True)
+    carepara_en = models.TextField(blank=True, null=True)
+    carepara_de = models.TextField(blank=True, null=True)
 
     # attributes
     type_of_stone = models.CharField(max_length=50, choices=STONE_TYPES, blank=True, null=True)
