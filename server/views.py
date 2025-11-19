@@ -2,6 +2,7 @@
 from os import truncate
 import json, re, requests as http
 import logging
+from itsdangerous import SignatureExpired, BadSignature
 from datetime import datetime, timedelta as td
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from typing import Any, Dict, List, Mapping, MutableMapping, Iterable, Optional, Tuple, Protocol, TypedDict, runtime_checkable, cast,Type
@@ -2787,6 +2788,12 @@ class GuestInvoiceDownloadView(APIView):
 
         try:
             order_id, invoice_no = parse_guest_invoice_token(token)
+        except SignatureExpired:
+            # token is valid but too old
+            return Response({"detail": "Invoice link has expired."}, status=400)
+        except BadSignature:
+            # completely invalid
+            return Response({"detail": "Invalid token."}, status=400)
         except Exception:
             return Response({"detail": "Invalid or expired token."}, status=400)
 
