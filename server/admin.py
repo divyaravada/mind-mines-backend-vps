@@ -475,7 +475,11 @@ class CustomUserAdmin(DjangoUserAdmin):
     def delete_queryset(self, request, queryset):
         blocked, ok = [], []
         for obj in queryset:
-            (blocked if self._has_order_links(obj) else ok).append(obj)
+            if self._has_order_links(obj):
+                blocked.append(obj)
+            else:
+                ok.append(obj)
+
         if ok:
             try:
                 super().delete_queryset(request, queryset.model.objects.filter(pk__in=[o.pk for o in ok]))
