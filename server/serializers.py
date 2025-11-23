@@ -270,9 +270,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         verification_link = f"{base}/verify-email/{uid}/{token}/"
 
         subject = "Verify your MindMines account"
-        text_body = (
-            "Please click the link to verify your email:\n" + verification_link
-        )
+        text_body = "Please click the link to verify your email:\n" + verification_link
         from_email = (
             getattr(settings, "DEFAULT_FROM_EMAIL", None)
             or getattr(settings, "EMAIL_HOST_USER", None)
