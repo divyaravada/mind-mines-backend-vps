@@ -454,7 +454,7 @@ class CustomUserAdmin(DjangoUserAdmin):
 
     def _has_order_links(self, user):
         # Any order directly referencing this user, or (legacy) via shipping_address FK
-        return Order.objects.filter(user=user).exists() or Order.objects.filter(shipping_address__user=user).exists()
+        return Order.objects.filter(user=user).exists()
 
     def delete_model(self, request, obj):
         if self._has_order_links(obj):
