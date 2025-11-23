@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Mapping, MutableMapping, Iterable, Optional,
 from django.db.models.functions import TruncDate
 from django.core.files.uploadedfile import UploadedFile
 from django.utils.datastructures import MultiValueDict
+from django.utils.encoding import force_str
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
@@ -1377,31 +1378,45 @@ def testEndPoint(request):
 
 @api_view(['GET'])
 def verify_email(request, uidb64, token):
+    # 1. Decode UID safely
     try:
-        uid = urlsafe_base64_decode(uidb64).decode()
-        user = User.objects.get(pk=uid)
-    except Exception:
+        uid = force_str(urlsafe_base64_decode(uidb64))
+    except (TypeError, ValueError, OverflowError, UnicodeDecodeError):
         return Response({"detail": "Invalid user ID"}, status=400)
 
+    # 2. Fetch user
+    try:
+        user = User.objects.get(pk=uid)
+    except User.DoesNotExist:
+        return Response({"detail": "Invalid user ID"}, status=400)
+
+    # 3. Already active?
     if user.is_active:
         return Response({"detail": "Account already verified"}, status=200)
 
+    # 4. Validate token
     if default_token_generator.check_token(user, token):
         user.is_active = True
         user.save()
         try:
             subj = "Welcome to MindMines / Willkommen bei MindMines"
-            en = ("Welcome! Your email has been verified successfully.<br/>"
-                  "You can now sign in and start shopping. Have fun!<br/>"
-                  "<a href='https://mindmines.eu'>mindmines.eu</a>")
-            de = ("Willkommen! Ihre E-Mail wurde erfolgreich verifiziert.<br/>"
-                  "Sie können sich jetzt anmelden und einkaufen. Viel Spaß!<br/>"
-                  "<a href='https://mindmines.eu'>mindmines.eu</a>")
+            en = (
+                "Welcome! Your email has been verified successfully.<br/>"
+                "You can now sign in and start shopping. Have fun!<br/>"
+                "<a href='https://mindmines.eu'>mindmines.eu</a>"
+            )
+            de = (
+                "Willkommen! Ihre E-Mail wurde erfolgreich verifiziert.<br/>"
+                "Sie können sich jetzt anmelden und einkaufen. Viel Spaß!<br/>"
+                "<a href='https://mindmines.eu'>mindmines.eu</a>"
+            )
             _send_bilingual(subj, user.email, f"<p>{en}</p>", f"<p>{de}</p>")
         except Exception:
             logger.exception("Failed to send happy-shopping email after verification")
+
         return Response({"detail": "Email verified successfully"}, status=200)
 
+    # 5. Token invalid or expired
     return Response({"detail": "Invalid or expired token"}, status=400)
 
 @api_view(["POST"])
@@ -1410,28 +1425,36 @@ def resend_verification_email(request):
     email_addr = request.data.get("email")
     if not email_addr:
         return Response({"detail": "Email is required."}, status=400)
+
     try:
         user = User.objects.get(email=email_addr)
     except User.DoesNotExist:
         return Response({"detail": "User not found."}, status=404)
+
     if user.is_active:
         return Response({"detail": "Account already verified."}, status=400)
+
     uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
     token = default_token_generator.make_token(user)
     base = getattr(settings, "FRONTEND_URL", "https://mindmines.eu").rstrip("/")
     link = f"{base}/verify-email/{uidb64}/{token}/"
+
     subject = "Resend: Verify your MindMines account"
     text_body = f"Please verify your email:\n{link}"
     from_email = settings.EMAIL_HOST_USER
+
     html_body = None
     try:
         html_body = render_to_string("emails/verification_email.html", {"user": user, "verification_link": link})
     except TemplateDoesNotExist:
         pass
+
     msg = EmailMultiAlternatives(subject=subject, body=text_body, from_email=from_email, to=[user.email])
     if html_body:
         msg.attach_alternative(html_body, "text/html")
+
     msg.send(fail_silently=not settings.DEBUG)
+
     payload = {"detail": "Verification email sent."}
     if settings.DEBUG:
         payload["dev_verification_link"] = link

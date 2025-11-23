@@ -254,15 +254,25 @@ class RegisterSerializer(serializers.ModelSerializer):
                 {"password": "Password fields didn't match."}
             )
         return attrs
-
+    
+    @transaction.atomic
     def create(self, validated_data):
-        user = User(
-            username=validated_data.get("username"),
-            email=validated_data["email"],
-            is_active=False,  # must verify email first
-        )
-        user.set_password(validated_data["password"])
-        user.save()
+        email = validated_data["email"]
+        username = validated_data.get("username") or ""
+
+        # Create user (inactive until email is verified)
+        try:
+            user = User(
+                username=username,
+                email=email,
+                is_active=False,
+            )
+            user.set_password(validated_data["password"])
+            user.save()
+        except IntegrityError:
+            # Email already taken or other unique constraint
+            raise serializers.ValidationError(
+                {"email": "A user with this email already exists."})
 
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = default_token_generator.make_token(user)
