@@ -1,5 +1,6 @@
 # server/signals.py
 from __future__ import annotations
+from sqlite3 import IntegrityError
 from typing import Any, cast
 
 from django.conf import settings
@@ -43,10 +44,18 @@ def create_or_update_user_profile(sender, instance, created, **kwargs):
     """
     Ensure Profile exists for every User.
     """
-    if created:
-        Profile.objects.create(user=instance)
-    else:
+    try:
         Profile.objects.get_or_create(user=instance)
+    except IntegrityError:
+        # Extremely rare race/legacy case:
+        # if duplicates somehow exist, just ensure there is exactly one.
+        qs = Profile.objects.filter(user=instance)
+        first = qs.first()
+        if first:
+            # delete any extras, keep the first
+            qs.exclude(pk=first.pk).delete()
+        else:
+            Profile.objects.create(user=instance)
 
 def remember_old_status(sender, instance: Order, **kwargs):
     """
