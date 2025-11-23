@@ -496,7 +496,7 @@ class CustomPasswordResetConfirmView(generics.GenericAPIView):
     permission_classes = [AllowAny]
     def post(self, request, uidb64, token, *args, **kwargs):
         try:
-            uid = urlsafe_base64_decode(uidb64).decode()
+            uid = force_str(urlsafe_base64_decode(uidb64))
             user = User.objects.get(pk=uid)
         except Exception:
             return Response(
