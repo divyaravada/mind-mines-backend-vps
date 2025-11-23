@@ -442,17 +442,19 @@ class CustomUserAdmin(DjangoUserAdmin):
         ("Important dates", {"fields": ("last_login", "date_joined")}),
     )
     add_fieldsets = (
-        (None, {"classes": ("wide",), "fields": ("email", "username", "password1", "password2", "is_staff", "is_active")}),
+        (
+            None,
+            {
+                "classes": ("wide",),
+                "fields": ("email", "username", "password1", "password2", "is_staff", "is_active"),
+            },
+        ),
     )
     search_fields = ("email", "username")
 
     def _has_order_links(self, user):
         # Any order directly referencing this user, or (legacy) via shipping_address FK
-        if Order.objects.filter(user=user).exists():
-            return True
-        if hasattr(Order, "shipping_address"):
-            return Order.objects.filter(Q(shipping_address__user=user)).exists()
-        return False
+        return Order.objects.filter(user=user).exists() or Order.objects.filter(shipping_address__user=user).exists()
 
     def delete_model(self, request, obj):
         if self._has_order_links(obj):
@@ -475,14 +477,14 @@ class CustomUserAdmin(DjangoUserAdmin):
     def delete_queryset(self, request, queryset):
         blocked, ok = [], []
         for obj in queryset:
-            if self._has_order_links(obj):
-                blocked.append(obj)
-            else:
-                ok.append(obj)
+            (blocked if self._has_order_links(obj) else ok).append(obj)
 
         if ok:
             try:
-                super().delete_queryset(request, queryset.model.objects.filter(pk__in=[o.pk for o in ok]))
+                super().delete_queryset(
+                    request,
+                    queryset.model.objects.filter(pk__in=[o.pk for o in ok]),
+                )
             except (ProtectedError, IntegrityError) as e:
                 self.message_user(
                     request,
@@ -492,8 +494,11 @@ class CustomUserAdmin(DjangoUserAdmin):
         if blocked:
             self.message_user(
                 request,
-                _("%d user(s) not deleted because orders reference them or their addresses. "
-                  "Deactivate instead.") % len(blocked),
+                _(
+                    "%d user(s) not deleted because orders reference them. "
+                    "Deactivate instead."
+                )
+                % len(blocked),
                 level=messages.WARNING,
             )
 
