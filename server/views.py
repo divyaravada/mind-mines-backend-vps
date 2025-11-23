@@ -412,40 +412,155 @@ class GoogleLoginAPIView(APIView):
 class CustomPasswordResetView(generics.GenericAPIView):
     permission_classes = [AllowAny]
     def post(self, request):
-        email = request.data.get("email")
-        user = User.objects.filter(email=email).first()
-        if user:
-            uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
-            token = default_token_generator.make_token(user)
-            reset_url = f"{getattr(settings, 'FRONTEND_URL', 'https://mindmines.eu').rstrip('/')}/reset-password/{uidb64}/{token}/"
-            message = render_to_string("registration/password_reset_email.html", {"reset_link": reset_url, "user": user})
-            send_mail(
-                subject="Reset Your Password",
-                message="Click the link to reset your password.",
-                html_message=message,
-                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", settings.EMAIL_HOST_USER),
-                recipient_list=[email],
-                fail_silently=True,
+        email = (request.data.get("email") or "").strip().lower()
+
+        if not email:
+            return Response(
+                {
+                    "code": "email_required",
+                    "detail": (
+                        "E-mail is required. / "
+                        "E-Mail-Adresse wird benötigt."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
-        return Response({"detail": "Password reset e-mail has been sent."}, status=200)
+
+        try:
+            user = User.objects.get(email__iexact=email)
+        except User.DoesNotExist:
+            # USER NOT REGISTERED
+            return Response(
+                {
+                    "code": "user_not_found",
+                    "detail": (
+                        "No account found with this e-mail address. / "
+                        "Kein Konto mit dieser E-Mail-Adresse gefunden."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # USER EXISTS → create token + reset link
+        uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
+        token = default_token_generator.make_token(user)
+
+        frontend_url = getattr(settings, "FRONTEND_URL", "https://mindmines.eu").rstrip("/")
+        reset_url = f"{frontend_url}/reset-password/{uidb64}/{token}/"
+
+        context = {
+            "reset_link": reset_url,
+            "user": user,
+        }
+
+        # Fallback plain-text (bilingual)
+        plain_message = (
+            "Reset your password using the link below:\n"
+            f"{reset_url}\n\n"
+            "Wenn Sie Ihr Passwort zurücksetzen möchten, verwenden Sie den folgenden Link:\n"
+            f"{reset_url}\n"
+        )
+
+        try:
+            html_message = render_to_string(
+                "registration/password_reset_email.html",
+                context,
+            )
+        except TemplateDoesNotExist:
+            html_message = None
+
+        send_mail(
+            subject="Reset your password / Passwort zurücksetzen",
+            message=plain_message,
+            html_message=html_message,
+            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", settings.EMAIL_HOST_USER),
+            recipient_list=[email],
+            fail_silently=False,
+        )
+
+        return Response(
+            {
+                "code": "reset_email_sent",
+                "detail": (
+                    "Password reset e-mail has been sent. / "
+                    "Die E-Mail zum Zurücksetzen des Passworts wurde gesendet."
+                ),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 
 class CustomPasswordResetConfirmView(generics.GenericAPIView):
     permission_classes = [AllowAny]
-    def post(self, request, uidb64, token):
+    def post(self, request, uidb64, token, *args, **kwargs):
         try:
             uid = urlsafe_base64_decode(uidb64).decode()
             user = User.objects.get(pk=uid)
         except Exception:
-            return Response({"error": "Invalid link"}, status=400)
+            return Response(
+                {
+                    "code": "invalid_link",
+                    "error": (
+                        "Invalid reset link. / "
+                        "Ungültiger Link zum Zurücksetzen."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if not default_token_generator.check_token(user, token):
-            return Response({"error": "Invalid or expired token"}, status=400)
+            return Response(
+                {
+                    "code": "invalid_or_expired_token",
+                    "error": (
+                        "Invalid or expired token. / "
+                        "Ungültiger oder abgelaufener Token."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         password1 = request.data.get("new_password1")
         password2 = request.data.get("new_password2")
+
+        if not password1 or not password2:
+            return Response(
+                {
+                    "code": "password_required",
+                    "error": (
+                        "Both password fields are required. / "
+                        "Beide Passwortfelder sind erforderlich."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if password1 != password2:
-            return Response({"error": "Passwords do not match"}, status=400)
+            return Response(
+                {
+                    "code": "password_mismatch",
+                    "error": (
+                        "Passwords do not match. / "
+                        "Die Passwörter stimmen nicht überein."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         user.set_password(password1)
         user.save()
-        return Response({"detail": "Password has been reset successfully."}, status=200)
+
+        return Response(
+            {
+                "code": "password_reset_success",
+                "detail": (
+                    "Password has been reset successfully. / "
+                    "Das Passwort wurde erfolgreich zurückgesetzt."
+                ),
+            },
+            status=status.HTTP_200_OK,
+        )
 
 # -----------------------------------------------------------------------------
 # Natural stones
