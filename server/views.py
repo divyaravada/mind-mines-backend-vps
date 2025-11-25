@@ -331,7 +331,9 @@ class AddressListCreateAPIView(generics.ListCreateAPIView):
 class AddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = AddressSerializer
+
     def get_queryset(self) -> QuerySet[Address]:  # type: ignore[override]
+        # Only allow the logged-in user to access their own addresses
         return Address.objects.filter(user=self.request.user)
 
     def get_serializer_context(self) -> dict[str, Any]:
@@ -339,10 +341,35 @@ class AddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         ctx["request"] = self.request
         return ctx
 
-    def perform_destroy(self, instance: Address) -> None:
+    def destroy(self, request, *args, **kwargs):
+        """
+        Custom delete:
+        - Only deletes addresses belonging to the current user (via get_queryset()).
+        - If the address is default, automatically assigns a new default if available.
+        - If the address is protected by related objects (e.g. Orders with PROTECT),
+          return a JSON error instead of a 500.
+        """
+        instance = self.get_object()
         user = instance.user
         was_default = instance.is_default
-        instance.delete()
+
+        try:
+            # this may raise ProtectedError / IntegrityError
+            instance.delete()
+        except (ProtectedError, IntegrityError):
+            return Response(
+                {
+                    "code": "address_in_use",
+                    "detail": (
+                        "This address is used by existing data (e.g. orders) and "
+                        "cannot be deleted. / Diese Adresse wird von vorhandenen "
+                        "Daten (z.B. Bestellungen) verwendet und kann nicht gelöscht werden."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # After successful delete: if it was default, pick a new default for that user
         if was_default:
             new_default = (
                 Address.objects.filter(user=user)
@@ -351,6 +378,8 @@ class AddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
             )
             if new_default:
                 new_default.set_default_for_user()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 class AddressSetDefaultAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
