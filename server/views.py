@@ -28,6 +28,8 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.timezone import make_aware,now
 from django.views.decorators.csrf import csrf_exempt
+from django.db.models.deletion import ProtectedError
+from django.db import IntegrityError
 
 from rest_framework import generics, permissions, serializers, filters, status
 from rest_framework.decorators import api_view, permission_classes
