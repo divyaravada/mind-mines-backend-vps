@@ -1190,6 +1190,7 @@ class WishlistDetailView(generics.DestroyAPIView):
 class OrderListAPIView(generics.ListAPIView):
     serializer_class = OrderReadSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = None
     queryset = Order.objects.all()
 
     def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
