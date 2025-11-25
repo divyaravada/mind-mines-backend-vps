@@ -1871,11 +1871,12 @@ class StripeCreateRedirectIntent(APIView):
             return Response({"detail": "method must be 'klarna' or 'giropay'."}, status=400)
 
         order_id = request.data.get("order_id")
-        if order_id:
+        if not order_id:
             return Response(
                 {"detail": "order_id is required."},
                 status=400,
             )
+
         try:
             with transaction.atomic():
                 order = Order.objects.select_for_update().get(pk=order_id)
