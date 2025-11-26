@@ -402,6 +402,53 @@ class OrderAdmin(admin.ModelAdmin):
                 rows
             )
         )
+    def save_model(self, request, obj, form, change):
+        """
+        When admin edits an order and saves, automatically send
+        a shipping email if shipping was just added / order marked as shipped.
+        """
+        prev = None
+        if change and obj.pk:
+            try:
+                prev = Order.objects.get(pk=obj.pk)
+            except Order.DoesNotExist:
+                prev = None
+
+        # Save changes first
+        super().save_model(request, obj, form, change)
+
+        # Decide if we should send a shipping email
+        should_send = False
+        tracking = (obj.tracking_number or "").strip()
+
+        try:
+            if prev is None:
+                # New object created in admin:
+                # Only send if it is already in shipped state or has tracking.
+                if (obj.status == "shipped") or tracking:
+                    should_send = True
+            else:
+                # Status changed to shipped
+                if prev.status != "shipped" and obj.status == "shipped":
+                    should_send = True
+
+                # shipped_at was empty before and is now set
+                if (not prev.shipped_at) and obj.shipped_at:
+                    should_send = True
+
+                # Tracking number was empty before and is now present
+                if (not (prev.tracking_number or "").strip()) and tracking:
+                    should_send = True
+        except Exception:
+            should_send = False
+
+        if should_send:
+            try:
+                # Uses your existing helper that already sends EN/DE email
+                send_shipping_update(obj, tracking=tracking)
+            except Exception:
+                # Never break admin save if email fails
+                pass
 
 # --------------------------------------------------------------------------------------
 # Invoice

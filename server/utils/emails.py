@@ -290,7 +290,137 @@ def send_sepa_pending_email(order, user_locale: str = "en", to: Optional[str] = 
     """
     mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
     return _send_email(mail.subject, mail.text, mail.html, to_email)
+# ------------- Admin: order paid alert -------------
+def send_admin_order_paid_email(order) -> bool:
+    """
+    Notify the admin when an order is marked as PAID (invoice email sent).
+    """
+    try:
+        admin_to = getattr(settings, "ADMIN_EMAIL", None) or DEFAULT_FROM
+        if not admin_to:
+            logger.warning(
+                "ADMIN_EMAIL not configured; skipping admin 'order paid' email for order %s",
+                getattr(order, "id", None),
+            )
+            return False
 
+        num = getattr(order, "number", None) or f"#{order.id}"
+        total_val = getattr(order, "total_price", Decimal("0.00"))
+        total = _money(total_val)
+
+        customer_email = (order_recipient_email(order) or "-").strip() or "-"
+        user_id = getattr(order.user, "id", None)
+        payment_method = getattr(order, "payment_method", "-")
+        payment_status = getattr(order, "payment_status", "-")
+        status = getattr(order, "status", "-")
+
+        created_dt = getattr(order, "created_at", None) or timezone.now()
+        created_str = timezone.localtime(created_dt).strftime("%Y-%m-%d %H:%M")
+
+        lines = [
+            f"Order {num} marked as PAID.",
+            "",
+            f"Created:        {created_str}",
+            f"Total:          {total}",
+            f"Order status:   {status}",
+            f"Payment status: {payment_status}",
+            f"Payment method: {payment_method}",
+            f"User ID:        {user_id or '-'}",
+            f"Customer email: {customer_email}",
+            "",
+            "You can review this order in the admin panel.",
+        ]
+
+        send_mail(
+            subject=f"[ADMIN] Order {num} paid",
+            message="\n".join(lines),
+            from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
+            recipient_list=[admin_to],
+            fail_silently=not settings.DEBUG,
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "Admin 'order paid' email failed for order %s",
+            getattr(order, "id", None),
+        )
+        return False
+    
+# ------------- Admin new order alert -------------
+def send_admin_new_order_email(order) -> bool:
+    """
+    Notify the admin whenever a new order is created.
+    """
+    try:
+        admin_to = getattr(settings, "ADMIN_EMAIL", None) or DEFAULT_FROM
+        if not admin_to:
+            logger.warning(
+                "ADMIN_EMAIL not configured; skipping admin new order email for order %s",
+                getattr(order, "id", None),
+            )
+            return False
+
+        num = getattr(order, "number", None) or f"#{order.id}"
+        total_val = getattr(order, "total_price", Decimal("0.00"))
+        total = _money(total_val)
+
+        customer_email = (order_recipient_email(order) or "-").strip() or "-"
+        user_id = getattr(order.user, "id", None)
+        payment_method = getattr(order, "payment_method", "-")
+        payment_status = getattr(order, "payment_status", "-")
+        status = getattr(order, "status", "-")
+
+        # Try to use created_at if you have it, otherwise fallback to "now"
+        created_dt = getattr(order, "created_at", None) or timezone.now()
+        created_str = timezone.localtime(created_dt).strftime("%Y-%m-%d %H:%M")
+
+        lines = [
+            f"New order created: {num}",
+            "",
+            f"Created:       {created_str}",
+            f"Total:         {total}",
+            f"Order status:  {status}",
+            f"Payment status:{payment_status}",
+            f"Payment method:{payment_method}",
+            f"User ID:       {user_id or '-'}",
+            f"Customer email:{customer_email}",
+            "",
+            "Items:",
+        ]
+
+        try:
+            for it in order.items.all():
+                title = (
+                    getattr(it, "product_name_snapshot", None)
+                    or getattr(getattr(it, "product", None), "title_en", None)
+                    or getattr(getattr(it, "product", None), "title_de", None)
+                    or "Item"
+                )
+                qty = getattr(it, "quantity", 1)
+                unit = getattr(it, "unit_price", Decimal("0.00"))
+                lines.append(f"- {title} x {qty} ({_money(unit)})")
+        except Exception:
+            logger.exception(
+                "Failed building items list for admin new order email %s",
+                getattr(order, "id", None),
+            )
+
+        message = "\n".join(lines)
+
+        send_mail(
+            subject=f"[ADMIN] New order {num}",
+            message=message,
+            from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
+            recipient_list=[admin_to],
+            fail_silently=not settings.DEBUG,
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "Admin new order email failed for order %s",
+            getattr(order, "id", None),
+        )
+        return False
    
 # ------------- Return requests -------------
 def send_return_request_emails(return_request):
@@ -642,9 +772,20 @@ def send_invoice_email(order, user_locale: str = "en", to: Optional[str] = None)
             msg.attach_alternative(mail.html, "text/html")
             _attach_invoice_if_available(order, msg)
             msg.send()
+
         now = timezone.now()
         type(order).objects.filter(pk=order.pk).update(invoice_sent_at=now)
         setattr(order, "invoice_sent_at", now)
+
+        # ✅ After customer invoice email is sent, notify admin (best-effort)
+        try:
+            send_admin_order_paid_email(order)
+        except Exception:
+            logger.exception(
+                "Failed to send admin 'order paid' email for order %s",
+                getattr(order, "id", "?"),
+            )
+
         return True
     except Exception:
         logger.exception("Failed to send invoice email for order %s", getattr(order, "id", "?"))

@@ -71,7 +71,8 @@ from .utils.emails import (
     send_cancel_request_emails,
     send_return_request_emails,
     send_stock_alert_email,
-    send_installments_started_email
+    send_installments_started_email,
+    send_admin_new_order_email
 )
 from .utils.guest_invoices import (
     build_guest_invoice_download_url,
@@ -1203,6 +1204,10 @@ class OrderCreateView(APIView):
         ser.is_valid(raise_exception=True)
         with transaction.atomic():
             order = ser.save()
+
+        # ✅ send email to admin after order is successfully created
+        send_admin_new_order_email(order)
+
         return Response(OrderReadSerializer(order, context={"request": request}).data, status=201)
 
 class OrderDetailPublicAPIView(APIView):
