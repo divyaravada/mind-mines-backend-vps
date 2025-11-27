@@ -807,7 +807,7 @@ class OrderReadSerializer(serializers.ModelSerializer):
             pass
         return None
     
-     def get_has_return_request(self, obj):
+    def get_has_return_request(self, obj):
         try:
             request_user = None
             if hasattr(self, "context"):
