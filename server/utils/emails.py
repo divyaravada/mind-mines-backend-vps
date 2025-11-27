@@ -503,14 +503,31 @@ def send_admin_new_order_email(order) -> bool:
 def send_return_request_emails(return_request):
     order = return_request.order
     customer = order_recipient_email(order)
+
+    # --- collect attachments for this request ---
+    # supports either ReturnRequest.attachments (related_name="attachments")
+    # or default returnattachment_set
+    try:
+        attachments_qs = getattr(return_request, "attachments", None) or getattr(
+            return_request, "returnattachment_set", None
+        )
+        attachment_objs = list(attachments_qs.all()) if attachments_qs is not None else []
+    except Exception:
+        attachment_objs = []
+
+    # --------- Customer email (bilingual HTML, as before) ---------
     en = (
         f"<p>We received your return request for order <b>{order.number}</b>.</p>"
-        f"<p>Message:</p><blockquote>{_strip_html(return_request.message)}</blockquote>"
+        f"<p>Message:</p>"
+        f"<blockquote>{_strip_html(return_request.message)}</blockquote>"
     )
     de = (
-        f"<p>Wir haben Ihre Rücksendeanfrage für die Bestellung <b>{order.number}</b> erhalten.</p>"
-        f"<p>Nachricht:</p><blockquote>{_strip_html(return_request.message)}</blockquote>"
+        f"<p>Wir haben Ihre Rücksendeanfrage für die Bestellung "
+        f"<b>{order.number}</b> erhalten.</p>"
+        f"<p>Nachricht:</p>"
+        f"<blockquote>{_strip_html(return_request.message)}</blockquote>"
     )
+
     if customer:
         _send_bilingual(
             "Return request received / Rücksendeanfrage erhalten",
@@ -524,23 +541,73 @@ def send_return_request_emails(return_request):
             getattr(return_request, "id", None),
         )
 
-    # Admin email (EN only, plain)
+    # --------- Admin email (EN only, with attachments) ---------
     try:
         admin_to = getattr(settings, "ADMIN_EMAIL", None) or DEFAULT_FROM
-        if admin_to:
-            send_mail(
-                subject=f"Return request for order {order.number}",
-                message=(
-                    f"Order: {order.number}\n"
-                    f"Customer: {customer or '-'}\n\n"
-                    f"Message:\n{return_request.message}"
-                ),
-                from_email=DEFAULT_FROM,
-                recipient_list=[admin_to],
-                fail_silently=not settings.DEBUG,
-            )
+        if not admin_to:
+            return
+
+        lines = [
+            f"Order: {order.number}",
+            f"Customer: {customer or '-'}",
+            "",
+            "Message:",
+            return_request.message or "-",
+        ]
+
+        # Add simple list of attachments (with URL if available)
+        if attachment_objs:
+            lines.append("")
+            lines.append("Attachments:")
+            for att in attachment_objs:
+                file_field = getattr(att, "file", None)
+                if not file_field:
+                    continue
+                name = getattr(file_field, "name", "attachment")
+                url = None
+                try:
+                    url = file_field.url
+                except Exception:
+                    url = None
+                if url:
+                    lines.append(f"- {name} ({url})")
+                else:
+                    lines.append(f"- {name}")
+
+        body = "\n".join(lines)
+
+        email = EmailMessage(
+            subject=f"Return request for order {order.number}",
+            body=body,
+            from_email=DEFAULT_FROM,
+            to=[admin_to],
+        )
+
+        # Physically attach image/video files to the email
+        for att in attachment_objs:
+            file_field = getattr(att, "file", None)
+            if not file_field:
+                continue
+            try:
+                file_field.open("rb")
+                content = file_field.read()
+                file_field.close()
+
+                content_type = getattr(file_field, "content_type", None) or "application/octet-stream"
+                filename = file_field.name.rsplit("/", 1)[-1]
+                email.attach(filename, content, content_type)
+            except Exception:
+                logger.exception(
+                    "Failed attaching file for ReturnRequest %s (attachment id=%s)",
+                    getattr(return_request, "id", None),
+                    getattr(att, "id", None),
+                )
+
+        email.send(fail_silently=not settings.DEBUG)
+
     except Exception:
         logger.exception("Admin return request email failed")
+
 
 
 # ------------- Cancel requests -------------
