@@ -2580,7 +2580,17 @@ class OrderRequestReturnAPIView(APIView):
         order: Order = get_object_or_404(
             Order.objects.select_related("user"), pk=pk, user=request.user
         )
-
+        # ❌ Block if there is already a return request for this order+user
+        already_returned = ReturnRequest.objects.filter(
+            order=order,
+            user=request.user,
+            request_type="return",
+        ).exists()
+        if already_returned:
+            return Response(
+                {"detail": "You already submitted a return request for this order."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         allowed, reason = _can_return(order)
         if not allowed:
             return Response({"detail": reason or ""}, status=status.HTTP_403_FORBIDDEN)
@@ -2610,9 +2620,22 @@ class OrderRequestReturnAPIView(APIView):
             email_sent = True
         except Exception as e:
             email_err = f"{e.__class__.__name__}: {e}"
-
+        # ✅ Return flags for frontend
+        has_return_request = True
+        has_cancel_request = ReturnRequest.objects.filter(
+            order=order,
+            user=request.user,
+            request_type="cancel",
+        ).exists()
         return Response(
-            {"ok": True, "request_id": rr.pk, "email_sent": email_sent, "error": email_err},
+            {
+                "ok": True,
+                "request_id": rr.pk,
+                "email_sent": email_sent,
+                "error": email_err,
+                "has_return_request": has_return_request,
+                "has_cancel_request": has_cancel_request,
+            },
             status=201,
         )
 
@@ -2620,6 +2643,17 @@ class OrderCancelRequestAPIView(APIView):
     permission_classes = [IsAuthenticated]
     def post(self, request, pk: int):
         order = get_object_or_404(Order, pk=pk, user=request.user)
+        # ❌ Block if a cancel request already exists
+        already_cancelled = ReturnRequest.objects.filter(
+            order=order,
+            user=request.user,
+            request_type="cancel",
+        ).exists()
+        if already_cancelled:
+            return Response(
+                {"detail": "You already submitted a cancellation request for this order."},
+                status=400,
+            )
         allowed = False
         if order.status in ("pending", "processing", "shipped"):
             allowed = True
@@ -2628,16 +2662,46 @@ class OrderCancelRequestAPIView(APIView):
             delta = timezone.now() - order.delivered_at
             allowed = (delta.days <= CANCELLATION_WINDOW_DAYS)
         if not allowed:
-            return Response({"detail": "This order can no longer be cancelled."}, status=400)
+            return Response(
+                {"detail": "This order can no longer be cancelled."}, status=400
+            )
+
         msg = (request.data.get("message") or "").strip()
-        rr = ReturnRequest.objects.create(order=order, user=request.user, request_type="cancel", message=msg)
+        rr = ReturnRequest.objects.create(
+            order=order,
+            user=request.user,
+            request_type="cancel",
+            message=msg,
+        )
         for f in request.FILES.getlist("files"):
             ReturnAttachment.objects.create(request=rr, file=f)
+
+        email_sent = False
         try:
             send_cancel_request_emails(rr)
+            email_sent = True
         except Exception:
             logger.exception("Failed to send cancel emails for rr=%s", rr.pk)
-        return Response({"id": rr.pk, "status": rr.status, "request_type": rr.request_type}, status=201)
+
+        # ✅ Return flags for frontend
+        has_cancel_request = True
+        has_return_request = ReturnRequest.objects.filter(
+            order=order,
+            user=request.user,
+            request_type="return",
+        ).exists()
+
+        return Response(
+            {
+                "id": rr.pk,
+                "status": rr.status,
+                "request_type": rr.request_type,
+                "email_sent": email_sent,
+                "has_cancel_request": has_cancel_request,
+                "has_return_request": has_return_request,
+            },
+            status=201,
+        )
 
 # -----------------------------------------------------------------------------
 # On-demand & Stock Alerts

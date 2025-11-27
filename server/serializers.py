@@ -699,6 +699,8 @@ class OrderReadSerializer(serializers.ModelSerializer):
     is_returnable = serializers.SerializerMethodField()
     return_deadline = serializers.SerializerMethodField()
     coupon_code = serializers.SerializerMethodField()
+    has_return_request = serializers.SerializerMethodField()
+    has_cancel_request = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -718,7 +720,7 @@ class OrderReadSerializer(serializers.ModelSerializer):
             "created_at", "shipped_at", "delivered_at",
             # derived / nested
             "items", "shipping_snapshot", "invoice_pdf",
-            "is_returnable", "return_deadline", "coupon_code",
+            "is_returnable", "return_deadline", "coupon_code","has_return_request", "has_cancel_request",
         )
 
     def get_shipping_snapshot(self, obj):
@@ -804,6 +806,44 @@ class OrderReadSerializer(serializers.ModelSerializer):
         except Exception:
             pass
         return None
+    
+     def get_has_return_request(self, obj):
+        try:
+            request_user = None
+            if hasattr(self, "context"):
+                req = self.context.get("request")
+                if req and hasattr(req, "user") and req.user.is_authenticated:
+                    request_user = req.user
+
+            qs = ReturnRequest.objects.filter(
+                order=obj,
+                request_type="return",
+            )
+            if request_user is not None:
+                qs = qs.filter(user=request_user)
+
+            return qs.exists()
+        except Exception:
+            return False
+
+    def get_has_cancel_request(self, obj):
+        try:
+            request_user = None
+            if hasattr(self, "context"):
+                req = self.context.get("request")
+                if req and hasattr(req, "user") and req.user.is_authenticated:
+                    request_user = req.user
+
+            qs = ReturnRequest.objects.filter(
+                order=obj,
+                request_type="cancel",
+            )
+            if request_user is not None:
+                qs = qs.filter(user=request_user)
+
+            return qs.exists()
+        except Exception:
+            return False
 
 
 class ReturnRequestSerializer(serializers.ModelSerializer):
