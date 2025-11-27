@@ -808,12 +808,15 @@ class OrderReadSerializer(serializers.ModelSerializer):
         return None
     
     def get_has_return_request(self, obj):
+        """
+        True if the current authenticated user has at least one return request
+        for this order.
+        """
         try:
             request_user = None
-            if hasattr(self, "context"):
-                req = self.context.get("request")
-                if req and hasattr(req, "user") and req.user.is_authenticated:
-                    request_user = req.user
+            req = self.context.get("request") if hasattr(self, "context") else None
+            if req is not None and getattr(req, "user", None) and req.user.is_authenticated:
+                request_user = req.user
 
             qs = ReturnRequest.objects.filter(
                 order=obj,
@@ -827,12 +830,15 @@ class OrderReadSerializer(serializers.ModelSerializer):
             return False
 
     def get_has_cancel_request(self, obj):
+        """
+        True if the current authenticated user has at least one cancel request
+        for this order.
+        """
         try:
             request_user = None
-            if hasattr(self, "context"):
-                req = self.context.get("request")
-                if req and hasattr(req, "user") and req.user.is_authenticated:
-                    request_user = req.user
+            req = self.context.get("request") if hasattr(self, "context") else None
+            if req is not None and getattr(req, "user", None) and req.user.is_authenticated:
+                request_user = req.user
 
             qs = ReturnRequest.objects.filter(
                 order=obj,
