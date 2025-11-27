@@ -36,7 +36,7 @@ DEFAULT_FROM_EMAIL = "info@mindmines.eu"
 ORDERS_NOTIF_EMAIL = "info@mindmines.eu"  # admin inbox for returns/cancels
 INFO_EMAIL = "info@mindmines.eu"
 ORDERS_ADMIN_EMAIL = "info@mindmines.eu"
-EMAIL_LOGO_URL = "https://mindmines.eu/static/emails/logo.png"
+EMAIL_LOGO_URL = "https://mindmines.eu/djstatic/emails/logo.png"
 EMAIL_LOGO_PATH = "static/emails/logo.png"
 
 # Application definition
