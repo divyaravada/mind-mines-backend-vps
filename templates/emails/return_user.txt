@@ -1,3 +1,6 @@
+MindMines
+------------------------------
+
 We received your return request for order {{ order.number }}
 
 Submitted: {{ created_at_display }}
@@ -12,3 +15,6 @@ You can track this request in your account:
 
 — {{ customer_name }} ({{ customer_email }})
 © {{ now|date:"Y" }} {{ SITE_NAME|default:"MindMines" }}
+
+------------------------------
+This email was sent by MindMines (mindmines.eu).

@@ -1,3 +1,6 @@
+MindMines
+------------------------------
+
 We received your cancellation request
 
 Order: {{ order.number }}
@@ -6,3 +9,7 @@ Total: {{ total_display }}
 Reason: {{ message|default:"—" }}
 
 You can follow updates here: {{ orders_url }}
+
+
+------------------------------
+This email was sent by MindMines (mindmines.eu).

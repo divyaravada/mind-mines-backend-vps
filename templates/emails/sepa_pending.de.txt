@@ -1,3 +1,6 @@
+MindMines
+------------------------------
+
 Vielen Dank! Wir haben Ihre SEPA-Lastschrift für die Bestellung {{ order.number }} erhalten.
 
 Die Bank verarbeitet die Zahlung innerhalb von {{ sepa_notice_days }} Werktagen. Sobald die Zahlung erfolgreich ist, senden wir Ihnen Ihre Rechnung per E-Mail zu.
@@ -10,3 +13,6 @@ Sie können Ihre Bestellung hier einsehen:
 {{ orders_url }}
 
 Falls Sie diese Zahlung nicht autorisiert haben, antworten Sie bitte umgehend auf diese E-Mail.
+
+------------------------------
+Diese E-Mail wurde von MindMines (mindmines.eu) gesendet.

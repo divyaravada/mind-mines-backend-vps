@@ -44,14 +44,29 @@
           >
             <tr>
               <td style="background: #16150f; padding: 18px 24px">
-                {% if logo_cid %}
+                {% with brand=brand_name|default:"MindMines" %} {% if logo_url
+                %}
+                <img
+                  src="{{ logo_url }}"
+                  width="80"
+                  alt="{{ brand }}"
+                  style="display: block"
+                />
+                {% elif logo_cid %}
                 <img
                   src="cid:{{ logo_cid }}"
                   width="80"
-                  alt="MindMines"
+                  alt="{{ brand }}"
                   style="display: block"
                 />
-                {% endif %}
+                {% else %}
+                <img
+                  src="/static/emails/logo.png"
+                  width="80"
+                  alt="{{ brand }}"
+                  style="display: block"
+                />
+                {% endif %} {% endwith %}
               </td>
             </tr>
 

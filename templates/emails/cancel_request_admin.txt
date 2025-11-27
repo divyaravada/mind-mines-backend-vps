@@ -1,3 +1,6 @@
+MindMines
+------------------------------
+
 New cancellation request
 
 Order: {{ order.number }} 
@@ -10,3 +13,6 @@ Total: {{ total_display }}
 {% endif %}
 
 Admin: /admin/server/order/{{ order.id }}/change/
+
+------------------------------
+This email was sent by MindMines (mindmines.eu).

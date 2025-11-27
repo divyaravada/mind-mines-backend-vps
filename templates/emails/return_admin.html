@@ -12,12 +12,28 @@
       "
     >
       <div style="background: #16150f; padding: 16px">
-        {% if logo_cid %}<img
-          src="cid:{{ logo_cid }}"
-          alt="Logo"
+        {% with brand=brand_name|default:"MindMines" %} {% if logo_url %}
+        <img
+          src="{{ logo_url }}"
           width="80"
+          alt="{{ brand }}"
           style="display: block"
-        />{% endif %}
+        />
+        {% elif logo_cid %}
+        <img
+          src="cid:{{ logo_cid }}"
+          width="80"
+          alt="{{ brand }}"
+          style="display: block"
+        />
+        {% else %}
+        <img
+          src="/static/emails/logo.png"
+          width="80"
+          alt="{{ brand }}"
+          style="display: block"
+        />
+        {% endif %} {% endwith %}
       </div>
       <div style="padding: 20px">
         <h2 style="margin: 0 0 10px">Return request</h2>

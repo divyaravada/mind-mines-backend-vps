@@ -1,3 +1,6 @@
+MindMines
+------------------------------
+
 Danke für deine Bestellung {{ order.number }}!
 
 Bestellübersicht:
@@ -16,3 +19,6 @@ Rechnungs- / Lieferadresse:
 {{ address.phone }}
 
 Deine Rechnung ist als PDF angehängt.
+
+------------------------------
+Diese E-Mail wurde von MindMines (mindmines.eu) gesendet.

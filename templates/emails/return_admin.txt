@@ -1,3 +1,6 @@
+MindMines
+------------------------------
+
 [Return] {{ order.number }} • {{ created_at_display }}
 
 Customer: {{ customer_name }} ({{ customer_email }})
@@ -8,3 +11,6 @@ Message:
 {{ message|default:"(no message)" }}
 
 Attachments are included with this email if any were provided.
+
+------------------------------
+This email was sent by MindMines (mindmines.eu).

@@ -37,7 +37,15 @@ ORDERS_NOTIF_EMAIL = "info@mindmines.eu"  # admin inbox for returns/cancels
 INFO_EMAIL = "info@mindmines.eu"
 ORDERS_ADMIN_EMAIL = "info@mindmines.eu"
 
+EMAIL_LOGO_PATH = "static/email/logo.png"
+
 # Application definition
+SITE_NAME = "MindMines"
+FRONTEND_URL = "https://mindmines.eu"
+SUPPORT_EMAIL = "servicet@mindmines.eu"
+COMPANY_ADDRESS = "MindMines · Hamburg, Germany"
+EMAIL_HEADER_TAGLINE = "Fine natural stone décor, crafted with care."
+ORDERS_BCC_EMAILS = ["service@mindmines.eu"]
 
 INSTALLED_APPS = [
     'jazzmin',

@@ -1,3 +1,6 @@
+MindMines
+------------------------------
+
 Thanks for your order {{ order.number }}
 
 Amount: {{ amount_display }}
@@ -11,3 +14,6 @@ Items:
 
 We’ll email your invoice automatically once the payment is received.
 View your order: {{ orders_url }}
+
+------------------------------
+This email was sent by MindMines (mindmines.eu).

@@ -1,19 +1,59 @@
-{% load i18n %}
-{% blocktrans with num=order.number %}Thank you for your order {{ num }}!{% endblocktrans %}
+MindMines
+------------------------------
 
-{% trans "Order summary" %}:
-{% for it in items %}
-- {{ it.name }} × {{ it.qty }} — {{ it.total_display }}
+{% if language == "de" %}
+Ihre MindMines-Bestellung ist eingegangen.
+
+Bestellnummer: {{ order_number }}
+Bestelldatum: {{ order_date }}
+Zahlungsart: {{ payment_method_display }}
+
+Bestellübersicht:
+{% for item in items %}
+- {{ item.name }} x {{ item.quantity }} = {{ item.total_price }} €
 {% endfor %}
 
-{% trans "Subtotal" %}: {{ totals.subtotal_display }}
-{% trans "Shipping" %}: {{ totals.shipping_display }}
-{% trans "Total" %}: {{ totals.total_display }}
+Zwischensumme: {{ subtotal }} €
+{% if shipping_price %}Versand: {{ shipping_price }} €{% endif %}
+{% if discount_total %}Rabatt: -{{ discount_total }} €{% endif %}
+Gesamtbetrag: {{ grand_total }} €
 
-{% trans "Billing / Shipping address" %}:
-{{ address.full_name }}
-{{ address.street_name }} {{ address.house_number }} {{ address.apartment }}
-{{ address.postal_code }} {{ address.city }}, {{ address.country }}
-{{ address.phone }}
+Lieferadresse:
+{{ shipping_address.name }}
+{{ shipping_address.street }}
+{{ shipping_address.postcode }} {{ shipping_address.city }}
+{{ shipping_address.country }}
 
-{% trans "We’ve attached your invoice as a PDF." %}
+Bestellung online ansehen: {{ frontend_order_url }}
+
+Vielen Dank, dass Sie bei MindMines bestellt haben.
+{% else %}
+Your MindMines order has been received.
+
+Order number: {{ order_number }}
+Order date: {{ order_date }}
+Payment method: {{ payment_method_display }}
+
+Order details:
+{% for item in items %}
+- {{ item.name }} x {{ item.quantity }} = {{ item.total_price }} €
+{% endfor %}
+
+Subtotal: {{ subtotal }} €
+{% if shipping_price %}Shipping: {{ shipping_price }} €{% endif %}
+{% if discount_total %}Discount: -{{ discount_total }} €{% endif %}
+Total: {{ grand_total }} €
+
+Shipping address:
+{{ shipping_address.name }}
+{{ shipping_address.street }}
+{{ shipping_address.postcode }} {{ shipping_address.city }}
+{{ shipping_address.country }}
+
+View your order online: {{ frontend_order_url }}
+
+Thank you for shopping with MindMines.
+{% endif %}
+
+------------------------------
+This email was sent by MindMines (mindmines.eu).

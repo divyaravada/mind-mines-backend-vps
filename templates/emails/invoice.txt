@@ -1,4 +1,13 @@
-Payment received — thank you!
+MindMines
+------------------------------
 
-Your invoice {{ order.invoice.number }} for order {{ order.number }} is attached.
-You can also download it from your account: {{ orders_url }}
+Dear customer,
+
+Please find your invoice for order {{ order.number }} attached.
+
+Total: {{ total_display }}
+
+Thank you for shopping with us.
+
+------------------------------
+This email was sent by MindMines (mindmines.eu).

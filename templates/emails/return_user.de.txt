@@ -1,3 +1,6 @@
+MindMines
+------------------------------
+
 Wir haben deine Rücksendeanfrage für Bestellung {{ order.number }} erhalten.
 
 Eingereicht: {{ created_at_display }}
@@ -9,3 +12,6 @@ Deine Nachricht:
 
 Du kannst die Anfrage in deinem Konto verfolgen:
 {{ orders_url }}
+
+------------------------------
+Diese E-Mail wurde von MindMines (mindmines.eu) gesendet.

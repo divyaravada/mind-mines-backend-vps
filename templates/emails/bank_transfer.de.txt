@@ -1,4 +1,7 @@
-Vielen Dank für deine Bestellung {{ order.number }}
+MindMines
+------------------------------
+
+Danke für deine Bestellung {{ order.number }}
 
 Betrag: {{ amount_display }}
 Verwendungszweck: {{ reference }}
@@ -9,5 +12,8 @@ Empfänger: {{ bank.account_name }}
 Artikel:
 {{ items_text }}
 
-Wir senden deine Rechnung automatisch, sobald die Zahlung eingegangen ist.
-Bestellungen ansehen: {{ orders_url }}
+Wir senden dir deine Rechnung automatisch per E-Mail, sobald die Zahlung eingegangen ist.
+Bestellung ansehen: {{ orders_url }}
+
+------------------------------
+Diese E-Mail wurde von MindMines (mindmines.eu) gesendet.

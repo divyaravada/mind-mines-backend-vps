@@ -1,3 +1,6 @@
+MindMines
+------------------------------
+
 Wir haben deine Stornierungsanfrage erhalten
 
 Bestellung: {{ order.number }}
@@ -6,3 +9,6 @@ Gesamt: {{ total_display }}
 Begründung: {{ message|default:"—" }}
 
 Du kannst den Fortschritt hier verfolgen: {{ orders_url }}
+
+------------------------------
+Diese E-Mail wurde von MindMines (mindmines.eu) gesendet.
