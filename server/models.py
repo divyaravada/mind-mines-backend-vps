@@ -79,32 +79,36 @@ class CustomUserManager(DjangoUserManager["User"]):
         return user
 
     def create_user(
-        self,
-        username: str,                       
+        self,                       
         email: Optional[str] = None,
         password: Optional[str] = None,
         **extra_fields: Any,
     ) -> "User":
-        actual_email = email or username
+        # for old code that might pass username instead of email
+        if email is None:
+            email = extra_fields.pop("username", None)
+
         extra_fields.setdefault("is_staff", False)
         extra_fields.setdefault("is_superuser", False)
-        return self._create_user(actual_email, password, **extra_fields)
+        return self._create_user(email, password, **extra_fields)
 
     def create_superuser(
         self,
-        username: str,
         email: Optional[str] = None,
         password: Optional[str] = None,
         **extra_fields: Any,
     ) -> "User":
-        actual_email = email or username
+        # for old code that might pass username instead of email
+        if email is None:
+            email = extra_fields.pop("username", None)
+
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
         if extra_fields.get("is_staff") is not True:
             raise ValueError("Superuser must have is_staff=True.")
         if extra_fields.get("is_superuser") is not True:
             raise ValueError("Superuser must have is_superuser=True.")
-        return self._create_user(actual_email, password, **extra_fields)
+        return self._create_user(email, password, **extra_fields)
 
 
 class User(AbstractUser):
