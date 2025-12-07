@@ -111,7 +111,7 @@ CSP_SCRIPT_SRC = (
 )
 CSP_STYLE_SRC = (
     "'self'",
-    "'unsafe-inline'",  # needed for some CSS-in-JS or 3rd-party widgets
+    "'unsafe-inline'",
     "https://fonts.googleapis.com",
 )
 CSP_FONT_SRC = (
@@ -119,6 +119,25 @@ CSP_FONT_SRC = (
     "https://fonts.gstatic.com",
 )
 CSP_IMG_SRC = ("'self'", "data:", "https:")
+
+CONTENT_SECURITY_POLICY = {
+    "DIRECTIVES": {
+        "default-src": ("'self'",),
+        "font-src": ("'self'", "https://fonts.gstatic.com"),
+        "img-src": ("'self'", "data:", "https:"),
+        "script-src": (
+            "'self'",
+            "https://js.stripe.com",
+            "https://www.paypal.com",
+            "https://www.paypalobjects.com",
+        ),
+        "style-src": (
+            "'self'",
+            "'unsafe-inline'",
+            "https://fonts.googleapis.com",
+        ),
+    }
+}
 
 TEMPLATES = [
     {
