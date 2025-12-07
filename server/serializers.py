@@ -38,6 +38,8 @@ from .models import (
     Review,
     Coupon,
     OnDemandOrderRequest,
+    MarketingEvent,
+    AbandonedCartReminder,
 )
 
 # -----------------
@@ -185,7 +187,9 @@ class AddressSerializer(serializers.ModelSerializer):
         validated_data["is_default"] = False
         addr = Address.objects.create(user=user, **validated_data)
 
-        is_first_for_user = not Address.objects.filter(user=user).exclude(pk=addr.pk).exists()
+        is_first_for_user = not Address.objects.filter(user=user).exclude(
+            pk=addr.pk
+        ).exists()
         if is_first_for_user or make_default:
             addr.set_default_for_user()
 
@@ -272,7 +276,8 @@ class RegisterSerializer(serializers.ModelSerializer):
         except IntegrityError:
             # Email already taken or other unique constraint
             raise serializers.ValidationError(
-                {"email": "A user with this email already exists."})
+                {"email": "A user with this email already exists."}
+            )
 
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = default_token_generator.make_token(user)
@@ -422,7 +427,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "descriptionpara2_en",
             "descriptionpara2_de",
             "descriptionpara3_en",
-            "descriptionpara3_de",           
+            "descriptionpara3_de",
             "type_of_stone",
             "material",
             "color",
@@ -571,6 +576,63 @@ class NewsletterSubscriberSerializer(serializers.ModelSerializer):
     def validate_email(self, value: str) -> str:
         return value.strip().lower()
 
+    def create(self, validated_data):
+        """
+        Subscribe an email to the newsletter and log a marketing event
+        (newsletter_subscribe). Tracking is best-effort and never blocks
+        subscription.
+        """
+        email = validated_data.get("email")
+        subscriber, _ = NewsletterSubscriber.objects.get_or_create(
+            email=email,
+            defaults={},
+        )
+
+        request = self.context.get("request") if hasattr(self, "context") else None
+        user = getattr(request, "user", None) if request else None
+
+        try:
+            session_id = ""
+            if request is not None:
+                headers = getattr(request, "headers", None)
+                if headers:
+                    session_id = (
+                        headers.get("X-Client-Id", "")
+                        or headers.get("X-Session-Id", "")
+                    )
+                if not session_id:
+                    session_id = (
+                        getattr(request, "session", None)
+                        and getattr(request.session, "session_key", "")
+                    ) or ""
+
+                params = (
+                    getattr(request, "query_params", None)
+                    or getattr(request, "GET", {})
+                    or {}
+                )
+
+                MarketingEvent.objects.create(
+                    user=(
+                        user
+                        if user and getattr(user, "is_authenticated", False)
+                        else None
+                    ),
+                    session_id=session_id or "",
+                    event_type=MarketingEvent.EventType.NEWSLETTER_SUBSCRIBE,
+                    url_path=getattr(request, "path", "") or "",
+                    referrer=request.META.get("HTTP_REFERER", "") or "",
+                    utm_source=params.get("utm_source", "") or "",
+                    utm_medium=params.get("utm_medium", "") or "",
+                    utm_campaign=params.get("utm_campaign", "") or "",
+                )
+        except Exception:
+            # Never block subscription if tracking fails
+            pass
+
+        return subscriber
+
+
 # -----------------
 # Cart detail / items
 # -----------------
@@ -580,7 +642,18 @@ class CartItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CartItem
-        fields = ("product","product_id","name","image","price","qty","color","weight","dimensions","category")
+        fields = (
+            "product",
+            "product_id",
+            "name",
+            "image",
+            "price",
+            "qty",
+            "color",
+            "weight",
+            "dimensions",
+            "category",
+        )
 
     def validate(self, attrs):
         pid = attrs.pop("product", None)
@@ -599,7 +672,16 @@ class CartSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cart
-        fields = ("id","user_email","cart_token","currency","is_active","created_at","updated_at","items")
+        fields = (
+            "id",
+            "user_email",
+            "cart_token",
+            "currency",
+            "is_active",
+            "created_at",
+            "updated_at",
+            "items",
+        )
 
     def get_user_email(self, obj):
         return getattr(obj.user, "email", None)
@@ -612,9 +694,9 @@ class CartSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         items_data = validated_data.pop("items", [])
-        for k,v in validated_data.items():
+        for k, v in validated_data.items():
             setattr(instance, k, v)
-        instance.save(update_fields=["currency","is_active","updated_at"])
+        instance.save(update_fields=["currency", "is_active", "updated_at"])
         # replace items by product_id uniqueness
         instance.items.all().delete()
         self._upsert_items(instance, items_data)
@@ -657,7 +739,14 @@ class OrderReadSerializer(serializers.ModelSerializer):
 
         class Meta:
             model = OrderItem
-            fields = ("product_id", "product_name", "quantity", "unit_price", "line_total", "product_image")
+            fields = (
+                "product_id",
+                "product_name",
+                "quantity",
+                "unit_price",
+                "line_total",
+                "product_image",
+            )
 
         def get_product_name(self, obj):
             return obj.product_name  # uses property to prefer snapshot
@@ -705,22 +794,45 @@ class OrderReadSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = (
-            "id", "number",
-            "status", "payment_status",
-            "payment_method", "payment_method_label",
+            "id",
+            "number",
+            "status",
+            "payment_status",
+            "payment_method",
+            "payment_method_label",
             "installments_months",
             "email",
             # money breakdown
-            "subtotal", "discount_total", "shipping_price", "vat_total", "total_price",
+            "subtotal",
+            "discount_total",
+            "shipping_price",
+            "vat_total",
+            "total_price",
             # shipping snapshot fields
-            "ship_first_name", "ship_last_name", "ship_line1", "ship_line2",
-            "ship_postal", "ship_city", "ship_country", "ship_phone",
+            "ship_first_name",
+            "ship_last_name",
+            "ship_line1",
+            "ship_line2",
+            "ship_postal",
+            "ship_city",
+            "ship_country",
+            "ship_phone",
             # logistics
-            "tracking_number", "tracking_carrier", "tracking_url",
-            "created_at", "shipped_at", "delivered_at",
+            "tracking_number",
+            "tracking_carrier",
+            "tracking_url",
+            "created_at",
+            "shipped_at",
+            "delivered_at",
             # derived / nested
-            "items", "shipping_snapshot", "invoice_pdf",
-            "is_returnable", "return_deadline", "coupon_code","has_return_request", "has_cancel_request",
+            "items",
+            "shipping_snapshot",
+            "invoice_pdf",
+            "is_returnable",
+            "return_deadline",
+            "coupon_code",
+            "has_return_request",
+            "has_cancel_request",
         )
 
     def get_shipping_snapshot(self, obj):
@@ -864,16 +976,16 @@ class ReturnRequestSerializer(serializers.ModelSerializer):
 
 class ShippingInSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=120)
-    last_name  = serializers.CharField(max_length=120, allow_blank=True)
-    line1      = serializers.CharField(max_length=255)
-    line2      = serializers.CharField(max_length=255, allow_blank=True, required=False)
-    postal_code= serializers.CharField(max_length=50)
-    city       = serializers.CharField(max_length=120)
-    country    = serializers.CharField(max_length=2)
-    phone      = serializers.CharField(max_length=64, allow_blank=True, required=False)
+    last_name = serializers.CharField(max_length=120, allow_blank=True)
+    line1 = serializers.CharField(max_length=255)
+    line2 = serializers.CharField(max_length=255, allow_blank=True, required=False)
+    postal_code = serializers.CharField(max_length=50)
+    city = serializers.CharField(max_length=120)
+    country = serializers.CharField(max_length=2)
+    phone = serializers.CharField(max_length=64, allow_blank=True, required=False)
     # Optional (shown in admin if available)
     street_name = serializers.CharField(max_length=255, allow_blank=True, required=False)
-    house_number = serializers.CharField(max_length=64,  allow_blank=True, required=False)
+    house_number = serializers.CharField(max_length=64, allow_blank=True, required=False)
 
 
 class OrderItemIn(serializers.Serializer):
@@ -892,7 +1004,9 @@ class OrderCreateSerializer(serializers.Serializer):
 
     # installments inputs
     installments_months = serializers.IntegerField(required=False, allow_null=True)
-    payment_method_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    payment_method_id = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True
+    )
 
     # optional for idempotency (frontend cart signature)
     idempotency_key = serializers.CharField(required=False, allow_blank=True)
@@ -906,12 +1020,18 @@ class OrderCreateSerializer(serializers.Serializer):
         if len(c) == 2:
             return c.upper()
         mapping: Dict[str, str] = {
-            "Germany": "DE", "Deutschland": "DE",
-            "Austria": "AT", "Österreich": "AT",
-            "Switzerland": "CH", "Schweiz": "CH",
-            "Italy": "IT", "Italia": "IT",
-            "France": "FR", "Frankreich": "FR",
-            "Netherlands": "NL", "Niederlande": "NL",
+            "Germany": "DE",
+            "Deutschland": "DE",
+            "Austria": "AT",
+            "Österreich": "AT",
+            "Switzerland": "CH",
+            "Schweiz": "CH",
+            "Italy": "IT",
+            "Italia": "IT",
+            "France": "FR",
+            "Frankreich": "FR",
+            "Netherlands": "NL",
+            "Niederlande": "NL",
         }
         return mapping.get(c, "DE")
 
@@ -922,7 +1042,9 @@ class OrderCreateSerializer(serializers.Serializer):
         user = getattr(req, "user", None)
 
         # auth mode?
-        is_auth = bool(user and getattr(user, "is_authenticated", False) and getattr(user, "is_active", True))
+        is_auth = bool(
+            user and getattr(user, "is_authenticated", False) and getattr(user, "is_active", True)
+        )
 
         # email
         incoming_email = (attrs.get("email") or "").strip().lower()
@@ -944,7 +1066,7 @@ class OrderCreateSerializer(serializers.Serializer):
             "sepa": "sepa_debit",
             "paypal": "paypal",
             "giropay": "giropay",
-            "klarna": "klarna_single",        
+            "klarna": "klarna_single",
             "klarna_single": "klarna_single",
             "klarna_installments": "klarna_installments",
         }
@@ -961,12 +1083,14 @@ class OrderCreateSerializer(serializers.Serializer):
         # methods restricted to DE (tune as needed)
         if attrs["payment_method"] in ("sepa_debit", "sepa_installments", "bank_transfer"):
             if country_norm != "DE":
-                raise serializers.ValidationError({
-                    "payment_method": "SEPA / Bank Transfer is only available in DE."
-                })
+                raise serializers.ValidationError(
+                    {"payment_method": "SEPA / Bank Transfer is only available in DE."}
+                )
 
         # installments validation — allow alias via initial_data["months"]
-        init_data: Mapping[str, Any] = cast(Mapping[str, Any], getattr(self, "initial_data", {}) or {})
+        init_data: Mapping[str, Any] = cast(
+            Mapping[str, Any], getattr(self, "initial_data", {}) or {}
+        )
         if attrs.get("installments_months") in (None, ""):
             try:
                 alias = int(init_data.get("months") or 0)
@@ -978,10 +1102,18 @@ class OrderCreateSerializer(serializers.Serializer):
         months = cast(Optional[int], attrs.get("installments_months"))
         if attrs["payment_method"] == "card_installments":
             if months is None or months not in (3, 6, 9):
-                raise serializers.ValidationError({"installments_months": "Choose 3, 6, or 9 months for card installments."})
+                raise serializers.ValidationError(
+                    {
+                        "installments_months": "Choose 3, 6, or 9 months for card installments."
+                    }
+                )
         elif attrs["payment_method"] == "sepa_installments":
             if months is None or months not in (3, 6, 9):
-                raise serializers.ValidationError({"installments_months": "Choose 3, 6, or 9 months for SEPA installments."})
+                raise serializers.ValidationError(
+                    {
+                        "installments_months": "Choose 3, 6, or 9 months for SEPA installments."
+                    }
+                )
         else:
             attrs["installments_months"] = None
 
@@ -995,11 +1127,15 @@ class OrderCreateSerializer(serializers.Serializer):
             pid = int(it["product_id"])  # validated by OrderItemIn
             qty = int(it["qty"])
             prod = Product.objects.get(pk=pid)
-            unit = Decimal(str(getattr(prod, "final_price_gross", None) or prod.price_gross))
+            unit = Decimal(
+                str(getattr(prod, "final_price_gross", None) or prod.price_gross)
+            )
             total += unit * qty
         return quant2(total)
 
-    def _apply_coupon(self, subtotal: Decimal, code: str, user: Optional[Any]) -> Tuple[Decimal, Decimal, Optional["Coupon"]]:
+    def _apply_coupon(
+        self, subtotal: Decimal, code: str, user: Optional[Any]
+    ) -> Tuple[Decimal, Decimal, Optional["Coupon"]]:
         if not code:
             return subtotal, Decimal("0.00"), None
 
@@ -1008,7 +1144,9 @@ class OrderCreateSerializer(serializers.Serializer):
             return subtotal, Decimal("0.00"), None
 
         # validated_data may be “empty” at type time; guard + cast to Mapping
-        vd: Mapping[str, Any] = cast(Mapping[str, Any], getattr(self, "validated_data", {}) or {})
+        vd: Mapping[str, Any] = cast(
+            Mapping[str, Any], getattr(self, "validated_data", {}) or {}
+        )
         raw_items = vd.get("items") or []  # safe even if missing/None
 
         # ensure a concrete list[dict] for the coupon API
@@ -1032,12 +1170,20 @@ class OrderCreateSerializer(serializers.Serializer):
         if not (user and getattr(user, "is_authenticated", False)):
             user = None
 
-        items_data: List[Dict[str, Any]] = cast(List[Dict[str, Any]], validated_data.pop("items", []))
-        shipping_data: Dict[str, Any] = cast(Dict[str, Any], validated_data.pop("shipping", {}) or {})
+        items_data: List[Dict[str, Any]] = cast(
+            List[Dict[str, Any]], validated_data.pop("items", [])
+        )
+        shipping_data: Dict[str, Any] = cast(
+            Dict[str, Any], validated_data.pop("shipping", {}) or {}
+        )
         coupon_code = str((validated_data.get("coupon_code") or "")).strip()
         payment_method = str(validated_data.get("payment_method") or "")
-        installments_months = cast(Optional[int], validated_data.get("installments_months"))
-        idempotency_key = str((validated_data.get("idempotency_key") or "")).strip() or None 
+        installments_months = cast(
+            Optional[int], validated_data.get("installments_months")
+        )
+        idempotency_key = (
+            str((validated_data.get("idempotency_key") or "")).strip() or None
+        )
 
         # If a key is supplied and an order already exists, return it (idempotent)
         # if idempotency_key:
@@ -1047,14 +1193,17 @@ class OrderCreateSerializer(serializers.Serializer):
 
         # totals (preliminary)
         subtotal = self._calc_subtotal(items_data)
-        total_after_discount, discount, coupon_obj = self._apply_coupon(subtotal, coupon_code, user)
+        total_after_discount, discount, coupon_obj = self._apply_coupon(
+            subtotal, coupon_code, user
+        )
 
         # safety: online payment cannot be 0 €
         if total_after_discount <= Decimal("0.00"):
-            raise serializers.ValidationError({
-                "detail": "Your total is 0.00 € after discounts. We can't create an online payment for 0 €. Please remove the full discount or add another item."
-            })
-
+            raise serializers.ValidationError(
+                {
+                    "detail": "Your total is 0.00 € after discounts. We can't create an online payment for 0 €. Please remove the full discount or add another item."
+                }
+            )
 
         with transaction.atomic():
            
@@ -1068,10 +1217,11 @@ class OrderCreateSerializer(serializers.Serializer):
                 shipping_price=Decimal("0.00"),
                 vat_total=Decimal("0.00"),
                 total_price=total_after_discount,
-
                 # payment
                 payment_method=payment_method,
-                installments_months=installments_months if installments_months else None,
+                installments_months=(
+                    installments_months if installments_months else None
+                ),
                 stock_locked=False,
                 stock_released=False,
                 status="pending",
@@ -1094,11 +1244,15 @@ class OrderCreateSerializer(serializers.Serializer):
                 pid = int(it["product_id"])
                 qty = int(it["qty"])
                 prod = Product.objects.select_for_update().get(pk=pid)
-                unit = Decimal(str(getattr(prod, "final_price_gross", None) or prod.price_gross))
+                unit = Decimal(
+                    str(getattr(prod, "final_price_gross", None) or prod.price_gross)
+                )
                 OrderItem.objects.create(
                     order=order,
                     product=prod,
-                    product_name_snapshot=(prod.title_en or prod.title_de or str(prod)),
+                    product_name_snapshot=(
+                        prod.title_en or prod.title_de or str(prod)
+                    ),
                     quantity=qty,
                     unit_price=unit,
                 )
@@ -1111,11 +1265,68 @@ class OrderCreateSerializer(serializers.Serializer):
                     order=order,
                 )
 
-            # If you want to attach coupon to order via CouponRedemption, do it in your view/service:
-            #   CouponRedemption.objects.create(coupon=coupon_obj, user=user if user else None, order=order)
-            # Here we just recompute totals to populate vat_total, etc.
+            # recompute totals to populate vat_total, etc.
             order.compute_totals(shipping_price=order.shipping_price)  # uses default VAT
-            order.save(update_fields=["subtotal", "discount_total", "shipping_price", "vat_total", "total_price"])
+            order.save(
+                update_fields=[
+                    "subtotal",
+                    "discount_total",
+                    "shipping_price",
+                    "vat_total",
+                    "total_price",
+                ]
+            )
+
+            # log checkout-start marketing event (best-effort, non-blocking)
+            try:
+                session_id = ""
+                if req is not None:
+                    headers = getattr(req, "headers", None)
+                    if headers:
+                        session_id = (
+                            headers.get("X-Client-Id", "")
+                            or headers.get("X-Session-Id", "")
+                        )
+                    if not session_id:
+                        session_id = (
+                            getattr(req, "session", None)
+                            and getattr(req.session, "session_key", "")
+                        ) or ""
+
+                    params = (
+                        getattr(req, "query_params", None)
+                        or getattr(req, "GET", {})
+                        or {}
+                    )
+
+                    MarketingEvent.objects.create(
+                        user=(
+                            user
+                            if (user and getattr(user, "is_authenticated", False))
+                            else None
+                        ),
+                        session_id=session_id or "",
+                        event_type=MarketingEvent.EventType.CHECKOUT_START,
+                        order=order,
+                        url_path=getattr(req, "path", "") or "",
+                        referrer=req.META.get("HTTP_REFERER", "") or "",
+                        utm_source=params.get("utm_source", "") or "",
+                        utm_medium=params.get("utm_medium", "") or "",
+                        utm_campaign=params.get("utm_campaign", "") or "",
+                        utm_term=params.get("utm_term", "") or "",
+                        utm_content=params.get("utm_content", "") or "",
+                        extra={
+                            "subtotal": str(subtotal),
+                            "discount_total": str(discount),
+                            "total_after_discount": str(total_after_discount),
+                            "payment_method": payment_method,
+                            "installments_months": installments_months,
+                            "coupon_code": coupon_code or "",
+                        },
+                    )
+            except Exception:
+                # never break checkout if tracking fails
+                pass
 
         return order
 
@@ -1129,7 +1340,15 @@ class OrderListItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Order
-        fields = ["id", "number", "status", "payment_status", "total_price", "created_at", "items_count"]
+        fields = [
+            "id",
+            "number",
+            "status",
+            "payment_status",
+            "total_price",
+            "created_at",
+            "items_count",
+        ]
 
     def get_items_count(self, obj):
         try:
@@ -1158,12 +1377,19 @@ class PromotionSerializer(serializers.ModelSerializer):
     class Meta:
         model = PromotionBanner
         fields = [
-            "id", "name",
-            "headline", "subheadline",
-            "bg_color", "text_color",
-            "link_url", "image_url",
-            "start_at", "end_at", "is_enabled",
-            "priority", "code",
+            "id",
+            "name",
+            "headline",
+            "subheadline",
+            "bg_color",
+            "text_color",
+            "link_url",
+            "image_url",
+            "start_at",
+            "end_at",
+            "is_enabled",
+            "priority",
+            "code",
         ]
 
     def get_code(self, obj):
@@ -1180,6 +1406,88 @@ class PromotionSerializer(serializers.ModelSerializer):
         if request and not str(url).startswith(("http://", "https://")):
             return request.build_absolute_uri(url)
         return url
+
+
+# -----------------
+# Digital marketing / tracking
+# -----------------
+
+
+class MarketingEventSerializer(serializers.ModelSerializer):
+    """
+    Public API for frontend tracking events.
+    Frontend sends:
+      - event_type: 'page_view', 'product_view', 'add_to_cart', ...
+      - session_id: client-side UUID stored in localStorage/cookie
+      - product_id / order_id (optional)
+      - coupon_code (optional)
+      - url_path, referrer, utm_*, device, user_agent, extra (JSON)
+    """
+
+    product_id = serializers.PrimaryKeyRelatedField(
+        source="product",
+        queryset=Product.objects.all(),
+        required=False,
+        allow_null=True,
+        write_only=True,
+    )
+    order_id = serializers.PrimaryKeyRelatedField(
+        source="order",
+        queryset=Order.objects.all(),
+        required=False,
+        allow_null=True,
+        write_only=True,
+    )
+    coupon_code = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        help_text="Optional coupon code; will be linked to a Coupon if found.",
+    )
+
+    class Meta:
+        model = MarketingEvent
+        fields = [
+            "id",
+            "event_type",
+            "session_id",
+            "url_path",
+            "referrer",
+            "utm_source",
+            "utm_medium",
+            "utm_campaign",
+            "utm_term",
+            "utm_content",
+            "country",
+            "device_type",
+            "user_agent",
+            "extra",
+            "created_at",
+            "product_id",
+            "order_id",
+            "coupon_code",
+        ]
+        read_only_fields = ["id", "created_at"]
+
+    def create(self, validated_data):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        user = getattr(request, "user", None) if request else None
+
+        coupon_code = (validated_data.pop("coupon_code", "") or "").strip()
+        if coupon_code:
+            coupon = Coupon.objects.filter(code__iexact=coupon_code).first()
+            if coupon:
+                validated_data["coupon"] = coupon
+
+        if user is not None and getattr(user, "is_authenticated", False):
+            validated_data["user"] = user
+
+        if request is not None and not validated_data.get("user_agent"):
+            ua = request.META.get("HTTP_USER_AGENT", "")
+            if ua:
+                validated_data["user_agent"] = ua[:255]
+
+        return MarketingEvent.objects.create(**validated_data)
 
 
 # -----------------

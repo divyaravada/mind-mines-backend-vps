@@ -1326,3 +1326,159 @@ class BirthdayCouponLog(models.Model):
 
     def __str__(self):
         return f"Birthday coupon for {self.user.email} on {self.sent_on}"
+
+
+# ----------------- Digital Marketing & Tracking -----------------
+
+
+class MarketingEvent(models.Model):
+    """
+    Generic tracking event for digital marketing / analytics.
+    Can be sent from the frontend whenever something important happens:
+    - page_view
+    - product_view
+    - add_to_cart
+    - checkout_start
+    - order_completed
+    - newsletter_subscribe
+    - coupon_applied
+    etc.
+    """
+
+    class EventType(models.TextChoices):
+        PAGE_VIEW = "page_view", "Page view"
+        PRODUCT_VIEW = "product_view", "Product view"
+        ADD_TO_CART = "add_to_cart", "Add to cart"
+        CART_VIEW = "cart_view", "Cart view"
+        CHECKOUT_START = "checkout_start", "Checkout started"
+        ORDER_COMPLETED = "order_completed", "Order completed"
+        NEWSLETTER_SUBSCRIBE = "newsletter_subscribe", "Newsletter subscribe"
+        COUPON_APPLIED = "coupon_applied", "Coupon applied"
+        WISHLIST_ADD = "wishlist_add", "Wishlist add"
+
+    # Who did it (optional, because many visitors are guests)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="marketing_events",
+    )
+
+    # Anonymous/browser tracking
+    session_id = models.CharField(
+        max_length=64,
+        blank=True,
+        db_index=True,
+        help_text="Anonymous session or client id from frontend (e.g. localStorage).",
+    )
+
+    event_type = models.CharField(max_length=64, choices=EventType.choices)
+
+    # Optional relations to link events back to main objects
+    product = models.ForeignKey(
+        "Product",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="marketing_events",
+    )
+    order = models.ForeignKey(
+        "Order",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="marketing_events",
+    )
+    coupon = models.ForeignKey(
+        "Coupon",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="marketing_events",
+    )
+
+    # Where it happened
+    url_path = models.CharField(
+        max_length=512,
+        blank=True,
+        help_text="Path on the MindMines site (e.g. /products/marble-bowl).",
+    )
+    referrer = models.CharField(
+        max_length=512,
+        blank=True,
+        help_text="Referrer URL if available.",
+    )
+
+    # UTM parameters for campaigns
+    utm_source = models.CharField(max_length=64, blank=True)
+    utm_medium = models.CharField(max_length=64, blank=True)
+    utm_campaign = models.CharField(max_length=128, blank=True)
+    utm_term = models.CharField(max_length=128, blank=True)
+    utm_content = models.CharField(max_length=128, blank=True)
+
+    # Basic geo/device info (optional, you can fill from backend or frontend)
+    country = models.CharField(
+        max_length=2,
+        blank=True,
+        help_text="ISO country code if known (e.g. DE).",
+    )
+    device_type = models.CharField(
+        max_length=32,
+        blank=True,
+        help_text="desktop / mobile / tablet etc.",
+    )
+    user_agent = models.CharField(max_length=256, blank=True)
+
+    # Free-form JSON for extra data (e.g. A/B test variant, scroll depth, etc.)
+    extra = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["event_type", "created_at"]),
+            models.Index(fields=["session_id", "created_at"]),
+            models.Index(fields=["utm_source", "utm_medium", "utm_campaign"]),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.event_type} @ {self.created_at:%Y-%m-%d %H:%M}"
+
+
+class AbandonedCartReminder(models.Model):
+    """
+    Log of 'abandoned cart' reminder emails / campaigns.
+    Used so you don't spam the same cart/customer many times.
+    """
+
+    cart = models.ForeignKey(
+        Cart,
+        on_delete=models.CASCADE,
+        related_name="abandoned_reminders",
+    )
+    # Normally the cart is linked to a user, but we keep an explicit email snapshot
+    email = models.EmailField(blank=True)
+
+    reminder_number = models.PositiveIntegerField(
+        default=1,
+        help_text="1 = first reminder, 2 = second, etc.",
+    )
+    campaign_name = models.CharField(
+        max_length=128,
+        blank=True,
+        help_text="Internal name of the campaign (e.g. 'WINTER24_ABANDONED_CART').",
+    )
+
+    sent_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("cart", "reminder_number")
+        indexes = [
+            models.Index(fields=["sent_at"]),
+            models.Index(fields=["campaign_name"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Abandoned cart reminder #{self.reminder_number} for cart {self.cart_id}"

@@ -51,7 +51,7 @@ from .models import (
     Address, Cart, Product, Review, Order, Wishlist,Coupon,
     OnDemandOrderRequest, NewsletterSubscriber, ContactMessage,
     PromotionBanner, StockAlert, ReturnRequest, ReturnAttachment, ProductEvent,
-    NaturalStone, NaturalStoneImage, StoneEnquiry, Invoice, OrderItem
+    NaturalStone, NaturalStoneImage, StoneEnquiry, Invoice, OrderItem, MarketingEvent, AbandonedCartReminder,
 )
 from .serializers import (
     CartSerializer, MyTokenObtainPairSerializer, ProfileSerializer, RegisterSerializer, AccountSerializer,
@@ -101,6 +101,17 @@ except Exception:
 # -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+def _evt(name: str) -> str:
+    """
+    Resolve MarketingEvent.EventType.<NAME> safely.
+    If choices / enum are not present for some reason,
+    it falls back to a lowercase string.
+    """
+    try:
+        return getattr(MarketingEvent.EventType, name)
+    except Exception:
+        return name.lower()
 
 @runtime_checkable
 class _HasRequest(Protocol):
@@ -1113,11 +1124,31 @@ class NewsletterSubscriberCreateView(generics.CreateAPIView):
     serializer_class = NewsletterSubscriberSerializer
     permission_classes = [AllowAny]
     authentication_classes = []
+
     def create(self, request, *args, **kwargs):
         email = (request.data.get("email") or "").strip().lower()
         if not email:
             return Response({"email": ["This field is required."]}, status=400)
         obj, created = NewsletterSubscriber.objects.get_or_create(email=email)
+
+        # 👇 NEW: log marketing event
+        try:
+            MarketingEvent.objects.create(
+                user=request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
+                session_id=(request.data.get("session_id") or "").strip()[:64],
+                event_type=MarketingEvent.EventType.NEWSLETTER_SUBSCRIBE,
+                url_path=(request.data.get("url_path") or "").strip()[:512],
+                referrer=(request.data.get("referrer") or "").strip()[:512],
+                utm_source=(request.data.get("utm_source") or "").strip(),
+                utm_medium=(request.data.get("utm_medium") or "").strip(),
+                utm_campaign=(request.data.get("utm_campaign") or "").strip(),
+                utm_term=(request.data.get("utm_term") or "").strip(),
+                utm_content=(request.data.get("utm_content") or "").strip(),
+                extra={"newsletter_email": obj.email},
+            )
+        except Exception:
+            logger.exception("Failed to create MarketingEvent for newsletter subscribe")
+
         # admin notify
         try:
             admin_html = render_to_string("emails/admin_newsletter_notify.html", {"email": obj.email})
@@ -1170,8 +1201,24 @@ class WishlistView(generics.ListCreateAPIView):
 
     def get_queryset(self) -> QuerySet[Any]:  # type: ignore[override]
         return Wishlist.objects.filter(user=self.request.user).order_by("id")
+    
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        wl: Wishlist = serializer.save(user=self.request.user)
+        # 👇 NEW: track wishlist_add event
+        try:
+            MarketingEvent.objects.create(
+                user=self.request.user,
+                session_id=(self.request.data.get("session_id") or "").strip()[:64],
+                event_type=_evt("WISHLIST_ADD"),
+                product=wl.product,
+                url_path=(self.request.data.get("url_path") or "").strip()[:512],
+                utm_source=(self.request.data.get("utm_source") or "").strip(),
+                utm_medium=(self.request.data.get("utm_medium") or "").strip(),
+                utm_campaign=(self.request.data.get("utm_campaign") or "").strip(),
+                extra={"wishlist_id": wl.id},
+            )
+        except Exception:
+            logger.exception("Failed to create MarketingEvent for wishlist_add")
 
 class WishlistDetailView(generics.DestroyAPIView):
     serializer_class = WishlistSerializer
@@ -2458,11 +2505,10 @@ def stripe_webhook(request):
             order.status = "paid"
             order.payment_status = "paid"
             order.paid_at = timezone.now()
-            order.save(update_fields=["status","payment_status","paid_at","payment_id"])
             changed = True
 
         # final charge id if available
-        if not order.payment_id:
+        if not getattr(order, "payment_id", None):
             ch_id = None
             charges_block = pi_data.get("charges", {})
             ch_list = charges_block.get("data") if isinstance(charges_block, dict) else None
@@ -2474,9 +2520,24 @@ def stripe_webhook(request):
                 order.payment_id = ch_id
                 changed = True
 
-
         if changed:
-            order.save(update_fields=["status","payment_status","paid_at","payment_id"])
+            order.save(update_fields=["status", "payment_status", "paid_at", "payment_id"])
+
+            # 👇 NEW: marketing conversion event
+            try:
+                MarketingEvent.objects.create(
+                    user=order.user if getattr(order, "user", None) else None,
+                    session_id="",
+                    event_type=_evt("ORDER_COMPLETED"),
+                    order=order,
+                    extra={
+                        "total_price": str(order.total_price),
+                        "payment_method": getattr(order, "payment_method", ""),
+                        "gateway": pi_data.get("payment_method_types"),
+                    },
+                )
+            except Exception:
+                logger.exception("Failed to create MarketingEvent for order_completed")
 
         # reserve inventory for fulfilled orders
         _safe(order.reserve_stock_atomic)
@@ -2759,14 +2820,37 @@ def send_on_demand_request_email(req: OnDemandOrderRequest):
 class OnDemandOrderCreateView(generics.CreateAPIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = OnDemandOrderRequestSerializer
+
     def perform_create(self, serializer):
         user = getattr(self.request, "user", None)
         instance = serializer.save(user=user if getattr(user, "is_authenticated", False) else None)
+
+        # 👇 NEW: marketing event
+        try:
+            MarketingEvent.objects.create(
+                user=user if getattr(user, "is_authenticated", False) else None,
+                session_id=(self.request.data.get("session_id") or "").strip()[:64],
+                event_type=_evt("ON_DEMAND_REQUEST"),
+                product=instance.product,
+                url_path=(self.request.data.get("url_path") or "").strip()[:512],
+                utm_source=(self.request.data.get("utm_source") or "").strip(),
+                utm_medium=(self.request.data.get("utm_medium") or "").strip(),
+                utm_campaign=(self.request.data.get("utm_campaign") or "").strip(),
+                extra={
+                    "on_demand_id": instance.id,
+                    "quantity": getattr(instance, "quantity", None),
+                    "email": getattr(instance, "email", None),
+                },
+            )
+        except Exception:
+            logger.exception("Failed to create MarketingEvent for on_demand_request")
+
         try:
             send_on_demand_request_email(instance)
         except Exception:
             pass
         self._payload = {"ok": True, "id": instance.id}
+
     def create(self, request, *args, **kwargs):
         super().create(request, *args, **kwargs)
         return Response(getattr(self, "_payload", {"ok": True}), status=201)
@@ -2774,9 +2858,27 @@ class OnDemandOrderCreateView(generics.CreateAPIView):
 class StockAlertCreateView(generics.CreateAPIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = StockAlertCreateSerializer
+
     def perform_create(self, serializer):
         alert = serializer.save()
         product = alert.product
+
+        # 👇 NEW: marketing event for subscription
+        try:
+            MarketingEvent.objects.create(
+                user=self.request.user if getattr(self.request, "user", None) and self.request.user.is_authenticated else None,
+                session_id=(self.request.data.get("session_id") or "").strip()[:64],
+                event_type=_evt("STOCK_ALERT_SUBSCRIBE"),
+                product=product,
+                url_path=(self.request.data.get("url_path") or "").strip()[:512],
+                utm_source=(self.request.data.get("utm_source") or "").strip(),
+                utm_medium=(self.request.data.get("utm_medium") or "").strip(),
+                utm_campaign=(self.request.data.get("utm_campaign") or "").strip(),
+                extra={"stock_alert_id": alert.id, "email": alert.email},
+            )
+        except Exception:
+            logger.exception("Failed to create MarketingEvent for stock_alert_subscribe")
+
         if (getattr(product, "quantity", 0) or 0) > 0:
             unsub = self._unsubscribe_url(alert)
             try:
@@ -2786,9 +2888,11 @@ class StockAlertCreateView(generics.CreateAPIView):
             self._payload = {"ok": True, "sent_now": True}
         else:
             self._payload = {"ok": True, "sent_now": False, "id": alert.id}
+
     def create(self, request, *args, **kwargs):
         super().create(request, *args, **kwargs)
         return Response(getattr(self, "_payload", {"ok": True}), status=201)
+    
     def _unsubscribe_url(self, alert: StockAlert) -> str:
         base = getattr(settings, "FRONTEND_URL", "").rstrip("/")
         api_base = getattr(settings, "API_BASE_PATH", "/api").rstrip("/")
@@ -2798,18 +2902,33 @@ class StockAlertUnsubscribeView(generics.DestroyAPIView):
     permission_classes = [permissions.AllowAny]
     lookup_field = "unsubscribe_token"
     queryset = StockAlert.objects.all()
+
+    def _deactivate_and_track(self, alert: StockAlert, request):
+        if alert.is_active:
+            alert.is_active = False
+            alert.save(update_fields=["is_active"])
+        # 👇 NEW: marketing event
+        try:
+            MarketingEvent.objects.create(
+                user=None,
+                session_id=(request.GET.get("session_id") or "").strip()[:64],
+                event_type=_evt("STOCK_ALERT_UNSUBSCRIBE"),
+                product=alert.product,
+                extra={"stock_alert_id": alert.id, "email": alert.email},
+            )
+        except Exception:
+            logger.exception("Failed to create MarketingEvent for stock_alert_unsubscribe")
+
     def get(self, request, *args, **kwargs):
         alert = get_object_or_404(self.get_queryset(), unsubscribe_token=kwargs.get("unsubscribe_token"))
-        if alert.is_active:
-            alert.is_active = False
-            alert.save(update_fields=["is_active"])
+        self._deactivate_and_track(alert, request)
         return Response({"ok": True, "unsubscribed": True}, status=200)
+
     def delete(self, request, *args, **kwargs):
         alert = get_object_or_404(self.get_queryset(), unsubscribe_token=kwargs.get("unsubscribe_token"))
-        if alert.is_active:
-            alert.is_active = False
-            alert.save(update_fields=["is_active"])
+        self._deactivate_and_track(alert, request)
         return Response(status=204)
+
 
 # -----------------------------------------------------------------------------
 # Birthday coupon
@@ -2881,6 +3000,23 @@ class SendBirthdayCouponAPIView(APIView):
                 coup, was_created = ensure_coupon_for_user(u)
                 created += 1 if was_created else 0
                 reused += 0 if was_created else 1
+
+                # 👇 NEW: marketing event for birthday coupon
+                try:
+                    MarketingEvent.objects.create(
+                        user=u,
+                        session_id="",
+                        event_type=_evt("BIRTHDAY_COUPON_SENT"),
+                        coupon=coup,
+                        extra={
+                            "percent": percent,
+                            "valid_until": ends_at.date().isoformat(),
+                            "was_created": was_created,
+                        },
+                    )
+                except Exception:
+                    logger.exception("Failed to create MarketingEvent for birthday_coupon_sent")
+                    
                 to = (u.email or "").strip()
                 if not to:
                     continue
@@ -3125,3 +3261,124 @@ class OrderPaymentStatusUpdateAPIView(APIView):
             "paid_at": getattr(order, "paid_at", None),
             "total_price": f"{order.total_price:.2f}",
         }, status=200)
+# -----------------------------------------------------------------------------
+# Digital Marketing / Tracking API
+# -----------------------------------------------------------------------------
+class MarketingEventTrackView(APIView):
+    """
+    Public endpoint for frontend tracking.
+
+    Example POST body:
+    {
+      "event_type": "product_view",
+      "product_id": 123,
+      "order_id": 45,
+      "coupon_code": "WINTER24",
+      "session_id": "abc123",
+      "url_path": "/products/marble-bowl",
+      "referrer": "https://google.com",
+      "utm_source": "google",
+      "utm_medium": "cpc",
+      "utm_campaign": "winter24",
+      "utm_term": "marble bowl",
+      "utm_content": "ad_variant_a",
+      "country": "DE",
+      "device_type": "desktop",
+      "extra": {...}
+    }
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request: Request):
+        data = request.data
+
+        raw_type = (data.get("event_type") or data.get("type") or "").strip().lower()
+        if not raw_type:
+            return Response({"detail": "event_type is required."}, status=400)
+
+        # If your model has EventType.choices we validate against it,
+        # otherwise we accept anything and just store a string.
+        valid_types = None
+        try:
+            valid_types = {choice[0] for choice in MarketingEvent.EventType.choices}
+        except Exception:
+            valid_types = None
+
+        if valid_types and raw_type not in valid_types:
+            return Response(
+                {
+                    "detail": (
+                        f"Invalid event_type '{raw_type}'. "
+                        f"Allowed: {sorted(valid_types)}"
+                    )
+                },
+                status=400,
+            )
+
+        # optional relations
+        product = None
+        order = None
+        coupon = None
+
+        pid = data.get("product_id")
+        if pid:
+            try:
+                product = Product.objects.get(pk=int(pid))
+            except (Product.DoesNotExist, ValueError, TypeError):
+                product = None
+
+        oid = data.get("order_id")
+        if oid:
+            try:
+                order = Order.objects.get(pk=int(oid))
+            except (Order.DoesNotExist, ValueError, TypeError):
+                order = None
+
+        coupon_code = (data.get("coupon_code") or "").strip()
+        if coupon_code:
+            coupon = Coupon.objects.filter(code__iexact=coupon_code).first()
+
+        session_id = (
+            (data.get("session_id") or data.get("cart_token") or "").strip()[:64]
+        )
+
+        # utm params
+        utm_source = (data.get("utm_source") or "").strip()
+        utm_medium = (data.get("utm_medium") or "").strip()
+        utm_campaign = (data.get("utm_campaign") or "").strip()
+        utm_term = (data.get("utm_term") or "").strip()
+        utm_content = (data.get("utm_content") or "").strip()
+
+        # page context
+        url_path = (data.get("url_path") or data.get("path") or "").strip()[:512]
+        referrer = (data.get("referrer") or "").strip()[:512]
+
+        # device / geo
+        country = (data.get("country") or "").upper()[:2]
+        device_type = (data.get("device_type") or "").strip()[:32]
+        user_agent = request.META.get("HTTP_USER_AGENT", "")[:256]
+
+        extra = data.get("extra") or {}
+
+        ev = MarketingEvent.objects.create(
+            user=request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
+            session_id=session_id,
+            event_type=raw_type if not valid_types else raw_type,
+            product=product,
+            order=order,
+            coupon=coupon,
+            url_path=url_path,
+            referrer=referrer,
+            utm_source=utm_source,
+            utm_medium=utm_medium,
+            utm_campaign=utm_campaign,
+            utm_term=utm_term,
+            utm_content=utm_content,
+            country=country,
+            device_type=device_type,
+            user_agent=user_agent,
+            extra=extra if isinstance(extra, dict) else {},
+        )
+
+        return Response({"ok": True, "id": ev.id}, status=201)

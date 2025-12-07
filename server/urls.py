@@ -54,6 +54,10 @@ from .views import (
     # Misc
     getRoutes, testEndPoint,
 
+    # Digital marketing
+    MarketingEventTrackView, 
+    
+
     # PayPal
     PaypalCreateOrder, PaypalCaptureOrder,
 
@@ -163,6 +167,9 @@ urlpatterns = [
     # -------- Misc --------
     path("", getRoutes, name="routes"),
     path("test/", testEndPoint, name="test_endpoint"),
+
+    # -------- Digital marketing / tracking --------
+    path("marketing/track/", MarketingEventTrackView.as_view(), name="marketing_track"),
 
     # -------- PayPal --------
     path("paypal/create-order/", PaypalCreateOrder.as_view(), name="paypal_create_order"),
