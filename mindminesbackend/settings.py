@@ -21,7 +21,12 @@ SECRET_KEY = 'django-insecure-7^uze)9(a$8&l#o&$h&6%x)t!es*(uvf3gqpcod$z%xrqi@)2y
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
 
-ALLOWED_HOSTS = ["mindmines.eu", "www.mindmines.eu"]
+ALLOWED_HOSTS = [
+    "mindmines.eu",
+    "www.mindmines.eu",
+    "127.0.0.1",
+    "localhost",
+]
 
 AUTH_USER_MODEL = 'server.User'
 
