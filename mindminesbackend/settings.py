@@ -73,7 +73,8 @@ INSTALLED_APPS = [
     'social_django',
     'djoser',
     'django_filters',
-   'server.apps.ServerConfig',
+    'server.apps.ServerConfig',
+    "csp",
 ]
 SITE_ID = 1
 
@@ -84,6 +85,7 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",  # must be high
     'social_django.middleware.SocialAuthExceptionMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    "csp.middleware.CSPMiddleware",
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -94,6 +96,24 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = 'mindminesbackend.urls'
+
+CSP_DEFAULT_SRC = ("'self'",)
+CSP_SCRIPT_SRC = (
+    "'self'",
+    "https://js.stripe.com",
+    "https://www.paypal.com",
+    "https://www.paypalobjects.com",
+)
+CSP_STYLE_SRC = (
+    "'self'",
+    "'unsafe-inline'",  # needed for some CSS-in-JS or 3rd-party widgets
+    "https://fonts.googleapis.com",
+)
+CSP_FONT_SRC = (
+    "'self'",
+    "https://fonts.gstatic.com",
+)
+CSP_IMG_SRC = ("'self'", "data:", "https:")
 
 TEMPLATES = [
     {
@@ -238,6 +258,17 @@ CSRF_TRUSTED_ORIGINS = [
     "https://mindmines.eu",
     "https://www.mindmines.eu",
 ]
+SECURE_SSL_REDIRECT = True
+
+SECURE_HSTS_SECONDS = 63072000
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = True
+
+SECURE_CONTENT_TYPE_NOSNIFF = True
+
+X_FRAME_OPTIONS = "SAMEORIGIN"
+
+
 
 # If you deploy to a domain, add it here too.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
