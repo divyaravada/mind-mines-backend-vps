@@ -12,6 +12,7 @@ from django.utils import timezone
 from django.conf import settings
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import timedelta, datetime
+from shop.utils.images import resize_image_file
 import secrets
 import uuid
 
@@ -391,12 +392,22 @@ class Product(models.Model):
         if self.price_net is not None:
             net = Decimal(self.price_net)
             self.price_gross = _q2(net * (Decimal(1) + Decimal(self.vat_rate)))
-        # If only gross entered, back-calc net for convenience
         elif self.price_gross is not None and self.price_net is None:
             gross = Decimal(self.price_gross)
             denom = (Decimal(1) + Decimal(self.vat_rate))
             if denom > 0:
                 self.price_net = _q2(gross / denom)
+        # ✅ Resize main image (e.g. 800×800) before saving
+        if self.image and hasattr(self.image, "file"):
+            resized = resize_image_file(
+                self.image.file,
+                max_width=800,
+                max_height=800,
+                output_format="WEBP",
+                quality=85,
+            )
+            if resized is not None:
+                self.image.save(resized.name, resized, save=False)
 
         creating = self.pk is None
         super().save(*args, **kwargs)
@@ -408,6 +419,7 @@ class Product(models.Model):
             if self.key != new_key:
                 self.key = new_key
                 super().save(update_fields=["key"])
+
 
     @property
     def low_stock(self) -> bool:
@@ -479,7 +491,21 @@ class ProductMedia(models.Model):
                 cnt = ProductMedia.objects.filter(product=self.product, media_type="video").count()
                 if cnt >= 10:
                     raise ValidationError("Each product can have at most 10 videos.")
+
         self.clean()
+
+        # ✅ Resize gallery image too (maybe smaller, e.g. 800 px)
+        if self.media_type == "image" and self.image and hasattr(self.image, "file"):
+            resized = resize_image_file(
+                self.image.file,
+                max_width=800,
+                max_height=800,
+                output_format="WEBP",
+                quality=85,
+            )
+            if resized is not None:
+                self.image.save(resized.name, resized, save=False)
+
         return super().save(*args, **kwargs)
 
     def __str__(self):
