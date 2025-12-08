@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.conf import settings
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import timedelta, datetime
-from shop.utils.images import resize_image_file
+from server.utils.images import resize_image_file
 import secrets
 import uuid
 
