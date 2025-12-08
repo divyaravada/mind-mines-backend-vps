@@ -1,4 +1,4 @@
-# shop/utils/images.py
+# server/utils/images.py
 from io import BytesIO
 
 from django.core.files.base import ContentFile
