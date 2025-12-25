@@ -1364,6 +1364,7 @@ class OrderListItemSerializer(serializers.ModelSerializer):
 class CouponPreviewIn(serializers.Serializer):
     code = serializers.CharField()
     items = OrderItemIn(many=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
 
 
 # -----------------

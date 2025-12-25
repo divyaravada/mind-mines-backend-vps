@@ -733,27 +733,29 @@ class OnDemandOrderRequestAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 @admin.register(Coupon)
 class CouponAdmin(admin.ModelAdmin):
-    """
-    Support the new Coupon fields used in views:
-    - code, kind, value, active, starts_at, ends_at, is_birthday
-    Optionally show usage_limit/times_used if present.
-    """
-    base_fields = ["code", "kind", "value", "active", "starts_at", "ends_at", "is_birthday", "usage_limit", "times_used"]
-
-    @staticmethod
-    def _has(model, f): return hasattr(model, f)
+    base_fields = [
+        "code", "kind", "value", "active",
+        "starts_at", "ends_at",
+        "min_subtotal", "max_uses", "max_uses_per_user",
+        "target", "assigned_users", "allowed_emails",
+        "products", "categories", "max_discount",
+        "is_birthday",
+    ]
 
     fields = [f for f in base_fields if hasattr(Coupon, f)]
-    list_display = tuple([f for f in ["code", "kind", "value", "active", "starts_at", "ends_at", "is_birthday", "times_used"] if hasattr(Coupon, f)])
-    list_filter  = tuple([f for f in ["active", "is_birthday", "starts_at", "ends_at", "kind"] if hasattr(Coupon, f)])
-    search_fields = tuple([f for f in ["code"] if hasattr(Coupon, f)])
+    list_display = tuple([f for f in [
+        "code", "kind", "value", "active", "target",
+        "starts_at", "ends_at", "is_birthday",
+    ] if hasattr(Coupon, f)])
+    list_filter = tuple([f for f in [
+        "active", "target", "is_birthday", "starts_at", "ends_at", "kind"
+    ] if hasattr(Coupon, f)])
+    search_fields = ("code",)
+
+    filter_horizontal = tuple([f for f in ["assigned_users", "products"] if hasattr(Coupon, f)])
 
     def get_readonly_fields(self, request, obj=None):
-        ro = []
-        if hasattr(Coupon, "times_used"):
-            ro.append("times_used")
-        return ro
-
+        return []
 # --------------------------------------------------------------------------------------
 # Promotion banner
 # --------------------------------------------------------------------------------------
