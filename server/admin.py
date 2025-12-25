@@ -209,6 +209,9 @@ class OrderItemInline(admin.TabularInline):
 class OrderAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
     inlines = [OrderItemInline]
+    list_filter = ("status", "created_at")
+    search_fields = ("number", "user__email", "email", "tracking_number", "coupon_redemption__coupon__code")
+    actions = [mark_paid, mark_shipped, mark_cancelled]
 
     # --------------------------
     # Helpers used in admin UI
@@ -364,38 +367,32 @@ class OrderAdmin(admin.ModelAdmin):
     # Safe dynamic config
     # --------------------------
     def _safe_fields(self, names):
-        return tuple([n for n in names if hasattr(self, n) or hasattr(Order, n)])
+        out = []
+        for n in names:
+            if hasattr(self, n) or hasattr(self.model, n):
+                out.append(n)
+        return tuple(out)
 
-    list_display = _safe_fields.__func__(None, [
-        "number", "user", "customer_email", "status",
-        "coupon_code_display", "coupon_used_by_display",
-        "total_price_display", "created_at",
-        "tracking_number", "tracking_carrier",
-    ])
+    # ✅ Django calls this for list page
+    def get_list_display(self, request):
+        return self._safe_fields([
+            "number", "user", "customer_email", "status",
+            "coupon_code_display", "coupon_used_by_display",
+            "total_price_display", "created_at",
+            "tracking_number", "tracking_carrier",
+        ])
 
-    list_filter = ("status", "created_at")
-    search_fields = ("number", "user__email", "email", "tracking_number", "coupon_redemption__coupon__code")
-
-    readonly_fields = _safe_fields.__func__(None, [
-        "number",
-        "subtotal_readonly", "discount_readonly", "shipping_fee_readonly", "vat_readonly", "total_price_readonly",
-        "payment_ref", "payment_id", "created_at", "updated_at",
-        "items_readonly", "delivered_at", "cancelled_at",
-        "customer_email", "shipping_snapshot_readonly",
-        "coupon_code_readonly", "coupon_used_by_readonly",
-    ])
-
-    fieldsets = (
-        (None, {"fields": ("number", "user", "customer_email", "created_at", "delivered_at", "cancelled_at")}),
-        ("Coupon", {"fields": ("coupon_code_readonly", "coupon_used_by_readonly")}),
-        ("Status & Payment", {"fields": ("status", "payment_method", "payment_ref", "payment_id")}),
-        ("Tracking", {"fields": ("tracking_number", "tracking_carrier", "tracking_url", "shipped_at")}),
-        ("Totals (read-only)", {"fields": ("subtotal_readonly", "discount_readonly", "shipping_fee_readonly", "vat_readonly", "total_price_readonly")}),
-        ("Shipping snapshot", {"fields": ("shipping_snapshot_readonly",)}),
-        ("Items", {"fields": ("items_readonly",)}),
-    )
-
-    actions = [mark_paid, mark_shipped, mark_cancelled]
+    # ✅ Django calls this for object edit page
+    def get_readonly_fields(self, request, obj=None):
+        base = [
+            "number",
+            "subtotal_readonly", "discount_readonly", "shipping_fee_readonly", "vat_readonly", "total_price_readonly",
+            "payment_ref", "payment_id", "created_at", "updated_at",
+            "items_readonly", "delivered_at", "cancelled_at",
+            "customer_email", "shipping_snapshot_readonly",
+            "coupon_code_readonly", "coupon_used_by_readonly",
+        ]
+        return self._safe_fields(base)
 
     def save_model(self, request, obj, form, change):
         prev = None
@@ -429,7 +426,7 @@ class OrderAdmin(admin.ModelAdmin):
                 send_shipping_update(obj, tracking=tracking)
             except Exception:
                 pass
-            
+
 # --------------------------------------------------------------------------------------
 # Invoice
 # --------------------------------------------------------------------------------------
