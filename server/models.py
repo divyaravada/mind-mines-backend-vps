@@ -1100,6 +1100,15 @@ class OrderItem(models.Model):
 DISCOUNT_TYPES = [("percent", "Percent"), ("fixed", "Fixed amount")]
 
 
+DISCOUNT_TYPES = [("percent", "Percent"), ("fixed", "Fixed amount")]
+
+COUPON_TARGETS = [
+    ("public", "Public (anyone)"),
+    ("users", "Assigned users only"),
+    ("emails", "Allowed emails only"),
+]
+
+
 class Coupon(models.Model):
     code = models.CharField(max_length=32, unique=True, db_index=True)
     kind = models.CharField(max_length=10, choices=DISCOUNT_TYPES, default="percent")
@@ -1113,14 +1122,30 @@ class Coupon(models.Model):
     max_uses = models.PositiveIntegerField(null=True, blank=True, help_text="Global usage limit across everyone")
     max_uses_per_user = models.PositiveIntegerField(null=True, blank=True, help_text="Per-account usage limit")
 
-    # targeting
+    # ✅ NEW: targeting mode
+    target = models.CharField(max_length=10, choices=COUPON_TARGETS, default="public")
+
+    # ✅ NEW: allow-list for specific users (requires login)
+    assigned_users = models.ManyToManyField(
+        "User",
+        blank=True,
+        related_name="assigned_coupons",
+        help_text="If target=users, only these users can use the coupon.",
+    )
+
+    # ✅ NEW: allow-list for emails (works for guest checkout too, if you pass email)
+    allowed_emails = ArrayField(
+        models.EmailField(),
+        default=list,
+        blank=True,
+        help_text="If target=emails, only these emails can use the coupon (case-insensitive).",
+    )
+
+    # targeting (existing)
     products = models.ManyToManyField("Product", blank=True, related_name="coupons")
     categories = ArrayField(models.CharField(max_length=30), default=list, blank=True)  # store category keys
 
-    # optional cap for percent coupons
     max_discount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-
-    # birthday flag (for admin campaigns)
     is_birthday = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1140,21 +1165,30 @@ class Coupon(models.Model):
             return False
         return True
 
+    def _email_ok(self, email: str) -> bool:
+        email = (email or "").strip().lower()
+        if not email:
+            return False
+        allowed = [e.strip().lower() for e in (self.allowed_emails or []) if str(e).strip()]
+        return email in set(allowed)
+
+    def _user_ok(self, user) -> bool:
+        if not user or not getattr(user, "is_authenticated", False):
+            return False
+        # If assigned_users is empty, treat as "no restriction" only when target=public.
+        return self.assigned_users.filter(pk=user.pk).exists()
+
     def eligible_items_subtotal(self, items):
-        """
-        items: iterable of OrderItem OR dicts { "product_id": int, "qty": int }
-        Returns gross subtotal of eligible items only.
-        """
+        # (UNCHANGED) ...
         subtotal = Decimal("0.00")
         allowed_products = set(self.products.values_list("id", flat=True)) if self.pk else set()
         allowed_categories = set(self.categories or [])
 
         for it in items:
-            # normalize access
             if hasattr(it, "product_id"):
                 pid = it.product_id
                 qty = it.quantity
-                unit = it.unit_price  # already gross
+                unit = it.unit_price
                 cat = it.product.category if getattr(it, "product", None) else None
             else:
                 pid = int(it.get("product_id"))
@@ -1175,9 +1209,14 @@ class Coupon(models.Model):
 
         return _q2(subtotal)
 
-    def can_apply(self, user, items, cart_subtotal):
+    def can_apply(self, user, items, cart_subtotal, email: str = ""):
         """
-        Return (ok, reason). Usage limits are checked only against PAID redemptions.
+        Return (ok, reason).
+        Usage limits are checked only against PAID redemptions.
+        Targeting:
+          - public: anyone
+          - users: only assigned_users (requires login)
+          - emails: only allowed_emails (guest or logged-in)
         """
         if not self.active:
             return False, "Coupon is not active."
@@ -1186,15 +1225,29 @@ class Coupon(models.Model):
         if Decimal(cart_subtotal) < self.min_subtotal:
             return False, f"Minimum order amount is {self.min_subtotal:.2f} €."
 
-        # count only paid redemptions towards limits
+        # ✅ NEW: enforce targeting
+        if self.target == "users":
+            if not user or not getattr(user, "is_authenticated", False):
+                return False, "Please sign in to use this coupon."
+            if not self._user_ok(user):
+                return False, "This coupon is not assigned to your account."
+        elif self.target == "emails":
+            # Prefer user.email if logged in; otherwise take provided email
+            effective_email = ""
+            if user and getattr(user, "is_authenticated", False):
+                effective_email = (getattr(user, "email", "") or "").strip()
+            effective_email = effective_email or (email or "").strip()
+            if not self._email_ok(effective_email):
+                return False, "This coupon is not available for this email."
+
         paid_q = CouponRedemption.objects.filter(coupon=self, order__status="paid")
 
         if self.max_uses is not None and paid_q.count() >= self.max_uses:
             return False, "Coupon usage limit reached."
 
-        if user and self.max_uses_per_user is not None:
+        if user and getattr(user, "is_authenticated", False) and self.max_uses_per_user is not None:
             user_paid = paid_q.filter(user=user).count()
-            has_open = Order.objects.filter(user=user, coupon_redemption__coupon=self)\
+            has_open = Order.objects.filter(user=user, coupon_redemption__coupon=self) \
                                     .exclude(status__in=["cancelled", "failed"]).exists()
             if user_paid >= self.max_uses_per_user or has_open:
                 return False, "You have already used this coupon."
@@ -1206,9 +1259,7 @@ class Coupon(models.Model):
         return True, ""
 
     def discount_amount(self, user, items, cart_subtotal):
-        """
-        Compute discount in EUR (gross).
-        """
+        # (UNCHANGED) ...
         elig_subtotal = self.eligible_items_subtotal(items)
         base = elig_subtotal if (self.products.exists() or (self.categories or [])) else Decimal(cart_subtotal)
 
@@ -1225,7 +1276,6 @@ class Coupon(models.Model):
 
         disc = min(disc, base)
         return _q2(disc)
-
 
 class CouponRedemption(models.Model):
     coupon = models.ForeignKey(Coupon, on_delete=models.CASCADE, related_name="redemptions")

@@ -1367,9 +1367,9 @@ class CouponPreviewAPIView(APIView):
         s.is_valid(raise_exception=True)
 
         vd: Dict[str, Any] = cast(Dict[str, Any], getattr(s, "validated_data", {}) or {})
-
         code = str(vd.get("code") or "").strip()
         items: List[Dict[str, Any]] = cast(List[Dict[str, Any]], vd.get("items") or [])
+        email = str(vd.get("email") or "").strip()  # ✅ NEW
 
         if not code:
             return Response({"ok": False, "error": "Code is required"}, status=400)
@@ -1378,7 +1378,6 @@ class CouponPreviewAPIView(APIView):
 
         subtotal = Decimal("0.00")
         for it in items:
-            # Guard and coerce product_id
             pid_raw = it.get("product_id")
             if pid_raw is None:
                 return Response({"ok": False, "error": "Each item must include product_id"}, status=400)
@@ -1387,7 +1386,6 @@ class CouponPreviewAPIView(APIView):
             except (TypeError, ValueError):
                 return Response({"ok": False, "error": "product_id must be an integer"}, status=400)
 
-            # Guard and coerce qty (default 1)
             qty_raw = it.get("qty", 1)
             try:
                 qty = int(qty_raw)
@@ -1411,7 +1409,8 @@ class CouponPreviewAPIView(APIView):
             else None
         )
 
-        ok, reason = coup.can_apply(user_or_none, items, subtotal)
+        # ✅ UPDATED: pass email for email-targeted coupons (guest)
+        ok, reason = coup.can_apply(user_or_none, items, subtotal, email=email)
         if not ok:
             return Response({"ok": False, "error": reason}, status=400)
 
@@ -1429,7 +1428,7 @@ class CouponPreviewAPIView(APIView):
                 "total": f"{total:.2f}",
             }
         )
-
+    
 class ActivePromotionAPIView(APIView):
     permission_classes = [AllowAny]
     renderer_classes = [JSONRenderer]
@@ -2988,11 +2987,31 @@ class SendBirthdayCouponAPIView(APIView):
             code = f"BD{mmdd}-{user.id}"
             coup = Coupon.objects.filter(code=code).first()
             if coup:
+                # Ensure assignment exists (safe idempotent)
+                if hasattr(coup, "target"):
+                    coup.target = "users"
+                    coup.max_uses = coup.max_uses or 1
+                    coup.max_uses_per_user = coup.max_uses_per_user or 1
+                    coup.save(update_fields=["target", "max_uses", "max_uses_per_user"])
+                if hasattr(coup, "assigned_users"):
+                    coup.assigned_users.add(user)
                 return coup, False
+
             coup = Coupon.objects.create(
-                code=code, kind="percent", value=percent, active=True,
-                starts_at=starts_at, ends_at=ends_at, is_birthday=True,
+                code=code,
+                kind="percent",
+                value=percent,
+                active=True,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                is_birthday=True,
+
+                # ✅ NEW
+                target="users",
+                max_uses=1,
+                max_uses_per_user=1,
             )
+            coup.assigned_users.add(user)  # ✅ NEW
             return coup, True
 
         for u in candidates:
