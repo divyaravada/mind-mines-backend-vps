@@ -211,13 +211,20 @@ class OrderItemInline(admin.TabularInline):
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
+
     list_display = (
         "number", "user", "customer_email", "status",
+        "coupon_code_display",  # ✅ NEW
+        "coupon_used_by_display",  # ✅ NEW (shows user/email)
         "total_price_display", "created_at",
         "tracking_number", "tracking_carrier",
     )
+
     list_filter = ("status", "created_at")
-    search_fields = ("number", "user__email", "email", "tracking_number")
+    search_fields = (
+        "number", "user__email", "email", "tracking_number",
+        "coupon_redemption__coupon__code",  # ✅ NEW
+    )
     actions = [mark_paid, mark_shipped, mark_cancelled]
 
     readonly_fields = (
@@ -226,10 +233,14 @@ class OrderAdmin(admin.ModelAdmin):
         "payment_ref", "payment_id", "created_at", "updated_at",
         "items_readonly", "delivered_at", "cancelled_at",
         "customer_email", "shipping_snapshot_readonly",
+
+        "coupon_code_readonly",   # ✅ NEW
+        "coupon_used_by_readonly" # ✅ NEW
     )
 
     fieldsets = (
         (None, {"fields": ("number","user","customer_email","created_at","delivered_at","cancelled_at")}),
+        ("Coupon", {"fields": ("coupon_code_readonly", "coupon_used_by_readonly")}),  # ✅ NEW section
         ("Status & Payment", {"fields": ("status","payment_method","payment_ref","payment_id")}),
         ("Tracking", {"fields": ("tracking_number","tracking_carrier","tracking_url","shipped_at")}),
         ("Totals (read-only)", {"fields": ("subtotal_readonly","discount_readonly","shipping_fee_readonly","vat_readonly","total_price_readonly")}),
@@ -239,226 +250,59 @@ class OrderAdmin(admin.ModelAdmin):
 
     inlines = [OrderItemInline]
 
-    # ---- list_display helpers ----
-    @admin.action(description="Release stock for selected orders")
-    def release_stock_action(self, request, queryset):
-        for order in queryset:
-            fn = getattr(order, "release_stock", None) or getattr(order, "release_stock_atomic", None)
-            if callable(fn):
-                try:
-                    fn()
-                except Exception:
-                    pass
-        self.message_user(request, "Released stock for selected orders.", level=messages.SUCCESS)
-    
-    @admin.display(description="Email")
-    def customer_email(self, obj):
-        return getattr(obj, "email", None) or getattr(getattr(obj, "user", None), "email", None) or "-"
-
-    @admin.display(description="Total price")
-    def total_price_display(self, obj):
-        val = getattr(obj, "total_price", None)
-        d = to_decimal_or_zero(val) if val is not None else None
-        return f"{d:.2f} €" if d is not None else "-"
-
-    # ---- totals (readonly) ----
-    @admin.display(description="Subtotal")
-    def subtotal_readonly(self, obj):
-        return f"{to_decimal_or_zero(getattr(obj, 'subtotal', 0)):.2f} €"
-
-    @admin.display(description="Discount")
-    def discount_readonly(self, obj):
-        raw = getattr(obj, "discount_total", None)
-        if raw is None:
-            raw = getattr(obj, "discount_amount", 0)
-        return f"-{to_decimal_or_zero(raw):.2f} €"
-
-    @admin.display(description="Shipping fee")
-    def shipping_fee_readonly(self, obj):
-        raw = getattr(obj, "shipping_price", None)
-        if raw is None:
-            raw = getattr(obj, "shipping_fee", 0)
-        return f"{to_decimal_or_zero(raw):.2f} €"
-
-    @admin.display(description="VAT")
-    def vat_readonly(self, obj):
-        vat = getattr(obj, "vat_total", None)
-        if vat is None:
-            vat = getattr(obj, "vat_amount", None)
-        if vat is None:
-            vat = getattr(obj, "tax_amount", 0)
-        return f"{to_decimal_or_zero(vat):.2f} €"
-
-    @admin.display(description="Total price")
-    def total_price_readonly(self, obj):
-        return f"{to_decimal_or_zero(getattr(obj, 'total_price', 0)):.2f} €"
-
-    # ---- payment/refs read-only helpers (exist as model fields) ----
-    def payment_ref(self, obj): return getattr(obj, "payment_ref", "") or "-"
-    def payment_id(self, obj):  return getattr(obj, "payment_id", "") or "-"
-
-    def delivered_at(self, obj):  return getattr(obj, "delivered_at", None)
-    def cancelled_at(self, obj):  return getattr(obj, "cancelled_at", None)
-
-    # ---- pretty shipping snapshot ----
-    @admin.display(description="Shipping snapshot")
-    def shipping_snapshot_readonly(self, obj):
-        fn  = (getattr(obj, "ship_first_name", "") or "").strip()
-        ln  = (getattr(obj, "ship_last_name", "") or "").strip()
-        l1  = (getattr(obj, "ship_line1", "") or "").strip()
-        l2  = (getattr(obj, "ship_line2", "") or "").strip()
-        pc  = (getattr(obj, "ship_postal", "") or "").strip()
-        city = (getattr(obj, "ship_city", "") or "").strip()
-        cty  = (getattr(obj, "ship_country", "") or "").strip()
-        ph   = (getattr(obj, "ship_phone", "") or "").strip()
-        stn  = (getattr(obj, "ship_street_name", "") or "").strip()
-        hno  = (getattr(obj, "ship_house_number", "") or "").strip()
-        # detect if snapshot is basically empty
-        snapshot_missing = not any([fn, ln, l1, l2, pc, city, cty, ph, stn, hno])
-
-        # fallback to related Address (legacy)
-        if snapshot_missing and hasattr(obj, "shipping_address"):
-            addr = getattr(obj, "shipping_address", None)
-            if addr:
-                fn  = (getattr(addr, "first_name", "") or "").strip()
-                ln  = (getattr(addr, "last_name", "") or "").strip()
-                l1  = (getattr(addr, "address_line1", "") or "").strip()
-                l2  = (getattr(addr, "apartment", "") or "").strip()
-                pc  = (getattr(addr, "postal_code", "") or "").strip()
-                city = (getattr(addr, "city", "") or "").strip()
-                cty  = (getattr(addr, "country", "") or "").strip()
-                ph   = (getattr(addr, "phone", "") or "").strip()
-                stn  = (getattr(addr, "street_name", "") or "").strip()
-                hno  = (getattr(addr, "house_number", "") or "").strip()
-
-        if not any([fn, ln, l1, l2, pc, city, cty, ph, stn, hno]):
-            return "-"
-
-        street_line = " ".join(x for x in [stn, hno] if x).strip()
-        return format_html(
-            "<div>"
-            "<div><b>{fn}</b> {ln}</div>"
-            "<div>{l1}</div>"
-            "<div>{l2}</div>"
-            "<div>{pc} {city}</div>"
-            "<div>{cty}</div>"
-            "<div>{ph}</div>"
-            "{street}"
-            "</div>",
-            fn=fn, ln=ln, l1=l1, l2=l2, pc=pc, city=city, cty=cty, ph=ph,
-            street=format_html("<div>Street: {}</div>", street_line) if street_line else "",
-        )
-    
-
-    # ---- items pretty table ----
-    @admin.display(description="Items")
-    def items_readonly(self, obj):
-        items_mgr = getattr(obj, "items", None)
-        if items_mgr is None or not hasattr(items_mgr, "all"):
-            return "-"
-        rows = []
-        all_items = items_mgr.all()
-
-        for it in all_items:
-            name = getattr(it, "product_name", None) or getattr(it, "product_name_snapshot", None)
-            if not name:
-                prod = getattr(it, "product", None)
-                name = (getattr(prod, "title_en", None) or
-                        getattr(prod, "title_de", None) or
-                        (str(prod) if prod else "-"))
-
-            qty = getattr(it, "quantity", 1) or 1
-            unit_raw = getattr(it, "unit_price_gross", None)
-            if unit_raw is None:
-                unit_raw = getattr(it, "unit_price", None)
-
-            # format unit
-            unit_dec = to_decimal_or_zero(unit_raw) if unit_raw is not None else None
-            unit_fmt = f"{unit_dec:.2f} €" if unit_dec is not None else "-"
-
-            # line total
-            total_dec = None
-            try:
-                if hasattr(it, "line_total") and callable(it.line_total):
-                    # line_total may return Decimal|float|str; normalize
-                    total_dec = to_decimal_or_zero(it.line_total())
-                else:
-                    total_dec = to_decimal_or_zero(unit_raw or 0) * int(qty)
-            except Exception:
-                total_dec = None
-
-            total_fmt = f"{total_dec:.2f} €" if total_dec is not None else "-"
-
-            rows.append((f"{name} × {qty}", unit_fmt, total_fmt))
-
-        if not rows:
-            return "-"
-        return format_html(
-            "<table style='width:100%'><tr><th align='left'>Item</th>"
-            "<th align='right'>Unit</th><th align='right'>Total</th></tr>{}</table>",
-            format_html_join(
-                "",
-                "<tr><td>{}</td><td align='right'>{}</td><td align='right'>{}</td></tr>",
-                rows
-            )
-        )
-    def save_model(self, request, obj, form, change):
-        """
-        When admin edits an order and saves, automatically send
-        a shipping email if shipping was just added / order marked as shipped.
-        """
-        prev = None
-        if change and obj.pk:
-            try:
-                prev = Order.objects.get(pk=obj.pk)
-            except Order.DoesNotExist:
-                prev = None
-
-        # Save changes first
-        super().save_model(request, obj, form, change)
-
-        # Decide if we should send a shipping email
-        should_send = False
-        tracking = (obj.tracking_number or "").strip()
-
+    # ✅ NEW: show coupon code in order list
+    @admin.display(description="Coupon")
+    def coupon_code_display(self, obj):
         try:
-            if prev is None:
-                # New object created in admin:
-                # Only send if it is already in shipped state or has tracking.
-                if (obj.status == "shipped") or tracking:
-                    should_send = True
-            else:
-                # Status changed to shipped
-                if prev.status != "shipped" and obj.status == "shipped":
-                    should_send = True
-
-                # shipped_at was empty before and is now set
-                if (not prev.shipped_at) and obj.shipped_at:
-                    should_send = True
-
-                # Tracking number was empty before and is now present
-                if (not (prev.tracking_number or "").strip()) and tracking:
-                    should_send = True
+            red = getattr(obj, "coupon_redemption", None)
+            if red and getattr(red, "coupon", None):
+                return (red.coupon.code or "").upper()
         except Exception:
-            should_send = False
+            pass
+        return "-"
 
-        if should_send:
-            try:
-                # Uses your existing helper that already sends EN/DE email
-                send_shipping_update(obj, tracking=tracking)
-            except Exception:
-                # Never break admin save if email fails
-                pass
+    # ✅ NEW: show who used it (user email or guest email)
+    @admin.display(description="Coupon used by")
+    def coupon_used_by_display(self, obj):
+        try:
+            red = getattr(obj, "coupon_redemption", None)
+            if not red:
+                return "-"
+            u = getattr(red, "user", None)
+            if u and getattr(u, "email", None):
+                return u.email
+            # guest: show order.email
+            return getattr(obj, "email", None) or "-"
+        except Exception:
+            return "-"
 
+    # ✅ NEW: show coupon info on order detail page
+    @admin.display(description="Coupon code")
+    def coupon_code_readonly(self, obj):
+        return self.coupon_code_display(obj)
+
+    @admin.display(description="Coupon used by")
+    def coupon_used_by_readonly(self, obj):
+        return self.coupon_used_by_display(obj)
 # --------------------------------------------------------------------------------------
 # Invoice
 # --------------------------------------------------------------------------------------
 @admin.register(Invoice)
 class InvoiceAdmin(admin.ModelAdmin):
-    list_display = ("number", "order", "created_at")
-    search_fields = ("number", "order__number", "order__user__email")
+    list_display = ("number", "order", "coupon_code", "created_at")  # ✅ add coupon_code
+    search_fields = ("number", "order__number", "order__user__email", "order__coupon_redemption__coupon__code")
     list_select_related = ("order",)
     ordering = ("-created_at",)
+
+    @admin.display(description="Coupon")
+    def coupon_code(self, obj):
+        try:
+            o = getattr(obj, "order", None)
+            red = getattr(o, "coupon_redemption", None) if o else None
+            coup = getattr(red, "coupon", None) if red else None
+            return (getattr(coup, "code", "") or "").upper() or "-"
+        except Exception:
+            return "-"
 
 # --------------------------------------------------------------------------------------
 # Cart
@@ -731,31 +575,78 @@ class OnDemandOrderRequestAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 # Coupon
 # --------------------------------------------------------------------------------------
+class CouponRedemptionInline(admin.TabularInline):
+    model = CouponRedemption
+    extra = 0
+    can_delete = False
+    fields = ("order_link", "order_status", "user_email", "created_at")
+    readonly_fields = ("order_link", "order_status", "user_email", "created_at")
+
+    @admin.display(description="Order")
+    def order_link(self, obj):
+        try:
+            o = getattr(obj, "order", None)
+            if not o:
+                return "-"
+            # admin change link
+            return format_html(
+                "<a href='/admin/server/order/{}/change/'>#{}</a>",
+                o.pk,
+                getattr(o, "number", o.pk),
+            )
+        except Exception:
+            return "-"
+
+    @admin.display(description="Order status")
+    def order_status(self, obj):
+        try:
+            o = getattr(obj, "order", None)
+            return getattr(o, "status", "-") if o else "-"
+        except Exception:
+            return "-"
+
+    @admin.display(description="Used by")
+    def user_email(self, obj):
+        try:
+            u = getattr(obj, "user", None)
+            if u and getattr(u, "email", None):
+                return u.email
+            # guest: fall back to order.email
+            o = getattr(obj, "order", None)
+            return getattr(o, "email", "-") if o else "-"
+        except Exception:
+            return "-"
+
+
 @admin.register(Coupon)
 class CouponAdmin(admin.ModelAdmin):
-    base_fields = [
-        "code", "kind", "value", "active",
-        "starts_at", "ends_at",
-        "min_subtotal", "max_uses", "max_uses_per_user",
-        "target", "assigned_users", "allowed_emails",
-        "products", "categories", "max_discount",
-        "is_birthday",
-    ]
-
-    fields = [f for f in base_fields if hasattr(Coupon, f)]
-    list_display = tuple([f for f in [
-        "code", "kind", "value", "active", "target",
-        "starts_at", "ends_at", "is_birthday",
-    ] if hasattr(Coupon, f)])
-    list_filter = tuple([f for f in [
-        "active", "target", "is_birthday", "starts_at", "ends_at", "kind"
-    ] if hasattr(Coupon, f)])
+    list_display = (
+        "code", "kind", "value", "active", "starts_at", "ends_at", "is_birthday",
+        "paid_uses", "paid_unique_users"  # ✅ NEW counters
+    )
+    list_filter  = ("active", "is_birthday", "starts_at", "ends_at", "kind")
     search_fields = ("code",)
 
-    filter_horizontal = tuple([f for f in ["assigned_users", "products"] if hasattr(Coupon, f)])
+    # ✅ show who used it (paid orders only)
+    inlines = [CouponRedemptionInline]
 
-    def get_readonly_fields(self, request, obj=None):
-        return []
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        # annotate paid usage counts
+        return qs.annotate(
+            _paid_uses=Count("redemptions", filter=Q(redemptions__order__status="paid"), distinct=True),
+            _paid_users=Count("redemptions__user", filter=Q(redemptions__order__status="paid"), distinct=True),
+        )
+
+    @admin.display(description="Paid uses")
+    def paid_uses(self, obj):
+        return getattr(obj, "_paid_uses", 0)
+
+    @admin.display(description="Paid users")
+    def paid_unique_users(self, obj):
+        return getattr(obj, "_paid_users", 0)
+
+
 # --------------------------------------------------------------------------------------
 # Promotion banner
 # --------------------------------------------------------------------------------------
