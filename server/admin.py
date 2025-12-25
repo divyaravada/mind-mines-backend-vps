@@ -13,7 +13,7 @@ from .utils.invoices import generate_invoice_pdf as _gen_inv_pdf
 from django.utils import timezone
 
 from .models import (
-    Cart, CartItem, Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage, OnDemandOrderRequest,ProductEvent,
+    Cart, CartItem, CouponRedemption, Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage, OnDemandOrderRequest,ProductEvent,
     StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber, Coupon, StockAlert,
     Address, Order, Review, OrderItem, Invoice, ReturnRequest, ReturnAttachment, PromotionBanner
 )
