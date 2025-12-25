@@ -176,7 +176,6 @@ class OrderItemInline(admin.TabularInline):
 
     @admin.display(description="Item")
     def item_name(self, obj):
-        # prefer stored snapshot
         name = getattr(obj, "product_name", None) or getattr(obj, "product_name_snapshot", None)
         if name:
             return name
@@ -204,64 +203,142 @@ class OrderItemInline(admin.TabularInline):
             unit = getattr(obj, "unit_price", 0)
         qty = getattr(obj, "quantity", 1) or 1
         return fmt_eur((unit or 0) * qty)
-    
-    # --------------------------------------------------------------------------------------
-    # Order admin
-    # --------------------------------------------------------------------------------------
+
+
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
-
-    list_display = (
-        "number", "user", "customer_email", "status",
-        "coupon_code_display",  # ✅ NEW
-        "coupon_used_by_display",  # ✅ NEW (shows user/email)
-        "total_price_display", "created_at",
-        "tracking_number", "tracking_carrier",
-    )
-
-    list_filter = ("status", "created_at")
-    search_fields = (
-        "number", "user__email", "email", "tracking_number",
-        "coupon_redemption__coupon__code",  # ✅ NEW
-    )
-    actions = [mark_paid, mark_shipped, mark_cancelled]
-
-    readonly_fields = (
-        "number",
-        "subtotal_readonly", "discount_readonly", "shipping_fee_readonly", "vat_readonly", "total_price_readonly",
-        "payment_ref", "payment_id", "created_at", "updated_at",
-        "items_readonly", "delivered_at", "cancelled_at",
-        "customer_email", "shipping_snapshot_readonly",
-
-        "coupon_code_readonly",   # ✅ NEW
-        "coupon_used_by_readonly" # ✅ NEW
-    )
-
-    fieldsets = (
-        (None, {"fields": ("number","user","customer_email","created_at","delivered_at","cancelled_at")}),
-        ("Coupon", {"fields": ("coupon_code_readonly", "coupon_used_by_readonly")}),  # ✅ NEW section
-        ("Status & Payment", {"fields": ("status","payment_method","payment_ref","payment_id")}),
-        ("Tracking", {"fields": ("tracking_number","tracking_carrier","tracking_url","shipped_at")}),
-        ("Totals (read-only)", {"fields": ("subtotal_readonly","discount_readonly","shipping_fee_readonly","vat_readonly","total_price_readonly")}),
-        ("Shipping snapshot", {"fields": ("shipping_snapshot_readonly",)}),
-        ("Items", {"fields": ("items_readonly",)}),
-    )
-
     inlines = [OrderItemInline]
 
-    # ✅ NEW: show coupon code in order list
+    # --------------------------
+    # Helpers used in admin UI
+    # --------------------------
+    @admin.display(description="Email")
+    def customer_email(self, obj):
+        return getattr(obj, "email", None) or getattr(getattr(obj, "user", None), "email", None) or "-"
+
+    @admin.display(description="Total price")
+    def total_price_display(self, obj):
+        val = getattr(obj, "total_price", None)
+        d = to_decimal_or_zero(val) if val is not None else None
+        return f"{d:.2f} €" if d is not None else "-"
+
+    @admin.display(description="Subtotal")
+    def subtotal_readonly(self, obj):
+        return f"{to_decimal_or_zero(getattr(obj, 'subtotal', 0)):.2f} €"
+
+    @admin.display(description="Discount")
+    def discount_readonly(self, obj):
+        raw = getattr(obj, "discount_total", None)
+        if raw is None:
+            raw = getattr(obj, "discount_amount", 0)
+        return f"-{to_decimal_or_zero(raw):.2f} €"
+
+    @admin.display(description="Shipping fee")
+    def shipping_fee_readonly(self, obj):
+        raw = getattr(obj, "shipping_price", None)
+        if raw is None:
+            raw = getattr(obj, "shipping_fee", 0)
+        return f"{to_decimal_or_zero(raw):.2f} €"
+
+    @admin.display(description="VAT")
+    def vat_readonly(self, obj):
+        vat = getattr(obj, "vat_total", None)
+        if vat is None:
+            vat = getattr(obj, "vat_amount", None)
+        if vat is None:
+            vat = getattr(obj, "tax_amount", 0)
+        return f"{to_decimal_or_zero(vat):.2f} €"
+
+    @admin.display(description="Total price")
+    def total_price_readonly(self, obj):
+        return f"{to_decimal_or_zero(getattr(obj, 'total_price', 0)):.2f} €"
+
+    @admin.display(description="Shipping snapshot")
+    def shipping_snapshot_readonly(self, obj):
+        fn  = (getattr(obj, "ship_first_name", "") or "").strip()
+        ln  = (getattr(obj, "ship_last_name", "") or "").strip()
+        l1  = (getattr(obj, "ship_line1", "") or "").strip()
+        l2  = (getattr(obj, "ship_line2", "") or "").strip()
+        pc  = (getattr(obj, "ship_postal", "") or "").strip()
+        city = (getattr(obj, "ship_city", "") or "").strip()
+        cty  = (getattr(obj, "ship_country", "") or "").strip()
+        ph   = (getattr(obj, "ship_phone", "") or "").strip()
+        stn  = (getattr(obj, "ship_street_name", "") or "").strip()
+        hno  = (getattr(obj, "ship_house_number", "") or "").strip()
+
+        if not any([fn, ln, l1, l2, pc, city, cty, ph, stn, hno]):
+            return "-"
+
+        street_line = " ".join(x for x in [stn, hno] if x).strip()
+        return format_html(
+            "<div>"
+            "<div><b>{fn}</b> {ln}</div>"
+            "<div>{l1}</div>"
+            "<div>{l2}</div>"
+            "<div>{pc} {city}</div>"
+            "<div>{cty}</div>"
+            "<div>{ph}</div>"
+            "{street}"
+            "</div>",
+            fn=fn, ln=ln, l1=l1, l2=l2, pc=pc, city=city, cty=cty, ph=ph,
+            street=format_html("<div>Street: {}</div>", street_line) if street_line else "",
+        )
+
+    @admin.display(description="Items")
+    def items_readonly(self, obj):
+        items_mgr = getattr(obj, "items", None)
+        if items_mgr is None or not hasattr(items_mgr, "all"):
+            return "-"
+        rows = []
+        for it in items_mgr.all():
+            name = getattr(it, "product_name", None) or getattr(it, "product_name_snapshot", None)
+            if not name:
+                prod = getattr(it, "product", None)
+                name = (getattr(prod, "title_en", None) or getattr(prod, "title_de", None) or (str(prod) if prod else "-"))
+
+            qty = getattr(it, "quantity", 1) or 1
+            unit_raw = getattr(it, "unit_price_gross", None)
+            if unit_raw is None:
+                unit_raw = getattr(it, "unit_price", None)
+
+            unit_dec = to_decimal_or_zero(unit_raw) if unit_raw is not None else None
+            unit_fmt = f"{unit_dec:.2f} €" if unit_dec is not None else "-"
+
+            try:
+                if hasattr(it, "line_total") and callable(it.line_total):
+                    total_dec = to_decimal_or_zero(it.line_total())
+                else:
+                    total_dec = to_decimal_or_zero(unit_raw or 0) * int(qty)
+            except Exception:
+                total_dec = None
+            total_fmt = f"{total_dec:.2f} €" if total_dec is not None else "-"
+
+            rows.append((f"{name} × {qty}", unit_fmt, total_fmt))
+
+        if not rows:
+            return "-"
+
+        return format_html(
+            "<table style='width:100%'><tr><th align='left'>Item</th>"
+            "<th align='right'>Unit</th><th align='right'>Total</th></tr>{}</table>",
+            format_html_join(
+                "",
+                "<tr><td>{}</td><td align='right'>{}</td><td align='right'>{}</td></tr>",
+                rows
+            )
+        )
+
+    # ✅ Coupon tracking (admin)
     @admin.display(description="Coupon")
     def coupon_code_display(self, obj):
         try:
             red = getattr(obj, "coupon_redemption", None)
-            if red and getattr(red, "coupon", None):
-                return (red.coupon.code or "").upper()
+            coup = getattr(red, "coupon", None) if red else None
+            return (getattr(coup, "code", "") or "").upper() or "-"
         except Exception:
-            pass
-        return "-"
+            return "-"
 
-    # ✅ NEW: show who used it (user email or guest email)
     @admin.display(description="Coupon used by")
     def coupon_used_by_display(self, obj):
         try:
@@ -271,12 +348,10 @@ class OrderAdmin(admin.ModelAdmin):
             u = getattr(red, "user", None)
             if u and getattr(u, "email", None):
                 return u.email
-            # guest: show order.email
             return getattr(obj, "email", None) or "-"
         except Exception:
             return "-"
 
-    # ✅ NEW: show coupon info on order detail page
     @admin.display(description="Coupon code")
     def coupon_code_readonly(self, obj):
         return self.coupon_code_display(obj)
@@ -284,6 +359,77 @@ class OrderAdmin(admin.ModelAdmin):
     @admin.display(description="Coupon used by")
     def coupon_used_by_readonly(self, obj):
         return self.coupon_used_by_display(obj)
+
+    # --------------------------
+    # Safe dynamic config
+    # --------------------------
+    def _safe_fields(self, names):
+        return tuple([n for n in names if hasattr(self, n) or hasattr(Order, n)])
+
+    list_display = _safe_fields.__func__(None, [
+        "number", "user", "customer_email", "status",
+        "coupon_code_display", "coupon_used_by_display",
+        "total_price_display", "created_at",
+        "tracking_number", "tracking_carrier",
+    ])
+
+    list_filter = ("status", "created_at")
+    search_fields = ("number", "user__email", "email", "tracking_number", "coupon_redemption__coupon__code")
+
+    readonly_fields = _safe_fields.__func__(None, [
+        "number",
+        "subtotal_readonly", "discount_readonly", "shipping_fee_readonly", "vat_readonly", "total_price_readonly",
+        "payment_ref", "payment_id", "created_at", "updated_at",
+        "items_readonly", "delivered_at", "cancelled_at",
+        "customer_email", "shipping_snapshot_readonly",
+        "coupon_code_readonly", "coupon_used_by_readonly",
+    ])
+
+    fieldsets = (
+        (None, {"fields": ("number", "user", "customer_email", "created_at", "delivered_at", "cancelled_at")}),
+        ("Coupon", {"fields": ("coupon_code_readonly", "coupon_used_by_readonly")}),
+        ("Status & Payment", {"fields": ("status", "payment_method", "payment_ref", "payment_id")}),
+        ("Tracking", {"fields": ("tracking_number", "tracking_carrier", "tracking_url", "shipped_at")}),
+        ("Totals (read-only)", {"fields": ("subtotal_readonly", "discount_readonly", "shipping_fee_readonly", "vat_readonly", "total_price_readonly")}),
+        ("Shipping snapshot", {"fields": ("shipping_snapshot_readonly",)}),
+        ("Items", {"fields": ("items_readonly",)}),
+    )
+
+    actions = [mark_paid, mark_shipped, mark_cancelled]
+
+    def save_model(self, request, obj, form, change):
+        prev = None
+        if change and obj.pk:
+            try:
+                prev = Order.objects.get(pk=obj.pk)
+            except Order.DoesNotExist:
+                prev = None
+
+        super().save_model(request, obj, form, change)
+
+        should_send = False
+        tracking = (getattr(obj, "tracking_number", "") or "").strip()
+
+        try:
+            if prev is None:
+                if (getattr(obj, "status", "") == "shipped") or tracking:
+                    should_send = True
+            else:
+                if getattr(prev, "status", "") != "shipped" and getattr(obj, "status", "") == "shipped":
+                    should_send = True
+                if (not getattr(prev, "shipped_at", None)) and getattr(obj, "shipped_at", None):
+                    should_send = True
+                if (not (getattr(prev, "tracking_number", "") or "").strip()) and tracking:
+                    should_send = True
+        except Exception:
+            should_send = False
+
+        if should_send:
+            try:
+                send_shipping_update(obj, tracking=tracking)
+            except Exception:
+                pass
+            
 # --------------------------------------------------------------------------------------
 # Invoice
 # --------------------------------------------------------------------------------------
