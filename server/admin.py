@@ -13,7 +13,7 @@ from .utils.invoices import generate_invoice_pdf as _gen_inv_pdf
 from django.utils import timezone
 
 from .models import (
-    Cart, CartItem, CouponRedemption, Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage, OnDemandOrderRequest,ProductEvent,
+    Cart, CartItem, CouponRedemption, LoginOTP, Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage, OnDemandOrderRequest,ProductEvent,
     StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber, Coupon, StockAlert,
     Address, Order, Review, OrderItem, Invoice, ReturnRequest, ReturnAttachment, PromotionBanner
 )
@@ -549,7 +549,13 @@ class ProfileAdmin(admin.ModelAdmin):
     @admin.display(boolean=True, description="Verified")
     def verified_col(self, obj): return bool(getattr(obj, "verified", False))
     
-
+@admin.register(LoginOTP)
+class LoginOTPAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "created_at", "expires_at", "attempts", "consumed_at", "ip")
+    search_fields = ("user__email", "id")
+    list_filter = ("consumed_at", "created_at", "expires_at")
+    ordering = ("-created_at",)
+    readonly_fields = ("id", "user", "created_at", "expires_at", "attempts", "consumed_at", "ip", "user_agent", "code_hash")
 # --------------------------------------------------------------------------------------
 # Product & Media
 # --------------------------------------------------------------------------------------

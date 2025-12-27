@@ -15,6 +15,7 @@ from datetime import timedelta, datetime
 from server.utils.images import resize_image_file
 import secrets
 import uuid
+from django.contrib.auth.hashers import make_password, check_password
 
 # ----------------- Constants -----------------
 
@@ -146,7 +147,56 @@ class Profile(models.Model):
     def __str__(self):
         return f"{self.user.email} profile"
 
+class LoginOTP(models.Model):
+    """
+    Stores short-lived OTP for 2-step login.
+    We store HASH (not plain code).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="login_otps")
+
+    code_hash = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)
+
+    attempts = models.PositiveIntegerField(default=0)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+
+    # optional: client metadata
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "expires_at"]),
+            models.Index(fields=["expires_at"]),
+        ]
+
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at
+
+    def is_consumed(self) -> bool:
+        return self.consumed_at is not None
+
+    def set_code(self, code: str) -> None:
+        self.code_hash = make_password(code)
+
+    def check_code(self, code: str) -> bool:
+        return check_password(code, self.code_hash)
+
+    @classmethod
+    def create_for_user(cls, user, code: str, ip: str = "", user_agent: str = "", ttl_minutes: int = 10):
+        now = timezone.now()
+        obj = cls(
+            user=user,
+            expires_at=now + timedelta(minutes=ttl_minutes),
+            ip=ip or None,
+            user_agent=(user_agent or "")[:255],
+        )
+        obj.set_code(code)
+        obj.save()
+        return obj
 
 # ----------------- Addresses -----------------
 

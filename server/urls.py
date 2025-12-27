@@ -11,7 +11,7 @@ from .feeds import merchant_products_feed
 
 from .views import (
     # Auth / profile
-    ProductDemandSummaryAPIView, RegisterView, UserProfileAPIView, AccountAPIView, AccountDeleteRequestView,
+    LoginStartAPIView, LoginVerifyAPIView, ProductDemandSummaryAPIView, RegisterView, UserProfileAPIView, AccountAPIView, AccountDeleteRequestView,
 
     # Addresses
     AddressListCreateAPIView, AddressDetailAPIView, AddressSetDefaultAPIView,
@@ -101,7 +101,8 @@ urlpatterns = [
     path("users/profile/", UserProfileAPIView.as_view(), name="user_profile"),
     path("users/account/", AccountAPIView.as_view(), name="account"),
     path("users/account/delete-request/", AccountDeleteRequestView.as_view(), name="account_delete_request"),
-
+    path("users/login/start/", LoginStartAPIView.as_view(), name="login_start"),
+    path("users/login/verify/", LoginVerifyAPIView.as_view(), name="login_verify"),
     # -------- Social login --------
     path("auth/google/", GoogleLoginAPIView.as_view(), name="google_login"),
 
