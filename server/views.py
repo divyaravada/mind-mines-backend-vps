@@ -1,4 +1,5 @@
 # server/views.py
+import random
 from os import truncate
 import json, re, requests as http
 import logging
@@ -11,7 +12,7 @@ from django.core.files.uploadedfile import UploadedFile
 from django.utils.datastructures import MultiValueDict
 from django.utils.encoding import force_str
 from django.conf import settings
-from django.contrib.auth import get_user_model
+from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import EmailMultiAlternatives, send_mail
 from django.db import transaction
@@ -48,13 +49,13 @@ from google.auth.transport.requests import Request as GoogleRequest
 
 # --- local imports (models/serializers/utils) ---
 from .models import (
-    Address, Cart, Product, Review, Order, Wishlist,Coupon,
+    Address, Cart, LoginOTP, Product, Review, Order, Wishlist,Coupon,
     OnDemandOrderRequest, NewsletterSubscriber, ContactMessage,
     PromotionBanner, StockAlert, ReturnRequest, ReturnAttachment, ProductEvent,
     NaturalStone, NaturalStoneImage, StoneEnquiry, Invoice, OrderItem, MarketingEvent, AbandonedCartReminder,
 )
 from .serializers import (
-    CartSerializer, MyTokenObtainPairSerializer, ProfileSerializer, RegisterSerializer, AccountSerializer,
+    CartSerializer, LoginStartSerializer, LoginVerifySerializer, MyTokenObtainPairSerializer, ProfileSerializer, RegisterSerializer, AccountSerializer,
     AddressSerializer, NaturalStoneSerializer, StoneEnquirySerializer,
     ProductSerializer, ProductMiniSerializer,
     ReviewWriteSerializer, ReviewSerializer,
@@ -255,6 +256,130 @@ class IsOwnerOrAdmin(permissions.BasePermission):
             return False
         return bool(getattr(obj, "user_id", None) == getattr(user, "id", None) or getattr(user, "is_staff", False))
 
+def _client_ip(request) -> str:
+    try:
+        xff = request.META.get("HTTP_X_FORWARDED_FOR")
+        if xff:
+            return xff.split(",")[0].strip()
+        return request.META.get("REMOTE_ADDR", "") or ""
+    except Exception:
+        return ""
+
+
+def _make_otp_code() -> str:
+    # 6-digit numeric OTP
+    return f"{random.randint(0, 999999):06d}"
+
+
+class LoginStartAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        ser = LoginStartSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+
+        email = ser.validated_data["email"].strip().lower()
+        password = ser.validated_data["password"]
+
+        # authenticate uses your USERNAME_FIELD=email
+        user = authenticate(request, username=email, password=password)
+
+        # Don’t leak whether user exists
+        if not user:
+            return Response({"ok": False, "detail": "Invalid credentials."}, status=400)
+
+        # If you want to block login unless verified:
+        # (your system uses is_active for verification)
+        if not getattr(user, "is_active", True):
+            return Response({"ok": False, "detail": "Account not verified."}, status=403)
+
+        # Optional: basic rate-limit (one active OTP per user)
+        # Invalidate older, unconsumed OTPs
+        try:
+            LoginOTP.objects.filter(user=user, consumed_at__isnull=True, expires_at__gt=timezone.now()).update(
+                expires_at=timezone.now()
+            )
+        except Exception:
+            pass
+
+        code = _make_otp_code()
+        otp = LoginOTP.create_for_user(
+            user=user,
+            code=code,
+            ip=_client_ip(request),
+            user_agent=(request.META.get("HTTP_USER_AGENT", "") or "")[:255],
+            ttl_minutes=10,
+        )
+
+        # Send email (EN/DE). Reuse your existing helper.
+        try:
+            subj = "Your login code / Ihr Login-Code"
+            en = f"<p>Your MindMines login code is: <b>{code}</b></p><p>Valid for 10 minutes.</p>"
+            de = f"<p>Ihr MindMines Login-Code lautet: <b>{code}</b></p><p>Gültig für 10 Minuten.</p>"
+            _send_bilingual(subj, user.email, en, de)  # ✅ you already have this helper
+        except Exception:
+            # If email fails, don’t allow login to proceed
+            return Response({"ok": False, "detail": "Could not send OTP email."}, status=500)
+
+        payload = {"ok": True, "otp_id": str(otp.id), "detail": "OTP sent to email."}
+        if getattr(request, "user", None) and getattr(settings, "DEBUG", False):
+            # do NOT expose OTP in production
+            payload["dev_code"] = code
+        return Response(payload, status=200)
+
+
+class LoginVerifyAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        ser = LoginVerifySerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+
+        otp_id = ser.validated_data["otp_id"]
+        code = str(ser.validated_data["code"]).strip()
+
+        otp = LoginOTP.objects.select_related("user").filter(id=otp_id).first()
+        if not otp:
+            return Response({"ok": False, "detail": "Invalid OTP session."}, status=400)
+
+        if otp.is_consumed():
+            return Response({"ok": False, "detail": "OTP already used."}, status=400)
+
+        if otp.is_expired():
+            return Response({"ok": False, "detail": "OTP expired."}, status=400)
+
+        # attempts limit
+        if otp.attempts >= 5:
+            return Response({"ok": False, "detail": "Too many attempts."}, status=429)
+
+        if not otp.check_code(code):
+            otp.attempts = otp.attempts + 1
+            otp.save(update_fields=["attempts"])
+            return Response({"ok": False, "detail": "Invalid code."}, status=400)
+
+        # success -> consume and issue tokens
+        otp.consumed_at = timezone.now()
+        otp.save(update_fields=["consumed_at"])
+
+        user = otp.user
+
+        refresh = RefreshToken.for_user(user)
+        access = refresh.access_token
+
+        return Response(
+            {
+                "ok": True,
+                "refresh": str(refresh),
+                "access": str(access),
+                "user": {
+                    "id": user.pk,
+                    "email": getattr(user, "email", ""),
+                    "username": getattr(user, "username", "") or "",
+                },
+            },
+            status=200,
+  
+        )
 # -----------------------------------------------------------------------------
 # Account
 # -----------------------------------------------------------------------------

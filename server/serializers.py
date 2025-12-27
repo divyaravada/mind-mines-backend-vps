@@ -125,7 +125,14 @@ class AccountSerializer(serializers.Serializer):
         prof.save()
         return instance
 
+class LoginStartSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
 
+class LoginVerifySerializer(serializers.Serializer):
+    otp_id = serializers.UUIDField()
+    code = serializers.CharField(max_length=10)
+    
 # -----------------
 # Addresses
 # -----------------
