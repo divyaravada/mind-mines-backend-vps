@@ -14,6 +14,7 @@ from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import timedelta, datetime
 from server.utils.images import resize_image_file
 import secrets
+from django.utils.text import slugify
 import uuid
 from django.contrib.auth.hashers import make_password, check_password
 
@@ -348,6 +349,7 @@ class Product(models.Model):
     # Titles
     title_en = models.CharField(max_length=255, default="")
     title_de = models.CharField(max_length=255, default="")
+    slug = models.SlugField(max_length=255, unique=True, blank=True)
 
     # 3 short bullet-style lines (USPs)
     short_description1_en = models.CharField(max_length=255, blank=True)
@@ -460,6 +462,10 @@ class Product(models.Model):
                 self.image.save(resized.name, resized, save=False)
 
         creating = self.pk is None
+
+        if not self.slug:
+            base = self.title_en or self.title_de
+            self.slug = slugify(base)
         super().save(*args, **kwargs)
 
         # Assign pretty key after we have an ID
