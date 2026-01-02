@@ -349,7 +349,7 @@ class Product(models.Model):
     # Titles
     title_en = models.CharField(max_length=255, default="")
     title_de = models.CharField(max_length=255, default="")
-    slug = models.SlugField(max_length=255, unique=True, blank=True)
+    slug = models.SlugField(max_length=255, blank=True)
 
     # 3 short bullet-style lines (USPs)
     short_description1_en = models.CharField(max_length=255, blank=True)
