@@ -67,6 +67,21 @@ DEFAULT_VAT_RATE = Decimal("0.19")
 def _q2(d: Decimal) -> Decimal:
     return Decimal(d).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
+def make_unique_slug(instance, slug_value: str) -> str:
+        """
+        Ensure slug is unique by appending -2, -3, ...
+        Excludes current instance (so editing same product doesn't fail).
+        """
+        base = slugify(slug_value) if slug_value else ""
+        if not base:
+            return ""
+
+        slug = base
+        i = 2
+        while Product.objects.exclude(pk=instance.pk).filter(slug=slug).exists():
+            slug = f"{base}-{i}"
+            i += 1
+        return slug
 # ----------------- Users -----------------
 
 class CustomUserManager(DjangoUserManager["User"]):
@@ -437,21 +452,7 @@ class Product(models.Model):
             if vr < 0 or vr > 1:
                 raise ValidationError({"vat_rate": "VAT must be between 0 and 1 (e.g., 0.19 for 19%)."})
 
-    def make_unique_slug(instance, slug_value: str) -> str:
-        """
-        Ensure slug is unique by appending -2, -3, ...
-        Excludes current instance (so editing same product doesn't fail).
-        """
-        base = slugify(slug_value) if slug_value else ""
-        if not base:
-            return ""
-
-        slug = base
-        i = 2
-        while Product.objects.exclude(pk=instance.pk).filter(slug=slug).exists():
-            slug = f"{base}-{i}"
-            i += 1
-        return slug
+    
     
     def save(self, *args, **kwargs):
         self.clean()
