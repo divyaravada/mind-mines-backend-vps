@@ -437,6 +437,26 @@ class Product(models.Model):
             if vr < 0 or vr > 1:
                 raise ValidationError({"vat_rate": "VAT must be between 0 and 1 (e.g., 0.19 for 19%)."})
 
+    def _generate_unique_slug(self, base: str) -> str:
+        """
+        Generate a unique slug like:
+        my-product, my-product-2, my-product-3, ...
+        """
+        base_slug = slugify(base)[:250] or "product"
+        slug_candidate = base_slug
+        i = 2
+
+        qs = Product.objects.all()
+        if self.pk:
+            qs = qs.exclude(pk=self.pk)
+
+        while qs.filter(slug=slug_candidate).exists():
+            suffix = f"-{i}"
+            slug_candidate = f"{base_slug[: (255 - len(suffix))]}{suffix}"
+            i += 1
+
+        return slug_candidate
+    
     def save(self, *args, **kwargs):
         self.clean()
 
@@ -463,9 +483,14 @@ class Product(models.Model):
 
         creating = self.pk is None
 
+         # ✅ Ensure slug exists AND is unique (fixes admin "slug already exists")
+        base = (self.title_en or self.title_de or "").strip()
         if not self.slug:
-            base = self.title_en or self.title_de
-            self.slug = slugify(base)
+            self.slug = self._generate_unique_slug(base)
+        else:
+            # if admin/user typed a slug, still ensure it's unique
+            self.slug = self._generate_unique_slug(self.slug)
+
         super().save(*args, **kwargs)
 
         # Assign pretty key after we have an ID
