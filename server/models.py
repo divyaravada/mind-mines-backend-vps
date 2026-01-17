@@ -437,25 +437,21 @@ class Product(models.Model):
             if vr < 0 or vr > 1:
                 raise ValidationError({"vat_rate": "VAT must be between 0 and 1 (e.g., 0.19 for 19%)."})
 
-    def _generate_unique_slug(self, base: str) -> str:
+    def make_unique_slug(instance, slug_value: str) -> str:
         """
-        Generate a unique slug like:
-        my-product, my-product-2, my-product-3, ...
+        Ensure slug is unique by appending -2, -3, ...
+        Excludes current instance (so editing same product doesn't fail).
         """
-        base_slug = slugify(base)[:250] or "product"
-        slug_candidate = base_slug
+        base = slugify(slug_value) if slug_value else ""
+        if not base:
+            return ""
+
+        slug = base
         i = 2
-
-        qs = Product.objects.all()
-        if self.pk:
-            qs = qs.exclude(pk=self.pk)
-
-        while qs.filter(slug=slug_candidate).exists():
-            suffix = f"-{i}"
-            slug_candidate = f"{base_slug[: (255 - len(suffix))]}{suffix}"
+        while Product.objects.exclude(pk=instance.pk).filter(slug=slug).exists():
+            slug = f"{base}-{i}"
             i += 1
-
-        return slug_candidate
+        return slug
     
     def save(self, *args, **kwargs):
         self.clean()
@@ -469,7 +465,8 @@ class Product(models.Model):
             denom = (Decimal(1) + Decimal(self.vat_rate))
             if denom > 0:
                 self.price_net = _q2(gross / denom)
-        # ✅ Resize main image (e.g. 800×800) before saving
+
+        # ✅ Resize main image safely
         if self.image and hasattr(self.image, "file"):
             resized = resize_image_file(
                 self.image.file,
@@ -483,13 +480,12 @@ class Product(models.Model):
 
         creating = self.pk is None
 
-         # ✅ Ensure slug exists AND is unique (fixes admin "slug already exists")
-        base = (self.title_en or self.title_de or "").strip()
-        if not self.slug:
-            self.slug = self._generate_unique_slug(base)
+        # ✅ Slug: allow admin input but enforce uniqueness
+        if self.slug:
+            self.slug = make_unique_slug(self, self.slug)
         else:
-            # if admin/user typed a slug, still ensure it's unique
-            self.slug = self._generate_unique_slug(self.slug)
+            base = self.title_en or self.title_de
+            self.slug = make_unique_slug(self, base)
 
         super().save(*args, **kwargs)
 
@@ -500,7 +496,6 @@ class Product(models.Model):
             if self.key != new_key:
                 self.key = new_key
                 super().save(update_fields=["key"])
-
 
     @property
     def low_stock(self) -> bool:

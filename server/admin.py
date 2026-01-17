@@ -574,6 +574,7 @@ class ProductMediaInline(admin.TabularInline):
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
+    readonly_fields = ("slug",)
     inlines = [ProductMediaInline]
     list_display = ["title_en", "category", "price_col", "quantity_col", "demand_score_display", "add_to_carts_display", "wishlists_display","views_display",]
     search_fields = ("title_en", "title_de", "category")
