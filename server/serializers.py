@@ -411,10 +411,13 @@ class ProductSerializer(serializers.ModelSerializer):
     stock = serializers.SerializerMethodField()
     reviews_count = serializers.SerializerMethodField()
     average_rating = serializers.SerializerMethodField()
+
     price_net = serializers.DecimalField(max_digits=10, decimal_places=0, required=False, allow_null=True)
     vat_rate = serializers.DecimalField(max_digits=4, decimal_places=4)
-    price_gross = serializers.SerializerMethodField()
-    sale_price_gross = serializers.SerializerMethodField()
+
+    # ✅ keep these as numeric fields (no formatting)
+    price_gross = serializers.DecimalField(max_digits=10, decimal_places=0)
+    sale_price_gross = serializers.DecimalField(max_digits=10, decimal_places=0, required=False, allow_null=True)
 
     class Meta:
         model = Product
@@ -460,8 +463,6 @@ class ProductSerializer(serializers.ModelSerializer):
             "reviews_count",
             "average_rating",
         ]
-
-    
 
     def _abs(self, request, url: str) -> str:
         if not url:
