@@ -840,13 +840,64 @@ class ProductFilterMixin:
         return out
 
     def _to_decimal(self, val: Any) -> Optional[Decimal]:
+        """
+        Parse prices in EU/US formats and return whole-euro Decimal (drops cents):
+
+        Examples:
+        "1.345,50€" -> 1345
+        "1,345.50€" -> 1345
+        "231.24€"   -> 231
+        "45€"       -> 45
+        """
         if val is None:
             return None
-        s = str(val).strip().replace("€", "").replace(",", "")
+
+        s = str(val).strip()
+        if not s:
+                return None
+
+        # remove currency and spaces
+        s = s.replace("€", "").replace(" ", "")
+
         if not s:
             return None
+
         try:
-            return Decimal(s)
+            # If both '.' and ',' exist, decide decimal separator by last occurrence
+            if "." in s and "," in s:
+                last_dot = s.rfind(".")
+                last_comma = s.rfind(",")
+                if last_comma > last_dot:
+                    # EU style: 1.345,50  -> remove thousands '.', replace ',' with '.'
+                    s = s.replace(".", "").replace(",", ".")
+                else:
+                    # US style: 1,345.50  -> remove thousands ',', keep '.'
+                    s = s.replace(",", "")
+
+            # Only comma exists -> could be decimal or thousands
+            elif "," in s and "." not in s:
+                # if ends with ,dd => decimal
+                if re.search(r",\d{1,2}$", s):
+                    s = s.replace(".", "")  # just in case
+                    s = s.replace(",", ".")
+                else:
+                    # thousands separator
+                    s = s.replace(",", "")
+
+            # Only dot exists -> could be decimal or thousands
+            elif "." in s and "," not in s:
+                # if ends with .dd => decimal
+                if re.search(r"\.\d{1,2}$", s):
+                    pass  # keep dot as decimal separator
+                else:
+                    # thousands separator (EU sometimes uses dots)
+                    s = s.replace(".", "")
+
+            d = Decimal(s)
+
+            # drop cents -> whole euros
+            return Decimal(int(d))
+
         except (InvalidOperation, ValueError, TypeError):
             return None
 
@@ -898,6 +949,21 @@ class ProductFilterMixin:
             qs = qs.filter(price_gross__gte=min_price)
         if max_price is not None:
             qs = qs.filter(price_gross__lte=max_price)
+
+        # --- ordering mapping for frontend values ---
+        ordering_param = req.request.query_params.get("ordering")
+        if ordering_param:
+            mapping = {
+                "price": "price_gross",
+                "-price": "-price_gross",
+                "title": "title_en",
+                "-title": "-title_en",
+                "created": "created_at",
+                "-created": "-created_at",
+            }
+            mapped = mapping.get(ordering_param.strip(), None)
+            if mapped:
+                qs = qs.order_by(mapped)
 
         return qs.annotate(
             reviews_count=Count("reviews", distinct=True),
