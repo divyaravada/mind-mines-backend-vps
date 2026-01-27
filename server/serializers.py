@@ -415,8 +415,6 @@ class ProductSerializer(serializers.ModelSerializer):
     vat_rate = serializers.DecimalField(max_digits=4, decimal_places=4)
     price_gross = serializers.SerializerMethodField()
     sale_price_gross = serializers.SerializerMethodField()
-    final_price_gross = serializers.SerializerMethodField()
-    price_gross_display = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -447,10 +445,8 @@ class ProductSerializer(serializers.ModelSerializer):
             "price_net",
             "vat_rate",
             "price_gross",
-            "price_gross_display",
             "sale_price_gross",
             "discount_percent",
-            "final_price_gross",
             "is_discounted",
             # misc
             "key",
@@ -464,28 +460,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "average_rating",
         ]
 
-    def _int_eur(self, val):
-        if val is None:
-            return None
-        try:
-            return int(Decimal(val))
-        except Exception:
-            return None
-
-    def get_price_gross(self, obj):
-        return self._int_eur(obj.price_gross)
-
-    def get_sale_price_gross(self, obj):
-        return self._int_eur(obj.sale_price_gross)
-
-    def get_final_price_gross(self, obj):
-        return self._int_eur(obj.final_price_gross)
     
-    def get_price_gross_display(self, obj):
-        n = self._int_eur(obj.price_gross)
-        if n is None:
-            return ""
-        return f"{n:,}".replace(",", ".") + "€"
 
     def _abs(self, request, url: str) -> str:
         if not url:

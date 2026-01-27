@@ -86,7 +86,6 @@ COLOR_CHOICES = [
 DEFAULT_VAT_RATE = Decimal("0.19")
 
 def _q2(x: Decimal) -> Decimal:
-    """Quantize to 0 decimals (integer euros)."""
     return Decimal(x).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
 def make_unique_slug(instance, slug_value: str) -> str:
@@ -430,7 +429,7 @@ class Product(models.Model):
     # misc
     dimensions = models.CharField(max_length=255, blank=True)
     weight = models.CharField(max_length=100, blank=True)
-    category = models.CharField(max_length=30, default="home_decor")
+    category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default="home_decor")
 
     # ---------- PRICE: NO CENTS ----------
     # gross is VAT-included, stored as integer euros
@@ -509,8 +508,37 @@ class Product(models.Model):
             if denom > 0:
                 self.price_net = _q2(gross / denom)
 
-        # keep your image resize + slug logic same (not touched here)
+        # ✅ Resize main image safely
+        if self.image and hasattr(self.image, "file"):
+            resized = resize_image_file(
+                self.image.file,
+                max_width=800,
+                max_height=800,
+                output_format="WEBP",
+                quality=85,
+            )
+            if resized is not None:
+                self.image.save(resized.name, resized, save=False)
+
+        creating = self.pk is None
+
+        # ✅ Slug: allow admin input but enforce uniqueness
+        if self.slug:
+            self.slug = make_unique_slug(self, self.slug)
+        else:
+            base = self.title_en or self.title_de
+            self.slug = make_unique_slug(self, base)
+
+        
         super().save(*args, **kwargs)
+
+    # Assign pretty key after we have an ID
+        if (creating or not self.key) and self.pk:
+            cat_prefix = CATEGORY_CODES.get(self.category, "MIND")
+            new_key = f"{cat_prefix}{str(cast(int, self.pk)).zfill(2)}"
+            if self.key != new_key:
+                self.key = new_key
+                super().save(update_fields=["key"])
 
     @property
     def low_stock(self) -> bool:
@@ -527,11 +555,18 @@ class Product(models.Model):
         if q < 5:
             return "Hurry — almost gone!"
         return "In stock"
+
+    @property
+    def is_discounted(self) -> bool:
+        if self.sale_price_gross is not None and self.price_gross is not None:
+            return Decimal(self.sale_price_gross) < Decimal(self.price_gross)
+        return bool(self.discount_percent and self.discount_percent > 0)
     
     @property
     def final_price_gross(self) -> Decimal:
         base = Decimal(self.price_gross or 0)
-        sale = Decimal(self.sale_price_gross) if self.sale_price_gross is not None else None
+        sale = Decimal(self.sale_price_gross or 0) if self.sale_price_gross is not None else None
+        
         if sale is not None and sale > 0 and sale < base:
             return _q2(sale)
         if self.discount_percent:
@@ -541,6 +576,7 @@ class Product(models.Model):
 
     def __str__(self):
         return self.title_en
+
 
 class ProductMedia(models.Model):
     MEDIA_TYPE_CHOICES = [("image", "Image"), ("video", "Video")]
