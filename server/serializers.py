@@ -446,6 +446,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "vat_rate",
             "price_gross",
             "sale_price_gross",
+            "final_price_gross",
             "discount_percent",
             "is_discounted",
             # misc
