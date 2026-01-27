@@ -513,6 +513,22 @@ class Product(models.Model):
         super().save(*args, **kwargs)
 
     @property
+    def low_stock(self) -> bool:
+        return 0 < int(self.quantity or 0) < 5
+
+    @property
+    def out_of_stock(self) -> bool:
+        return int(self.quantity or 0) <= 0
+
+    def stock_message(self) -> str:
+        q = int(self.quantity or 0)
+        if q <= 0:
+            return "Out of stock — new batch arriving soon"
+        if q < 5:
+            return "Hurry — almost gone!"
+        return "In stock"
+    
+    @property
     def final_price_gross(self) -> Decimal:
         base = Decimal(self.price_gross or 0)
         sale = Decimal(self.sale_price_gross) if self.sale_price_gross is not None else None
