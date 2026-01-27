@@ -438,7 +438,6 @@ class ProductSerializer(serializers.ModelSerializer):
             "descriptionpara2_de",
             "descriptionpara3_en",
             "descriptionpara3_de",
-            "type_of_stone",
             "material",
             "color",
             "stone_color_image_url",
