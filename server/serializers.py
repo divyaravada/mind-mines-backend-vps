@@ -416,9 +416,10 @@ class ProductSerializer(serializers.ModelSerializer):
         max_digits=10, decimal_places=2, required=False, allow_null=True
     )
     vat_rate = serializers.DecimalField(max_digits=4, decimal_places=4)
+    price_gross = serializers.SerializerMethodField()
+    sale_price_gross = serializers.SerializerMethodField()
+    final_price_gross = serializers.SerializerMethodField()
     price_gross_display = serializers.SerializerMethodField()
-    sale_price_gross_display = serializers.SerializerMethodField()
-    final_price_gross_display = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -449,12 +450,10 @@ class ProductSerializer(serializers.ModelSerializer):
             "price_net",
             "vat_rate",
             "price_gross",
+            "price_gross_display",
             "sale_price_gross",
             "discount_percent",
             "final_price_gross",
-            "price_gross_display",
-            "sale_price_gross_display",
-            "final_price_gross_display",
             "is_discounted",
             # misc
             "key",
@@ -468,28 +467,28 @@ class ProductSerializer(serializers.ModelSerializer):
             "average_rating",
         ]
 
-    def _format_eur_no_cents(self, val) -> str:
-        """
-        1186 / 1186.00 -> "1.186"
-        53 / 53.00     -> "53"
-        """
+    def _int_eur(self, val):
         if val is None:
-            return ""
+            return None
         try:
-            n = int(Decimal(val))
+            return int(Decimal(val))
         except Exception:
-            return ""
-        return f"{n:,}".replace(",", ".")
+            return None
 
+    def get_price_gross(self, obj):
+        return self._int_eur(obj.price_gross)
+
+    def get_sale_price_gross(self, obj):
+        return self._int_eur(obj.sale_price_gross)
+
+    def get_final_price_gross(self, obj):
+        return self._int_eur(obj.final_price_gross)
+    
     def get_price_gross_display(self, obj):
-        return self._format_eur_no_cents(obj.price_gross)
-
-    def get_sale_price_gross_display(self, obj):
-        return self._format_eur_no_cents(obj.sale_price_gross)
-
-    def get_final_price_gross_display(self, obj):
-        # obj.final_price_gross is Decimal already
-        return self._format_eur_no_cents(obj.final_price_gross)
+        n = self._int_eur(obj.price_gross)
+        if n is None:
+            return ""
+        return f"{n:,}".replace(",", ".") + "€"
 
     def _abs(self, request, url: str) -> str:
         if not url:
