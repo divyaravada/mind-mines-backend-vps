@@ -840,17 +840,56 @@ class ProductFilterMixin:
         return out
 
     def _to_decimal(self, val: Any) -> Optional[Decimal]:
-        
+        """
+        Normalize EU/US price formats → integer euros (Decimal)
+
+        Examples:
+        "1186"        -> 1186
+        "1.186,50€"   -> 1186
+        "1,186.50€"   -> 1186
+        "1186.00"     -> 1186
+        "53€"         -> 53
+        """
         if val is None:
             return None
 
-        s = str(val).strip().replace("€", "").replace(",", "")
-
+        s = str(val).strip()
         if not s:
             return None
 
-        try:           
-            return Decimal(s)
+        # remove currency & spaces
+        s = s.replace("€", "").replace(" ", "")
+
+        try:
+            # If both separators exist, decide decimal separator by LAST occurrence
+            if "." in s and "," in s:
+                if s.rfind(",") > s.rfind("."):
+                    # EU: 1.186,50 → remove thousands ".", decimal ","
+                    s = s.replace(".", "").replace(",", ".")
+                else:
+                    # US: 1,186.50 → remove thousands ","
+                    s = s.replace(",", "")
+
+            # Only comma present
+            elif "," in s:
+                # Decimal comma if ends with ,dd
+                if re.search(r",\d{1,2}$", s):
+                    s = s.replace(".", "").replace(",", ".")
+                else:
+                    # thousands comma
+                    s = s.replace(",", "")
+
+            # Only dot present
+            elif "." in s:
+                # Decimal dot if ends with .dd
+                if not re.search(r"\.\d{1,2}$", s):
+                    # thousands dot
+                    s = s.replace(".", "")
+
+            d = Decimal(s)
+
+            # ✅ drop cents → integer euros
+            return Decimal(int(d))
 
         except (InvalidOperation, ValueError, TypeError):
             return None
