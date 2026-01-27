@@ -402,9 +402,8 @@ class ProductSerializer(serializers.ModelSerializer):
 
     # computed flags from model
     is_discounted = serializers.BooleanField(read_only=True)
-    final_price_gross = serializers.DecimalField(
-        max_digits=10, decimal_places=2, read_only=True
-    )
+    final_price_gross = serializers.DecimalField(max_digits=10, decimal_places=0, read_only=True)
+
     low_stock = serializers.BooleanField(read_only=True)
     out_of_stock = serializers.BooleanField(read_only=True)
 
@@ -412,9 +411,7 @@ class ProductSerializer(serializers.ModelSerializer):
     stock = serializers.SerializerMethodField()
     reviews_count = serializers.SerializerMethodField()
     average_rating = serializers.SerializerMethodField()
-    price_net = serializers.DecimalField(
-        max_digits=10, decimal_places=2, required=False, allow_null=True
-    )
+    price_net = serializers.DecimalField(max_digits=10, decimal_places=0, required=False, allow_null=True)
     vat_rate = serializers.DecimalField(max_digits=4, decimal_places=4)
     price_gross = serializers.SerializerMethodField()
     sale_price_gross = serializers.SerializerMethodField()
