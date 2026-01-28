@@ -11,7 +11,7 @@ from django.utils.translation import gettext_lazy as _
 from django.db.models import Q,Count,F
 from .utils.invoices import generate_invoice_pdf as _gen_inv_pdf
 from django.utils import timezone
-
+from django.urls import reverse
 from .models import (
     Cart, CartItem, CouponRedemption, LoginOTP, Product, Wishlist, ProductMedia, NaturalStone, NaturalStoneImage, OnDemandOrderRequest,ProductEvent,
     StoneEnquiry, User, Profile, ContactMessage, NewsletterSubscriber, Coupon, StockAlert,
@@ -450,9 +450,7 @@ class InvoiceAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 # Cart
 # --------------------------------------------------------------------------------------
-from django.contrib import admin
-from django.urls import reverse
-from django.utils.html import format_html
+
 
 class CartItemInline(admin.TabularInline):
     model = CartItem

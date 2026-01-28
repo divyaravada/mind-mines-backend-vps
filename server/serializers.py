@@ -675,7 +675,7 @@ class CartItemSerializer(serializers.ModelSerializer):
         return attrs
 
 class CartSerializer(serializers.ModelSerializer):
-    items = CartItemSerializer(many=True)
+    items = CartItemSerializer(many=True, required=False)
     user_email = serializers.SerializerMethodField()
 
     class Meta:
@@ -695,26 +695,29 @@ class CartSerializer(serializers.ModelSerializer):
         return getattr(obj.user, "email", None)
 
     def create(self, validated_data):
-        items_data = validated_data.pop("items", [])
+        items_data = validated_data.pop("items", None)
         cart = Cart.objects.create(**validated_data)
-        self._upsert_items(cart, items_data)
+        self._replace_items(cart, items_data)
         return cart
 
     def update(self, instance, validated_data):
-        items_data = validated_data.pop("items", [])
+        items_data = validated_data.pop("items", None)
+
         for k, v in validated_data.items():
             setattr(instance, k, v)
         instance.save(update_fields=["currency", "is_active", "updated_at"])
+
         # replace items by product_id uniqueness
-        instance.items.all().delete()
-        self._upsert_items(instance, items_data)
+        if items_data is not None:
+            self._replace_items(instance, items_data)
         return instance
 
-    def _upsert_items(self, cart, items):
-        bulk = []
-        for it in items:
-            bulk.append(CartItem(cart=cart, **it))
-        CartItem.objects.bulk_create(bulk)
+    def _replace_items(self, cart, items):
+        # replace items by product uniqueness
+        cart.items.all().delete()
+        bulk = [CartItem(cart=cart, **it) for it in items]
+        if bulk:
+            CartItem.objects.bulk_create(bulk)
 
 # -----------------
 # Order detail / items
