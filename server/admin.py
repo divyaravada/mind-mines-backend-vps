@@ -450,17 +450,72 @@ class InvoiceAdmin(admin.ModelAdmin):
 # --------------------------------------------------------------------------------------
 # Cart
 # --------------------------------------------------------------------------------------
+from django.contrib import admin
+from django.urls import reverse
+from django.utils.html import format_html
+
 class CartItemInline(admin.TabularInline):
     model = CartItem
     extra = 0
-    readonly_fields = ("product","name","price","qty","color","dimensions","category")
+    can_delete = False
+
+    # What columns to show in the inline:
+    fields = (
+        "product_admin",
+        "product_title",
+        "product_sku",
+        "unit_price",
+        "qty",
+        "product_color",
+        "product_dimensions",
+        "product_category",
+    )
+    readonly_fields = fields
+
+    @admin.display(description="Product")
+    def product_admin(self, obj):
+        if not obj.product_id:
+            return "-"
+        url = reverse("admin:server_product_change", args=[obj.product_id])
+        return format_html('<a href="{}" target="_blank">Open</a>', url)
+
+    @admin.display(description="Title")
+    def product_title(self, obj):
+        # adjust field names to your Product model
+        return getattr(obj.product, "title_en", None) or getattr(obj.product, "title", "-")
+
+    @admin.display(description="SKU / Key")
+    def product_sku(self, obj):
+        return getattr(obj.product, "key", "-")
+
+    @admin.display(description="Unit price")
+    def unit_price(self, obj):
+        # if CartItem has its own stored price, prefer that:
+        if hasattr(obj, "price") and obj.price is not None:
+            return obj.price
+        return getattr(obj.product, "price", "-")
+
+    @admin.display(description="Color")
+    def product_color(self, obj):
+        return getattr(obj.product, "color", "-")
+
+    @admin.display(description="Dimensions")
+    def product_dimensions(self, obj):
+        return getattr(obj.product, "dimensions", "-")
+
+    @admin.display(description="Category")
+    def product_category(self, obj):
+        cat = getattr(obj.product, "category", None)
+        return str(cat) if cat else "-"
+
 
 @admin.register(Cart)
 class CartAdmin(admin.ModelAdmin):
-    list_display = ("id","user","cart_token","is_active","currency","updated_at")
-    list_filter = ("is_active","currency")
-    search_fields = ("cart_token","user__email")
+    list_display = ("id", "user", "cart_token", "is_active", "currency", "updated_at")
+    list_filter = ("is_active", "currency")
+    search_fields = ("cart_token", "user__email")
     inlines = [CartItemInline]
+
 
 # --------------------------------------------------------------------------------------
 # User & Profile
