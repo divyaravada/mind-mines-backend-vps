@@ -629,21 +629,32 @@ class ProductMediaInline(admin.TabularInline):
 class ProductAdmin(admin.ModelAdmin):
     readonly_fields = ("slug",)
     inlines = [ProductMediaInline]
-    list_display = ["title_en", "category", "price_col", "quantity_col", "demand_score_display", "add_to_carts_display", "wishlists_display","views_display",]
+    list_display = [
+        "title_en",
+        "category",
+        "price_col",
+        "quantity_col",
+        "demand_score_display",
+        "add_to_carts_display",
+        "wishlists_display",
+        "views_display",
+    ]
     search_fields = ("title_en", "title_de", "category")
-    list_filter = ()
     ordering = ("-id",)
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
-        # Add per-product counts
+
+        # ✅ If your ProductEvent FK does NOT have related_name="events",
+        # the reverse relation is the lowercase model name: "productevent"
         qs = qs.annotate(
-            views=Count("events", filter=Q(events__action="view"), distinct=False),
-            wishlists=Count("events", filter=Q(events__action="wishlist"), distinct=False),
-            add_to_carts=Count("events", filter=Q(events__action="add_to_cart"), distinct=False),
+            views=Count("productevent", filter=Q(productevent__action="view")),
+            wishlists=Count("productevent", filter=Q(productevent__action="wishlist")),
+            add_to_carts=Count("productevent", filter=Q(productevent__action="add_to_cart")),
         ).annotate(
             demand_score=F("add_to_carts") * 3 + F("wishlists") * 2 + F("views")
         ).order_by("-demand_score", "-id")
+
         return qs
 
     @admin.display(ordering="demand_score", description="Demand score")
