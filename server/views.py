@@ -1240,11 +1240,15 @@ class CartSyncView(APIView):
 
         data = {
             "currency": request.data.get("currency") or "EUR",
-            "is_active": True,
-            "items": request.data.get("items", []),
+            "is_active": True,            
             "cart_token": request.data.get("cart_token"),
         }
-        ser = CartSerializer(instance=cart, data=data)
+
+        # ✅ only include items if client sent it
+        if "items" in request.data:
+            data["items"] = request.data.get("items") or []
+
+        ser = CartSerializer(instance=cart, data=data, partial=True) 
         try:
             ser.is_valid(raise_exception=True)
             ser.save()
@@ -1270,7 +1274,7 @@ class AdminCartListView(generics.ListAPIView):
         qs = (
             Cart.objects.all()
             .order_by("-updated_at")
-            .prefetch_related("items")
+            .prefetch_related("items__product")
             .select_related("user")
         )
 
