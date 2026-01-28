@@ -40,8 +40,12 @@ from .models import (
     OnDemandOrderRequest,
     MarketingEvent,
     AbandonedCartReminder,
+    ProductEvent,
 )
+from django.db import transaction
+import logging
 
+logger = logging.getLogger(__name__)
 # -----------------
 # Auth / Account
 # -----------------
@@ -1504,8 +1508,38 @@ class MarketingEventSerializer(serializers.ModelSerializer):
             if ua:
                 validated_data["user_agent"] = ua[:255]
 
-        return MarketingEvent.objects.create(**validated_data)
+        # ✅ Create MarketingEvent first
+        ev = MarketingEvent.objects.create(**validated_data)
 
+        # ✅ ALSO write to ProductEvent so admin counts work
+        try:
+            product = getattr(ev, "product", None)
+            if product is not None:
+                et = (ev.event_type or "").strip().lower()
+
+                # Map your marketing event types to ProductEvent actions
+                action_map = {
+                    "product_view": ProductEvent.Action.VIEW,
+                    "view": ProductEvent.Action.VIEW,
+
+                    "add_to_cart": ProductEvent.Action.ADD_TO_CART,
+
+                    "wishlist": ProductEvent.Action.WISHLIST,
+                    "add_to_wishlist": ProductEvent.Action.WISHLIST,
+                }
+
+                action = action_map.get(et)
+                if action:
+                    ProductEvent.objects.create(
+                        product=product,
+                        user=getattr(ev, "user", None),
+                        action=action,
+                    )
+        except Exception:
+            # never block checkout / UX if tracking fails
+            logger.exception("Failed to create ProductEvent from MarketingEvent")
+
+        return ev
 
 # -----------------
 # Reviews
