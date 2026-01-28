@@ -1219,15 +1219,84 @@ class ProductDemandTimeseriesAPIView(APIView):
 # -----------------------------------------------------------------------------
 # Cart
 # -----------------------------------------------------------------------------
+from django.db import transaction
+from django.utils import timezone
+
 def _get_or_create_active_cart(request):
     user = request.user if request.user.is_authenticated else None
     token = request.data.get("cart_token") or request.query_params.get("cart_token")
+
     qs = Cart.objects.filter(is_active=True)
+
+    # ---- Logged-in user ----
     if user:
-        return qs.filter(user=user).order_by("-updated_at").first() or Cart.objects.create(user=user)
+        # Prefer user cart
+        user_cart = qs.filter(user=user).order_by("-updated_at").first()
+
+        # If token exists, there might be a guest cart we can merge
+        guest_cart = qs.filter(cart_token=token).order_by("-updated_at").first() if token else None
+
+        if user_cart and token and not user_cart.cart_token:
+            # keep token on user cart for easier debugging/admin lookup
+            user_cart.cart_token = token
+            user_cart.save(update_fields=["cart_token", "updated_at"])
+
+        # Merge guest cart into user cart if both exist and they are different carts
+        if user_cart and guest_cart and guest_cart.id != user_cart.id:
+            _merge_carts(target=user_cart, source=guest_cart)
+            return user_cart
+
+        if user_cart:
+            return user_cart
+
+        # No user cart yet: if guest cart exists, attach it to user
+        if guest_cart:
+            guest_cart.user = user
+            if token and not guest_cart.cart_token:
+                guest_cart.cart_token = token
+            guest_cart.save(update_fields=["user", "cart_token", "updated_at"])
+            return guest_cart
+
+        # Create new user cart
+        return Cart.objects.create(user=user, cart_token=token or None)
+
+    # ---- Guest ----
     if token:
         return qs.filter(cart_token=token).order_by("-updated_at").first() or Cart.objects.create(cart_token=token)
+
     raise ValueError("cart_token required for guests")
+
+
+@transaction.atomic
+def _merge_carts(target: Cart, source: Cart) -> None:
+    """
+    Move/merge items from source cart into target cart.
+    If same product exists, sum quantities and keep target price/name/image.
+    """
+    # Load items efficiently
+    source_items = list(source.items.all())
+    if not source_items:
+        source.is_active = False
+        source.save(update_fields=["is_active", "updated_at"])
+        return
+
+    # Build target map by product_id
+    target_items = {it.product_id: it for it in target.items.select_for_update().all()}
+
+    for it in source_items:
+        existing = target_items.get(it.product_id)
+        if existing:
+            existing.qty = int(existing.qty) + int(it.qty)
+            existing.save(update_fields=["qty"])
+        else:
+            it.pk = None
+            it.cart = target
+            it.save()
+
+    # deactivate source cart so admin sees only one
+    source.is_active = False
+    source.save(update_fields=["is_active", "updated_at"])
+
 
 class CartSyncView(APIView):
     permission_classes = [permissions.AllowAny]
@@ -1240,7 +1309,7 @@ class CartSyncView(APIView):
 
         data = {
             "currency": request.data.get("currency") or "EUR",
-            "is_active": True,            
+            "is_active": True,
             "cart_token": request.data.get("cart_token"),
         }
 
@@ -1248,14 +1317,10 @@ class CartSyncView(APIView):
         if "items" in request.data:
             data["items"] = request.data.get("items") or []
 
-        ser = CartSerializer(instance=cart, data=data, partial=True) 
-        try:
-            ser.is_valid(raise_exception=True)
-            ser.save()
-            return Response(ser.data, status=status.HTTP_200_OK)
-        except Exception:
-            logger.exception("CartSyncView POST failed")
-            return Response({"detail": "cart_save_failed"}, status=status.HTTP_400_BAD_REQUEST)
+        ser = CartSerializer(instance=cart, data=data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(ser.data, status=status.HTTP_200_OK)
                
 class AdminCartListView(generics.ListAPIView):
     """
