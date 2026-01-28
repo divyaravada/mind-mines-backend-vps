@@ -697,7 +697,8 @@ class CartSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         items_data = validated_data.pop("items", None)
         cart = Cart.objects.create(**validated_data)
-        self._replace_items(cart, items_data)
+        if items_data is not None:
+            self._replace_items(cart, items_data)
         return cart
 
     def update(self, instance, validated_data):
@@ -707,11 +708,15 @@ class CartSerializer(serializers.ModelSerializer):
             setattr(instance, k, v)
         instance.save(update_fields=["currency", "is_active", "updated_at"])
 
-        # replace items by product_id uniqueness
+        # ✅ only replace items if client explicitly provided "items"
         if items_data is not None:
-            self._replace_items(instance, items_data)
-        return instance
+            instance.items.all().delete()
+            bulk = [CartItem(cart=instance, **it) for it in items_data]
+            if bulk:
+                CartItem.objects.bulk_create(bulk)
 
+        return instance
+    
     def _replace_items(self, cart, items):
         # replace items by product uniqueness
         cart.items.all().delete()
