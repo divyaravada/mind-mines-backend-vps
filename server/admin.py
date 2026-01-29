@@ -25,6 +25,9 @@ generate_invoice_pdf: Callable[..., None] = lambda *args, **kwargs: None
 send_invoice_email:   Callable[..., None] = lambda *args, **kwargs: None
 send_shipping_update: Callable[..., None] = lambda *args, **kwargs: None
 send_cancellation_email: Callable[..., None] = lambda *args, **kwargs: None
+send_order_failed_email: Callable[..., None] = lambda *args, **kwargs: None
+send_refunded_update: Callable[..., None] = lambda *args, **kwargs: None
+send_returned_update: Callable[..., None] = lambda *args, **kwargs: None
 send_delivered_update: Callable[..., None] = lambda *args, **kwargs: None
 
 try:
@@ -39,13 +42,18 @@ try:
         send_invoice_email as _send_invoice_email,
         send_shipping_update as _send_shipping_update,
         send_cancellation_email as _send_cancellation_email,
-        send_delivered_update as _send_delivered_update
+        send_delivered_update as _send_delivered_update,
+        send_order_failed_email as _send_order_failed_email,
+        send_refunded_update as _send_refunded_update,
+        send_returned_update as _send_returned_update,
     )
-    # Real functions might return bool; we don't use the return in admin actions.
-    send_invoice_email     = cast(Callable[..., None], _send_invoice_email)
-    send_shipping_update   = cast(Callable[..., None], _send_shipping_update)
-    send_cancellation_email= cast(Callable[..., None], _send_cancellation_email)
-    send_delivered_update  = cast(Callable[..., None], _send_delivered_update)
+    send_invoice_email      = cast(Callable[..., None], _send_invoice_email)
+    send_shipping_update    = cast(Callable[..., None], _send_shipping_update)
+    send_cancellation_email = cast(Callable[..., None], _send_cancellation_email)
+    send_delivered_update   = cast(Callable[..., None], _send_delivered_update)
+    send_order_failed_email = cast(Callable[..., None], _send_order_failed_email)
+    send_refunded_update    = cast(Callable[..., None], _send_refunded_update)
+    send_returned_update    = cast(Callable[..., None], _send_returned_update)
 except Exception:
     pass
 
@@ -432,29 +440,55 @@ class OrderAdmin(admin.ModelAdmin):
 
         super().save_model(request, obj, form, change)
 
-        should_send = False
-        tracking = (getattr(obj, "tracking_number", "") or "").strip()
+        # -------- status change detection --------
+        prev_status = (getattr(prev, "status", "") if prev else "") or ""
+        new_status  = (getattr(obj, "status", "") or "").strip().lower()
 
-        try:
-            if prev is None:
-                if (getattr(obj, "status", "") == "shipped") or tracking:
-                    should_send = True
-            else:
-                if getattr(prev, "status", "") != "shipped" and getattr(obj, "status", "") == "shipped":
-                    should_send = True
-                if (not getattr(prev, "shipped_at", None)) and getattr(obj, "shipped_at", None):
-                    should_send = True
-                if (not (getattr(prev, "tracking_number", "") or "").strip()) and tracking:
-                    should_send = True
-        except Exception:
-            should_send = False
+        prev_tracking = ((getattr(prev, "tracking_number", "") or "").strip() if prev else "")
+        new_tracking  = ((getattr(obj, "tracking_number", "") or "").strip())
 
-        if should_send:
+        def safe_call(fn, *args, **kwargs):
             try:
-                send_shipping_update(obj, tracking=tracking)
+                fn(*args, **kwargs)
             except Exception:
                 pass
 
+        # 1) If status changed → send the right email
+        if prev and prev_status != new_status:
+            if new_status == "shipped":
+                safe_call(send_shipping_update, obj, tracking=new_tracking)
+            elif new_status == "delivered":
+                safe_call(send_delivered_update, obj)
+            elif new_status == "cancelled":
+                safe_call(send_cancellation_email, obj)
+            elif new_status == "failed":
+                safe_call(send_order_failed_email, obj, user_locale=getattr(getattr(obj.user, "profile", None), "language", "en") or "en")
+            elif new_status == "refunded":
+                safe_call(send_refunded_update, obj)
+            elif new_status == "returned":
+                safe_call(send_returned_update, obj)
+
+        # 2) If tracking number added later (even without status change) → send shipped update
+        # (this preserves your current behaviour)
+        should_send_shipping = False
+        try:
+            if prev is None:
+                if new_status == "shipped" or new_tracking:
+                    should_send_shipping = True
+            else:
+                if prev_status != "shipped" and new_status == "shipped":
+                    should_send_shipping = True
+                if (not prev_tracking) and new_tracking:
+                    should_send_shipping = True
+                if (not getattr(prev, "shipped_at", None)) and getattr(obj, "shipped_at", None):
+                    should_send_shipping = True
+        except Exception:
+            should_send_shipping = False
+
+        if should_send_shipping and new_status == "shipped":
+            safe_call(send_shipping_update, obj, tracking=new_tracking)
+
+      
 # --------------------------------------------------------------------------------------
 # Invoice
 # --------------------------------------------------------------------------------------
