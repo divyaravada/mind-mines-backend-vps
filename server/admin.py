@@ -99,6 +99,15 @@ def _release_stock(order: Order):
         except Exception:
             pass
 
+def _get_order_locale(order) -> str:
+    try:
+        u = getattr(order, "user", None)
+        prof = getattr(u, "profile", None) if u else None
+        lang = getattr(prof, "language", None)
+        return (lang or "en").split("-")[0].lower()
+    except Exception:
+        return "en"
+
 # ----- admin actions -----
 @admin.action(description="Mark selected orders as PAID (+ generate/send invoice)")
 def mark_paid(modeladmin, request, queryset):
@@ -123,10 +132,11 @@ def mark_paid(modeladmin, request, queryset):
         except Exception:
             pass
         try:
-            user_locale = getattr(getattr(order.user, "profile", None), "language", "en") or "en"
+            user_locale = _get_order_locale(order)
             send_invoice_email(order, user_locale=user_locale)
         except Exception:
             pass
+
         updated += 1
     modeladmin.message_user(
         request, f"Marked {updated} order(s) as paid, reserved stock, and attempted to send invoice.",
@@ -455,18 +465,33 @@ class OrderAdmin(admin.ModelAdmin):
 
         # 1) If status changed → send the right email
         if prev and prev_status != new_status:
-            if new_status == "shipped":
+            if new_status == "paid":
+                # reserve stock + generate invoice + send invoice email
+                safe_call(_reserve_stock, obj)
+                safe_call(generate_invoice_pdf, obj)
+                safe_call(send_invoice_email, obj, user_locale=_get_order_locale(obj))
+
+            elif new_status == "shipped":
                 safe_call(send_shipping_update, obj, tracking=new_tracking)
+
             elif new_status == "delivered":
                 safe_call(send_delivered_update, obj)
+
             elif new_status == "cancelled":
+                safe_call(_release_stock, obj)
                 safe_call(send_cancellation_email, obj)
+
             elif new_status == "failed":
-                safe_call(send_order_failed_email, obj, user_locale=getattr(getattr(obj.user, "profile", None), "language", "en") or "en")
+                safe_call(send_order_failed_email, obj, user_locale=_get_order_locale(obj))
+
             elif new_status == "refunded":
+                safe_call(_release_stock, obj)
                 safe_call(send_refunded_update, obj)
+
             elif new_status == "returned":
+                safe_call(_release_stock, obj)
                 safe_call(send_returned_update, obj)
+
 
         # 2) If tracking number added later (even without status change) → send shipped update
         # (this preserves your current behaviour)
