@@ -1057,13 +1057,22 @@ def send_invoice_email(
         if guest_link
         else ""
     )
+    shipping_note_en = (
+        "<p><em>Once we start shipping your order, "
+        "you will receive another email with shipping details.</em></p>"
+    )
 
+    shipping_note_de = (
+        "<p><em>Sobald wir mit dem Versand Ihrer Bestellung beginnen, "
+        "erhalten Sie eine weitere E-Mail mit den Versanddetails.</em></p>"
+    )
     body_en = f"""
       <p>{_tr('en','salute')},</p>
       <p>Attached you will find your invoice for order <b>{num}</b>.</p>
       {_order_header_html(order)}
       {_line_items_html(order)}
       {guest_html_en}
+      {shipping_note_en}
       <p>{_tr('en','thanks')}<br />{_tr('en','brand')}</p>
     """
     body_de = f"""
@@ -1072,6 +1081,7 @@ def send_invoice_email(
       {_order_header_html(order)}
       {_line_items_html(order)}
       {guest_html_de}
+      {shipping_note_de}
       <p>{_tr('de','thanks')}<br />{_tr('de','brand')}</p>
     """
 
