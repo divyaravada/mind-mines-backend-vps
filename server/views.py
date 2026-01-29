@@ -1219,8 +1219,7 @@ class ProductDemandTimeseriesAPIView(APIView):
 # -----------------------------------------------------------------------------
 # Cart
 # -----------------------------------------------------------------------------
-from django.db import transaction
-from django.utils import timezone
+
 
 def _get_or_create_active_cart(request):
     user = request.user if request.user.is_authenticated else None
@@ -1735,18 +1734,27 @@ def verify_email(request, uidb64, token):
         user.is_active = True
         user.save()
         try:
+            coupon_code = "WELCOME15"
             subj = "Welcome to MindMines / Willkommen bei MindMines"
+
             en = (
                 "Welcome! Your email has been verified successfully.<br/>"
-                "You can now sign in and start shopping. Have fun!<br/>"
-                "<a href='https://mindmines.eu'>mindmines.eu</a>"
+                "🎁 <strong>Your 15% welcome coupon:</strong> "
+                f"<strong>{coupon_code}</strong><br/>"
+                "Use it at checkout (valid for your first order).<br/><br/>"
+                "<a href='https://mindmines.eu'>Start shopping at mindmines.eu</a>"
             )
+
             de = (
                 "Willkommen! Ihre E-Mail wurde erfolgreich verifiziert.<br/>"
-                "Sie können sich jetzt anmelden und einkaufen. Viel Spaß!<br/>"
-                "<a href='https://mindmines.eu'>mindmines.eu</a>"
+                "🎁 <strong>Ihr 15% Willkommensgutschein:</strong> "
+                f"<strong>{coupon_code}</strong><br/>"
+                "Nutzen Sie ihn an der Kasse (gültig für Ihre erste Bestellung).<br/><br/>"
+                "<a href='https://mindmines.eu'>Jetzt shoppen auf mindmines.eu</a>"
             )
+
             _send_bilingual(subj, user.email, f"<p>{en}</p>", f"<p>{de}</p>")
+
         except Exception:
             logger.exception("Failed to send happy-shopping email after verification")
 
@@ -3685,5 +3693,5 @@ class MarketingEventTrackView(APIView):
                 )
         except Exception:
             pass
-        
+
         return Response({"ok": True, "id": ev.id}, status=201)
