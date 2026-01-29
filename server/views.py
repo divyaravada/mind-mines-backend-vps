@@ -3652,5 +3652,31 @@ class MarketingEventTrackView(APIView):
             user_agent=user_agent,
             extra=extra if isinstance(extra, dict) else {},
         )
+         # ✅ ALSO create ProductEvent so Admin analytics (views/wishlists/add_to_cart) works
+        try:
+            # map MarketingEvent types -> ProductEvent actions
+            event_map = {
+                "product_view": ProductEvent.Action.VIEW,
+                "add_to_cart": ProductEvent.Action.ADD_TO_CART,
+                "wishlist_add": ProductEvent.Action.WISHLIST,
+            }
+
+            action = event_map.get(raw_type)
+
+            # ignore "wishlist_remove" that you send as wishlist_add + extra.action="remove"
+            if action == ProductEvent.Action.WISHLIST:
+                if isinstance(extra, dict) and extra.get("action") == "remove":
+                    action = None
+
+            if product and action:
+                ProductEvent.objects.create(
+                    product=product,
+                    user=request.user
+                    if getattr(request, "user", None) and request.user.is_authenticated
+                    else None,
+                    action=action,
+                )
+        except Exception:
+            pass
 
         return Response({"ok": True, "id": ev.id}, status=201)
