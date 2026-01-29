@@ -3656,15 +3656,27 @@ class MarketingEventTrackView(APIView):
         try:
             # map MarketingEvent types -> ProductEvent actions
             event_map = {
+                # product views
                 "product_view": ProductEvent.Action.VIEW,
+                "view": ProductEvent.Action.VIEW,
+
+                # add to cart
                 "add_to_cart": ProductEvent.Action.ADD_TO_CART,
+                "cart_add": ProductEvent.Action.ADD_TO_CART,
+
+                # wishlist (support multiple names)
                 "wishlist_add": ProductEvent.Action.WISHLIST,
+                "wishlist": ProductEvent.Action.WISHLIST,
+                "add_to_wishlist": ProductEvent.Action.WISHLIST,
+                "wishlist_remove": ProductEvent.Action.WISHLIST,  # will be ignored below if remove
             }
 
             action = event_map.get(raw_type)
 
-            # ignore "wishlist_remove" that you send as wishlist_add + extra.action="remove"
+               # ✅ ignore wishlist REMOVE events
             if action == ProductEvent.Action.WISHLIST:
+                if raw_type == "wishlist_remove":
+                    action = None
                 if isinstance(extra, dict) and extra.get("action") == "remove":
                     action = None
 
