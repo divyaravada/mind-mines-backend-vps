@@ -608,7 +608,53 @@ def send_return_request_emails(return_request):
     except Exception:
         logger.exception("Admin return request email failed")
 
+# ------------- Returned update -------------
+def send_refunded_update(order):
+    to_email = order_recipient_email(order)
+    if not to_email:
+        return False
 
+    num = getattr(order, "number", None) or f"#{order.id}"
+
+    en = (
+        f"<p>Your order <b>{num}</b> has been refunded.</p>"
+        f"<p>If you have questions, reply to this email and we will help you.</p>"
+    )
+    de = (
+        f"<p>Ihre Bestellung <b>{num}</b> wurde erstattet.</p>"
+        f"<p>Wenn Sie Fragen haben, antworten Sie bitte auf diese E-Mail.</p>"
+    )
+
+    return _send_bilingual(
+        "Order refunded / Bestellung erstattet",
+        to_email,
+        en,
+        de,
+    )
+
+# ------------- Returned update -------------
+def send_returned_update(order):
+    to_email = order_recipient_email(order)
+    if not to_email:
+        return False
+
+    num = getattr(order, "number", None) or f"#{order.id}"
+
+    en = (
+        f"<p>We have marked your order <b>{num}</b> as returned.</p>"
+        f"<p>We will process the return and update you soon.</p>"
+    )
+    de = (
+        f"<p>Wir haben Ihre Bestellung <b>{num}</b> als retourniert markiert.</p>"
+        f"<p>Wir bearbeiten die Rücksendung und informieren Sie bald.</p>"
+    )
+
+    return _send_bilingual(
+        "Return received / Rücksendung erhalten",
+        to_email,
+        en,
+        de,
+    )
 
 # ------------- Cancel requests -------------
 def send_cancel_request_emails(return_request):
