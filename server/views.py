@@ -3568,6 +3568,14 @@ class MarketingEventTrackView(APIView):
         raw_type = (data.get("event_type") or data.get("type") or "").strip().lower()
         if not raw_type:
             return Response({"detail": "event_type is required."}, status=400)
+        
+         # ✅ Normalize wishlist events to backend-supported names
+        # (so we don't fail validation if EventType.choices doesn't include wishlist_add)
+        if raw_type in ("wishlist_add", "add_to_wishlist"):
+            raw_type = "wishlist"
+        # if you ever send this directly
+        if raw_type == "wishlist_remove":
+            raw_type = "wishlist_remove"
 
         # If your model has EventType.choices we validate against it,
         # otherwise we accept anything and just store a string.
@@ -3656,29 +3664,14 @@ class MarketingEventTrackView(APIView):
         try:
             # map MarketingEvent types -> ProductEvent actions
             event_map = {
-                # product views
                 "product_view": ProductEvent.Action.VIEW,
-                "view": ProductEvent.Action.VIEW,
-
-                # add to cart
                 "add_to_cart": ProductEvent.Action.ADD_TO_CART,
-                "cart_add": ProductEvent.Action.ADD_TO_CART,
-
-                # wishlist (support multiple names)
-                "wishlist_add": ProductEvent.Action.WISHLIST,
                 "wishlist": ProductEvent.Action.WISHLIST,
-                "add_to_wishlist": ProductEvent.Action.WISHLIST,
-                "wishlist_remove": ProductEvent.Action.WISHLIST,  # will be ignored below if remove
             }
 
             action = event_map.get(raw_type)
 
-               # ✅ ignore wishlist REMOVE events
-            if action == ProductEvent.Action.WISHLIST:
-                if raw_type == "wishlist_remove":
-                    action = None
-                if isinstance(extra, dict) and extra.get("action") == "remove":
-                    action = None
+           
 
             if product and action:
                 ProductEvent.objects.create(
