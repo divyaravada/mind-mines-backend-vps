@@ -25,6 +25,7 @@ generate_invoice_pdf: Callable[..., None] = lambda *args, **kwargs: None
 send_invoice_email:   Callable[..., None] = lambda *args, **kwargs: None
 send_shipping_update: Callable[..., None] = lambda *args, **kwargs: None
 send_cancellation_email: Callable[..., None] = lambda *args, **kwargs: None
+send_delivered_update: Callable[..., None] = lambda *args, **kwargs: None
 
 try:
     from .utils.invoices import generate_invoice_pdf as _gen_inv_pdf
@@ -38,11 +39,13 @@ try:
         send_invoice_email as _send_invoice_email,
         send_shipping_update as _send_shipping_update,
         send_cancellation_email as _send_cancellation_email,
+        send_delivered_update as _send_delivered_update
     )
     # Real functions might return bool; we don't use the return in admin actions.
     send_invoice_email     = cast(Callable[..., None], _send_invoice_email)
     send_shipping_update   = cast(Callable[..., None], _send_shipping_update)
     send_cancellation_email= cast(Callable[..., None], _send_cancellation_email)
+    send_delivered_update  = cast(Callable[..., None], _send_delivered_update)
 except Exception:
     pass
 
@@ -140,6 +143,31 @@ def mark_shipped(modeladmin, request, queryset):
         n += 1
     modeladmin.message_user(request, f"Marked {n} order(s) as shipped.", level=messages.SUCCESS)
 
+@admin.action(description="Mark selected orders as DELIVERED (+ email)")
+def mark_delivered(modeladmin, request, queryset):
+    n = 0
+    for order in queryset:
+        order.status = "delivered"
+
+        # set delivered_at if your model has it
+        if hasattr(order, "delivered_at") and not getattr(order, "delivered_at", None):
+            order.delivered_at = timezone.now()
+            order.save(update_fields=["status", "delivered_at"])
+        else:
+            order.save(update_fields=["status"])
+
+        # ✅ send delivered email
+        try:
+            send_delivered_update(order)
+        except Exception:
+            pass
+
+        n += 1
+
+    modeladmin.message_user(
+        request, f"Marked {n} order(s) as delivered.", level=messages.SUCCESS
+    )
+
 @admin.action(description="Cancel selected orders (+ notify & release stock)")
 def mark_cancelled(modeladmin, request, queryset):
     n = 0
@@ -211,7 +239,7 @@ class OrderAdmin(admin.ModelAdmin):
     inlines = [OrderItemInline]
     list_filter = ("status", "created_at")
     search_fields = ("number", "user__email", "email", "tracking_number", "coupon_redemption__coupon__code")
-    actions = [mark_paid, mark_shipped, mark_cancelled]
+    actions = [mark_paid, mark_shipped, mark_cancelled, mark_delivered]
 
     # --------------------------
     # Helpers used in admin UI

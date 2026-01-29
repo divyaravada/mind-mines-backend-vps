@@ -799,6 +799,9 @@ class Order(models.Model):
         ("shipped", "Shipped"),
         ("delivered", "Delivered"),
         ("cancelled", "Cancelled"),
+        ("refunded", "Refunded"),
+        ("returned", "Returned"),
+        ("delivered_by_hand", "Delivered by Hand"),
     ]
 
     PAYMENT_STATUS_CHOICES = [

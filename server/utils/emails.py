@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable, Optional, Sequence, Tuple
 from django.conf import settings
-from django.core.mail import EmailMultiAlternatives, send_mail, get_connection
+from django.core.mail import EmailMessage, EmailMultiAlternatives, send_mail, get_connection
 from django.template.loader import render_to_string, TemplateDoesNotExist
 from django.utils import timezone
 from .guest_invoices import build_guest_invoice_download_url
@@ -653,6 +653,54 @@ def send_cancel_request_emails(return_request):
     except Exception:
         logger.exception("Admin cancel request email failed")
 
+# ------------- Delivered update -------------
+def send_delivered_update(order):
+    to_email = order_recipient_email(order)
+    if not to_email:
+        return False
+
+    ctx = {
+        "order": order,
+        "brand_name": BRAND_NAME,
+        "logo_url": _email_logo_url(),
+        "site_url": SITE_URL,
+    }
+
+    # ✅ try template first
+    try:
+        html = render_to_string("emails/delivered_update.html", ctx)
+        msg = EmailMultiAlternatives(
+            subject="Order delivered / Bestellung zugestellt",
+            body=_strip_html(html),
+            from_email=getattr(settings, "EMAIL_HOST_USER", DEFAULT_FROM),
+            to=[to_email],
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send(fail_silently=not settings.DEBUG)
+        return True
+    except TemplateDoesNotExist:
+        pass
+    except Exception:
+        logger.exception("Delivered template send failed for order %s", getattr(order, "id", "?"))
+
+    # ✅ fallback bilingual
+    num = getattr(order, "number", None) or f"#{order.id}"
+
+    en = (
+        f"<p>Your order <b>{num}</b> has been delivered.</p>"
+        f"<p>Thank you for shopping with MindMines!</p>"
+    )
+    de = (
+        f"<p>Ihre Bestellung <b>{num}</b> wurde zugestellt.</p>"
+        f"<p>Vielen Dank, dass Sie bei MindMines eingekauft haben!</p>"
+    )
+
+    return _send_bilingual(
+        "Order delivered / Bestellung zugestellt",
+        to_email,
+        en,
+        de,
+    )
 
 # ------------- Shipping + cancellation (template-based) -------------
 def send_shipping_update(order, tracking: str | None = None):
