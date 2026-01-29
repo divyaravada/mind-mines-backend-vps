@@ -3569,13 +3569,7 @@ class MarketingEventTrackView(APIView):
         if not raw_type:
             return Response({"detail": "event_type is required."}, status=400)
         
-         # ✅ Normalize wishlist events to backend-supported names
-        # (so we don't fail validation if EventType.choices doesn't include wishlist_add)
-        if raw_type in ("wishlist_add", "add_to_wishlist"):
-            raw_type = "wishlist"
-        # if you ever send this directly
-        if raw_type == "wishlist_remove":
-            raw_type = "wishlist_remove"
+        
 
         # If your model has EventType.choices we validate against it,
         # otherwise we accept anything and just store a string.
@@ -3660,18 +3654,26 @@ class MarketingEventTrackView(APIView):
             user_agent=user_agent,
             extra=extra if isinstance(extra, dict) else {},
         )
-         # ✅ ALSO create ProductEvent so Admin analytics (views/wishlists/add_to_cart) works
+        # ✅ ALSO create ProductEvent so Admin analytics (views/wishlists/add_to_cart) works
         try:
-            # map MarketingEvent types -> ProductEvent actions
             event_map = {
                 "product_view": ProductEvent.Action.VIEW,
                 "add_to_cart": ProductEvent.Action.ADD_TO_CART,
+
+                # frontend sends wishlist_add
+                "wishlist_add": ProductEvent.Action.WISHLIST,
+
+                # just in case you ever send these
                 "wishlist": ProductEvent.Action.WISHLIST,
+                "add_to_wishlist": ProductEvent.Action.WISHLIST,
             }
 
             action = event_map.get(raw_type)
 
-           
+            # ✅ ignore remove (frontend sends wishlist_remove mapped to wishlist_add + extra.action="remove")
+            if action == ProductEvent.Action.WISHLIST:
+                if isinstance(extra, dict) and extra.get("action") == "remove":
+                    action = None
 
             if product and action:
                 ProductEvent.objects.create(
@@ -3683,5 +3685,5 @@ class MarketingEventTrackView(APIView):
                 )
         except Exception:
             pass
-
+        
         return Response({"ok": True, "id": ev.id}, status=201)
