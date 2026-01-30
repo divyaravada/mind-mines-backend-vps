@@ -1611,15 +1611,6 @@ class SetTrackingAPIView(APIView):
 # -----------------------------------------------------------------------------
 # Coupons / Promotions
 # -----------------------------------------------------------------------------
-def _d(x, default="0.00") -> Decimal:
-    """Safe Decimal conversion"""
-    try:
-        return Decimal(str(x if x is not None else default))
-    except Exception:
-        return Decimal(default)
-
-def _q2(x: Decimal) -> Decimal:
-    return (x or Decimal("0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 class CouponPreviewAPIView(APIView):
@@ -1632,18 +1623,14 @@ class CouponPreviewAPIView(APIView):
         vd: Dict[str, Any] = cast(Dict[str, Any], getattr(s, "validated_data", {}) or {})
         code = str(vd.get("code") or "").strip()
         items: List[Dict[str, Any]] = cast(List[Dict[str, Any]], vd.get("items") or [])
-        email = str(vd.get("email") or "").strip()
+        email = str(vd.get("email") or "").strip()  # ✅ NEW
 
         if not code:
             return Response({"ok": False, "error": "Code is required"}, status=400)
         if not items:
             return Response({"ok": False, "error": "No items provided"}, status=400)
-
-        # ✅ We'll compute both subtotals:
-        # base_subtotal = original price_gross sum (before store discounts)
-        # subtotal      = current/final price sum (after store discounts)
-        base_subtotal = Decimal("0.00")
         subtotal = Decimal("0.00")
+       
 
         for it in items:
             pid_raw = it.get("product_id")
@@ -1664,27 +1651,10 @@ class CouponPreviewAPIView(APIView):
                 return Response({"ok": False, "error": "qty must be >= 1"}, status=400)
 
             p = get_object_or_404(Product, pk=pid)
-
-            # ✅ base unit (original gross)
-            base_unit = _d(getattr(p, "price_gross", None) or getattr(p, "vat_price", None) or getattr(p, "price", None) or "0.00")
-
-            # ✅ current unit (store discounted gross)
-            cur_unit = _d(
-                getattr(p, "final_price_gross", None)
-                or getattr(p, "sale_price_gross", None)
-                or getattr(p, "price_gross", None)
-                or getattr(p, "vat_price", None)
-                or getattr(p, "price", None)
-                or "0.00"
-            )
-
-            base_subtotal += base_unit * qty
-            subtotal += cur_unit * qty
-
-        base_subtotal = _q2(base_subtotal)
-        subtotal = _q2(subtotal)
-
-        coup = Coupon.objects.filter(code__iexact=code).first()
+            unit = getattr(p, "final_price_gross", None) or p.price_gross
+            unit = Decimal(str(unit))
+            subtotal += unit * qty
+            coup = Coupon.objects.filter(code__iexact=code).first()
         if not coup:
             return Response({"ok": False, "error": "Coupon not found"}, status=404)
 
@@ -1694,27 +1664,13 @@ class CouponPreviewAPIView(APIView):
             else None
         )
 
-        # ✅ use CURRENT subtotal for min_subtotal check (matches user payable value)
+        # ✅ UPDATED: pass email for email-targeted coupons (guest)
         ok, reason = coup.can_apply(user_or_none, items, subtotal, email=email)
         if not ok:
             return Response({"ok": False, "error": reason}, status=400)
 
-        # ✅ Your existing method (may still stack unless you also change Coupon.discount_amount)
-        discount = _q2(coup.discount_amount(user_or_none, items, subtotal))
-        total = _q2(subtotal - discount)
-
-        # ✅ Breakdown fields for UI
-        store_discount = _q2(base_subtotal - subtotal)          # store discount amount vs original
-        total_savings = _q2(base_subtotal - total)              # total savings vs original
-
-        total_discount_percent = Decimal("0.00")
-        store_discount_percent = Decimal("0.00")
-        coupon_extra_percent = Decimal("0.00")
-
-        if base_subtotal > 0:
-            store_discount_percent = _q2((store_discount / base_subtotal) * Decimal("100"))
-            coupon_extra_percent = _q2((discount / base_subtotal) * Decimal("100"))
-            total_discount_percent = _q2((total_savings / base_subtotal) * Decimal("100"))
+        discount = coup.discount_amount(user_or_none, items, subtotal)
+        total = (subtotal - discount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         return Response(
             {
@@ -1722,19 +1678,9 @@ class CouponPreviewAPIView(APIView):
                 "code": coup.code,
                 "kind": coup.kind,
                 "value": str(coup.value),
-
-                # existing fields
-                "discount": f"{discount:.2f}",     # coupon extra discount on current subtotal
-                "subtotal": f"{subtotal:.2f}",     # current subtotal (after store discount)
+                "discount": f"{discount:.2f}",
+                "subtotal": f"{subtotal:.2f}",
                 "total": f"{total:.2f}",
-
-                # ✅ new fields for frontend messaging
-                "base_subtotal": f"{base_subtotal:.2f}",  # original subtotal (before store discount)
-                "store_discount": f"{store_discount:.2f}",
-                "total_savings": f"{total_savings:.2f}",
-                "store_discount_percent": f"{store_discount_percent:.2f}",
-                "coupon_extra_percent": f"{coupon_extra_percent:.2f}",
-                "total_discount_percent": f"{total_discount_percent:.2f}",
             }
         )
     
