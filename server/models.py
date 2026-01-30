@@ -1306,42 +1306,40 @@ class Coupon(models.Model):
         return self.assigned_users.filter(pk=user.pk).exists()
 
     def eligible_items_subtotal(self, items):
-        """
-        Returns (base_subtotal, current_subtotal) for eligible items.
-        base_subtotal  = sum(original gross)
-        current_subtotal = sum(store-discounted gross)
-        """
-        base_total = Decimal("0.00")
-        cur_total = Decimal("0.00")
-
+        subtotal = Decimal("0.00")
         allowed_products = set(self.products.values_list("id", flat=True)) if self.pk else set()
         allowed_categories = set(self.categories or [])
 
         for it in items:
             if hasattr(it, "product_id"):
                 pid = it.product_id
-                qty = int(getattr(it, "quantity", 1))
-                p = getattr(it, "product", None) or Product.objects.get(pk=pid)
-                cat = getattr(p, "category", None)
+                qty = it.quantity
+                unit = it.unit_price
+                cat = it.product.category if getattr(it, "product", None) else None
             else:
                 pid = int(it.get("product_id"))
                 qty = int(it.get("qty", 1))
-                p = Product.objects.get(pk=pid)
-                cat = getattr(p, "category", None)
+
+                try:
+                    p = Product.objects.get(pk=pid)
+                except ObjectDoesNotExist:
+                    # ✅ don't crash preview/order creation
+                    continue
+
+                unit = getattr(p, "final_price_gross", None) or p.price_gross
+                unit = Decimal(str(unit))
+                cat = p.category
 
             ok = True
             if allowed_products:
                 ok = pid in allowed_products
             if ok and allowed_categories:
-                ok = cat in allowed_categories
-            if not ok:
-                continue
+                ok = (cat in allowed_categories)
 
-            base_u, cur_u = self._p_unit_prices(p)
-            base_total += base_u * qty
-            cur_total += cur_u * qty
+            if ok:
+                subtotal += (Decimal(unit) * qty)
 
-        return _q2(base_total), _q2(cur_total)
+        return _q2(subtotal)
 
     def can_apply(self, user, items, cart_subtotal, email: str = ""):
         """
