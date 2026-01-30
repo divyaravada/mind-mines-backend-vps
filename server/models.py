@@ -88,6 +88,16 @@ DEFAULT_VAT_RATE = Decimal("0.19")
 def _q2(x: Decimal) -> Decimal:
     return Decimal(x).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
+def _p_unit_prices(self, p):
+    """
+    Returns (base_gross, current_gross) for a Product.
+    base_gross = original gross price (no store discount)
+    current_gross = final gross price after store discount (if any)
+    """
+    base = getattr(p, "price_gross", None) or getattr(p, "vat_price", None) or getattr(p, "price", None) or 0
+    cur  = getattr(p, "final_price_gross", None) or getattr(p, "sale_price_gross", None) or base
+    return Decimal(str(base)), Decimal(str(cur))
+
 def make_unique_slug(instance, slug_value: str) -> str:
         """
         Ensure slug is unique by appending -2, -3, ...
@@ -1296,35 +1306,42 @@ class Coupon(models.Model):
         return self.assigned_users.filter(pk=user.pk).exists()
 
     def eligible_items_subtotal(self, items):
-        # (UNCHANGED) ...
-        subtotal = Decimal("0.00")
+        """
+        Returns (base_subtotal, current_subtotal) for eligible items.
+        base_subtotal  = sum(original gross)
+        current_subtotal = sum(store-discounted gross)
+        """
+        base_total = Decimal("0.00")
+        cur_total = Decimal("0.00")
+
         allowed_products = set(self.products.values_list("id", flat=True)) if self.pk else set()
         allowed_categories = set(self.categories or [])
 
         for it in items:
             if hasattr(it, "product_id"):
                 pid = it.product_id
-                qty = it.quantity
-                unit = it.unit_price
-                cat = it.product.category if getattr(it, "product", None) else None
+                qty = int(getattr(it, "quantity", 1))
+                p = getattr(it, "product", None) or Product.objects.get(pk=pid)
+                cat = getattr(p, "category", None)
             else:
                 pid = int(it.get("product_id"))
                 qty = int(it.get("qty", 1))
                 p = Product.objects.get(pk=pid)
-                unit = getattr(p, "final_price_gross", None) or p.price_gross
-                unit = Decimal(str(unit))
-                cat = p.category
+                cat = getattr(p, "category", None)
 
             ok = True
             if allowed_products:
                 ok = pid in allowed_products
             if ok and allowed_categories:
-                ok = (cat in allowed_categories)
+                ok = cat in allowed_categories
+            if not ok:
+                continue
 
-            if ok:
-                subtotal += (Decimal(unit) * qty)
+            base_u, cur_u = self._p_unit_prices(p)
+            base_total += base_u * qty
+            cur_total += cur_u * qty
 
-        return _q2(subtotal)
+        return _q2(base_total), _q2(cur_total)
 
     def can_apply(self, user, items, cart_subtotal, email: str = ""):
         """
@@ -1376,22 +1393,40 @@ class Coupon(models.Model):
         return True, ""
 
     def discount_amount(self, user, items, cart_subtotal):
-        # (UNCHANGED) ...
-        elig_subtotal = self.eligible_items_subtotal(items)
-        base = elig_subtotal if (self.products.exists() or (self.categories or [])) else Decimal(cart_subtotal)
+        """
+        cart_subtotal should be CURRENT subtotal (after store discounts).
+        """
+        base_total, cur_total = self.eligible_subtotals(items)
 
-        if base <= 0:
+        # If coupon applies to whole cart, base_total/cur_total should reflect the whole cart.
+        # If your coupon applies to whole cart when no product/category restriction:
+        if not (self.products.exists() or (self.categories or [])):
+            # recompute for full cart items (not only eligible) using same approach
+            base_total, cur_total = self.eligible_subtotals(items)  # items already represent cart
+            # (this is fine if items passed are always the cart items)
+
+        if cur_total <= 0 or base_total <= 0:
             return Decimal("0.00")
 
         if self.kind == "percent":
-            disc = (base * (self.value / Decimal("100")))
+            pct = (Decimal(self.value) / Decimal("100"))
+            pct = max(Decimal("0.00"), min(pct, Decimal("1.00")))
+
+            target_total = _q2(base_total * (Decimal("1.00") - pct))
+
+            # never increase price:
+            final_total = min(cur_total, target_total)
+            disc = _q2(cur_total - final_total)
+
         else:
-            disc = Decimal(self.value)
+            # fixed amount: apply on current payable subtotal, but cap not below target_total if you want similar behavior
+            disc = _q2(Decimal(self.value))
+            disc = min(disc, cur_total)
 
         if self.max_discount:
-            disc = min(disc, self.max_discount)
+            disc = min(disc, Decimal(self.max_discount))
 
-        disc = min(disc, base)
+        disc = min(disc, cur_total)
         return _q2(disc)
 
 class CouponRedemption(models.Model):
