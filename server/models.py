@@ -1229,7 +1229,7 @@ COUPON_TARGETS = [
 
 class Coupon(models.Model):
     code = models.CharField(max_length=32, unique=True, db_index=True)
-    type = models.CharField(max_length=10, choices=DISCOUNT_TYPES, default="percent")
+    kind = models.CharField(max_length=10, choices=DISCOUNT_TYPES, default="percent")
     value = models.DecimalField(max_digits=10, decimal_places=2, help_text="Percent (e.g. 10) or fixed EUR amount")
     active = models.BooleanField(default=True)
 
@@ -1382,7 +1382,7 @@ class Coupon(models.Model):
         base = elig_subtotal if (self.products.exists() or (self.categories or [])) else Decimal(cart_subtotal)
         if base <= 0:
             return Decimal("0.00")
-        if self.type == "percent":
+        if self.kind == "percent":
             disc = (base * (self.value / Decimal("100")))
         else:
             disc = Decimal(self.value)
