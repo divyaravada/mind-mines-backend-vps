@@ -911,10 +911,10 @@ class CouponRedemptionInline(admin.TabularInline):
 @admin.register(Coupon)
 class CouponAdmin(admin.ModelAdmin):
     list_display = (
-        "code", "kind", "value", "active", "starts_at", "ends_at", "is_birthday",
+        "code", "type", "value", "active", "starts_at", "ends_at", "is_birthday",
         "paid_uses", "paid_unique_users"  # ✅ NEW counters
     )
-    list_filter  = ("active", "is_birthday", "starts_at", "ends_at", "kind")
+    list_filter  = ("active", "is_birthday", "starts_at", "ends_at", "type")
     search_fields = ("code",)
 
     # ✅ show who used it (paid orders only)
