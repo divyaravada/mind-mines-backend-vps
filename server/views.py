@@ -1676,7 +1676,7 @@ class CouponPreviewAPIView(APIView):
             {
                 "ok": True,
                 "code": coup.code,
-                "type": coup.type,
+                "kind": coup.kind,
                 "value": str(coup.value),
                 "discount": f"{discount:.2f}",
                 "subtotal": f"{subtotal:.2f}",
@@ -3263,7 +3263,7 @@ class SendBirthdayCouponAPIView(APIView):
 
             coup = Coupon.objects.create(
                 code=code,
-                type="percent",
+                kind="percent",
                 value=percent,
                 active=True,
                 starts_at=starts_at,
