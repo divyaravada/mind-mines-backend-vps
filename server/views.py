@@ -1744,7 +1744,7 @@ def verify_email(request, uidb64, token):
                 "Welcome! Your email has been verified successfully.<br/>"
                 "🎁 <strong>Your 15% welcome coupon:</strong> "
                 f"<strong>{coupon_code}</strong><br/>"
-                "Use it at checkout (valid for your first order).<br/><br/>"
+                "Valid for eligible first-order items and cannot be combined with better existing product discounts.<br/><br/>"
                 "<a href='https://mindmines.eu'>Start shopping at mindmines.eu</a>"
             )
 
@@ -1752,7 +1752,7 @@ def verify_email(request, uidb64, token):
                 "Willkommen! Ihre E-Mail wurde erfolgreich verifiziert.<br/>"
                 "🎁 <strong>Ihr 15% Willkommensgutschein:</strong> "
                 f"<strong>{coupon_code}</strong><br/>"
-                "Nutzen Sie ihn an der Kasse (gültig für Ihre erste Bestellung).<br/><br/>"
+                "Gültig für berechtigte Artikel der ersten Bestellung und nicht mit bereits besseren Produktrabatten kombinierbar.<br/><br/>"
                 "<a href='https://mindmines.eu'>Jetzt shoppen auf mindmines.eu</a>"
             )
 
