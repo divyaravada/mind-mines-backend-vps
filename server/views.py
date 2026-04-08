@@ -163,7 +163,7 @@ def _ensure_invoice_email(order) -> None:
         _safe(send_invoice_email, order, user_locale=user_locale, to=recipient)
 
 # Fallback bilingual sender for small notices
-DEFAULT_FROM = getattr(settings, "EMAIL_HOST_USER", "no-reply@mindmines.eu")
+DEFAULT_FROM = getattr(settings, "DEFAULT_FROM_EMAIL", settings.EMAIL_HOST_USER)
 
 def _send_bilingual(subject, to, en_html, de_html):
     text = f"ENGLISH\n{re.sub('<[^<]+?>','',en_html)}\n\nDEUTSCH\n{re.sub('<[^<]+?>','',de_html)}"
@@ -1788,7 +1788,7 @@ def resend_verification_email(request):
 
     subject = "Resend: Verify your MindMines account"
     text_body = f"Please verify your email:\n{link}"
-    from_email = settings.EMAIL_HOST_USER
+    from_email = getattr(settings, "DEFAULT_FROM_EMAIL", settings.EMAIL_HOST_USER)
 
     html_body = None
     try:
