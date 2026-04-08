@@ -1,11 +1,131 @@
-<div>
-  <p><strong>English</strong></p>
-  <p>Your order <b>{{ order.number }}</b> has been delivered.</p>
-  <p>Thank you for shopping with {{ brand_name }}.</p>
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light only" />
+    <title>Order delivered</title>
+  </head>
+  <body
+    style="
+      margin: 0;
+      padding: 0;
+      background: #f6f3ee;
+      font-family:
+        Inter,
+        Segoe UI,
+        Arial,
+        sans-serif;
+      color: #1f1a14;
+    "
+  >
+    <table
+      role="presentation"
+      width="100%"
+      cellspacing="0"
+      cellpadding="0"
+      style="background: #f6f3ee"
+    >
+      <tr>
+        <td align="center" style="padding: 28px 12px">
+          <table
+            role="presentation"
+            width="680"
+            cellspacing="0"
+            cellpadding="0"
+            style="
+              width: 680px;
+              max-width: 100%;
+              background: #ffffff;
+              border: 1px solid #ebe6de;
+              border-radius: 20px;
+              overflow: hidden;
+            "
+          >
+            <tr>
+              <td
+                style="
+                  padding: 22px 28px;
+                  background: linear-gradient(135deg, #16150f 0%, #2a241d 100%);
+                "
+              >
+                {% with brand=brand_name|default:brand|default:"MindMines" %} {%
+                if logo_url %}<img
+                  src="{{ logo_url }}"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />
+                {% elif logo_cid %}<img
+                  src="cid:{{ logo_cid }}"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />
+                {% else %}<img
+                  src="/static/emails/logo.png"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />{% endif %} {% endwith %}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 30px 28px">
+                <div
+                  style="
+                    font-size: 12px;
+                    letter-spacing: 0.12em;
+                    text-transform: uppercase;
+                    color: #8a8178;
+                    margin-bottom: 10px;
+                  "
+                >
+                  Delivery
+                </div>
 
-  <hr />
-
-  <p><strong>Deutsch</strong></p>
-  <p>Ihre Bestellung <b>{{ order.number }}</b> wurde zugestellt.</p>
-  <p>Vielen Dank, dass Sie bei {{ brand_name }} eingekauft haben.</p>
-</div>
+                <h1
+                  style="
+                    margin: 0 0 12px;
+                    font-size: 28px;
+                    line-height: 1.2;
+                    color: #16150f;
+                  "
+                >
+                  Your order has been delivered
+                </h1>
+                <p
+                  style="
+                    margin: 0;
+                    font-size: 15px;
+                    line-height: 1.7;
+                    color: #5f584f;
+                  "
+                >
+                  Order <strong>{{ order.number }}</strong> has been marked as
+                  delivered. We hope you enjoy your MindMines purchase.
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td
+                style="
+                  padding: 18px 28px;
+                  background: #faf8f4;
+                  border-top: 1px solid #efe9e1;
+                  text-align: center;
+                  font-size: 12px;
+                  color: #7a736b;
+                "
+              >
+                MindMines ·
+                <a
+                  href="https://mindmines.eu"
+                  style="color: #1f1a14; text-decoration: none"
+                  >mindmines.eu</a
+                >
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

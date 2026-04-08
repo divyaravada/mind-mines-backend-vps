@@ -1,94 +1,184 @@
-{% load tz %}
-<!DOCTYPE html>
+<!doctype html>
 <html>
   <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light only" />
-    <meta name="supported-color-schemes" content="light only" />
-    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
     <title>SEPA payment initiated</title>
   </head>
-  <body style="margin:0; padding:0; background:#f6f7fb;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f6f7fb;">
+  <body
+    style="
+      margin: 0;
+      padding: 0;
+      background: #f6f3ee;
+      font-family:
+        Inter,
+        Segoe UI,
+        Arial,
+        sans-serif;
+      color: #1f1a14;
+    "
+  >
+    <table
+      role="presentation"
+      width="100%"
+      cellspacing="0"
+      cellpadding="0"
+      style="background: #f6f3ee"
+    >
       <tr>
-        <td align="center" style="padding:28px 12px;">
-          <table role="presentation" width="600" cellspacing="0" cellpadding="0"
-                 style="width:600px; background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 6px 18px rgba(20,20,20,0.06);">
-            <!-- Header / brand -->
+        <td align="center" style="padding: 28px 12px">
+          <table
+            role="presentation"
+            width="680"
+            cellspacing="0"
+            cellpadding="0"
+            style="
+              width: 680px;
+              max-width: 100%;
+              background: #ffffff;
+              border: 1px solid #ebe6de;
+              border-radius: 20px;
+              overflow: hidden;
+            "
+          >
             <tr>
-              {% with brand=brand_name|default:"MindMines" %}
-  {% if logo_url %}
-    <img
-      src="{{ logo_url }}"
-      width="80"
-      alt="{{ brand }}"
-      style="display: block"
-    />
-  {% elif logo_cid %}
-    <img
-      src="cid:{{ logo_cid }}"
-      width="80"
-      alt="{{ brand }}"
-      style="display: block"
-    />
-  {% else %}
-    <img
-      src="/static/emails/logo.png"
-      width="80"
-      alt="{{ brand }}"
-      style="display: block"
-    />
-  {% endif %}
-{% endwith %}
+              <td
+                style="
+                  padding: 22px 28px;
+                  background: linear-gradient(135deg, #16150f 0%, #2a241d 100%);
+                "
+              >
+                {% with brand=brand_name|default:brand|default:"MindMines" %} {%
+                if logo_url %}<img
+                  src="{{ logo_url }}"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />
+                {% elif logo_cid %}<img
+                  src="cid:{{ logo_cid }}"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />
+                {% else %}<img
+                  src="/static/emails/logo.png"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />{% endif %} {% endwith %}
               </td>
             </tr>
-
-            <!-- Body -->
             <tr>
-              <td style="font-family: Inter, Arial, sans-serif; padding:28px;">
-                <h1 style="margin:0 0 6px; font-size:22px;">SEPA payment initiated</h1>
-                <p style="margin:0 0 14px; color:#444; font-size:14px; line-height:1.6;">
-                  Thanks! We’ve received your <strong>SEPA Direct Debit</strong> request for order
-                  <strong>{{ order.number }}</strong>.
+              <td style="padding: 30px 28px">
+                <div
+                  style="
+                    font-size: 12px;
+                    letter-spacing: 0.12em;
+                    text-transform: uppercase;
+                    color: #8a8178;
+                    margin-bottom: 10px;
+                  "
+                >
+                  Payment
+                </div>
+                {% load tz %}
+                <h1
+                  style="
+                    margin: 0 0 12px;
+                    font-size: 28px;
+                    line-height: 1.2;
+                    color: #16150f;
+                  "
+                >
+                  SEPA payment initiated
+                </h1>
+                <p
+                  style="
+                    margin: 0 0 16px;
+                    font-size: 15px;
+                    line-height: 1.7;
+                    color: #5f584f;
+                  "
+                >
+                  Thanks. We’ve received your
+                  <strong>{{ payment_method_display }}</strong> request for
+                  order <strong>{{ order.number }}</strong>.
                 </p>
-                <p style="margin:0 0 14px; color:#444; font-size:14px; line-height:1.6;">
-                  The bank will process the payment in <strong>{{ sepa_notice_days }}</strong> working days.
-                  We’ll email your invoice as soon as the payment succeeds.
-                </p>
-
-                <!-- Facts -->
-                <table role="presentation" cellspacing="0" cellpadding="0"
-                       style="border:1px solid #eee; border-radius:10px; width:100%; margin:8px 0 16px;">
+                <table
+                  role="presentation"
+                  width="100%"
+                  cellspacing="0"
+                  cellpadding="0"
+                  style="
+                    margin: 16px 0;
+                    border: 1px solid #e9e5dd;
+                    border-radius: 14px;
+                    background: #faf8f4;
+                  "
+                >
                   <tr>
-                    <td style="padding:12px 16px; font-family: Inter, Arial, sans-serif; font-size:14px;">
+                    <td
+                      style="
+                        padding: 18px 20px;
+                        font-size: 14px;
+                        line-height: 1.8;
+                        color: #1f1a14;
+                      "
+                    >
+                      <div><strong>Order:</strong> {{ order.number }}</div>
+                      <div><strong>Date:</strong> {{ created_at_display }}</div>
                       <div><strong>Total:</strong> {{ total_display }}</div>
-                      <div><strong>Placed at:</strong> {{ created_at_display }}</div>
-                      <div><strong>Payment method:</strong> {{ payment_method_display }}</div>
+                      <div>
+                        <strong>Advance notice:</strong> {{ sepa_notice_days }}
+                        day{{ sepa_notice_days|pluralize }}
+                      </div>
                     </td>
                   </tr>
                 </table>
-
-                <p style="margin:0 0 18px; color:#666; font-size:13px;">
-                  You can track this order in your account.
+                <p
+                  style="
+                    margin: 0 0 16px;
+                    font-size: 14px;
+                    line-height: 1.7;
+                    color: #5f584f;
+                  "
+                >
+                  We’ll let you know once the payment is fully confirmed.
                 </p>
-
-                <p style="margin:0;">
-                  <a href="{{ orders_url }}" target="_blank"
-                     style="background:#0b0b0b; color:#fff; text-decoration:none; padding:12px 20px; border-radius:8px; display:inline-block; font-weight:600; font-size:14px;">
-                    Go to your orders
-                  </a>
-                </p>
-
-                <p style="margin:18px 0 0; color:#999; font-size:12px; line-height:1.6;">
-                  If you didn’t authorize this payment, please reply to this email immediately.
+                <p style="margin: 22px 0 0">
+                  <a
+                    href="{{ orders_url }}"
+                    style="
+                      display: inline-block;
+                      padding: 14px 22px;
+                      background: #16150f;
+                      color: #ffffff;
+                      text-decoration: none;
+                      border-radius: 12px;
+                      font-size: 14px;
+                      font-weight: 600;
+                    "
+                    >View your orders</a
+                  >
                 </p>
               </td>
             </tr>
-
-            <!-- Footer -->
             <tr>
-              <td align="center"
-                  style="padding:0 0 26px; font-family: Inter, Arial, sans-serif; color:#9aa; font-size:12px;">
-                © {% now "Y" %} MindMines — All rights reserved
+              <td
+                style="
+                  padding: 18px 28px;
+                  background: #faf8f4;
+                  border-top: 1px solid #efe9e1;
+                  text-align: center;
+                  font-size: 12px;
+                  color: #7a736b;
+                "
+              >
+                MindMines ·
+                <a
+                  href="https://mindmines.eu"
+                  style="color: #1f1a14; text-decoration: none"
+                  >mindmines.eu</a
+                >
               </td>
             </tr>
           </table>

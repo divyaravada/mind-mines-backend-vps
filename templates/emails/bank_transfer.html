@@ -1,91 +1,166 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light only" />
     <title>Bank transfer details</title>
   </head>
   <body
     style="
       margin: 0;
-      padding: 24px;
-      background: #f5f5f5;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      line-height: 1.5;
-      color: #111;
+      padding: 0;
+      background: #f6f3ee;
+      font-family:
+        Inter,
+        Segoe UI,
+        Arial,
+        sans-serif;
+      color: #1f1a14;
     "
   >
-    <div
-      style="
-        max-width: 640px;
-        margin: 0 auto;
-        background: #ffffff;
-        border-radius: 12px;
-        border: 1px solid #e5e5e5;
-        overflow: hidden;
-        padding: 16px 20px 20px;
-      "
+    <table
+      role="presentation"
+      width="100%"
+      cellspacing="0"
+      cellpadding="0"
+      style="background: #f6f3ee"
     >
-      <!-- BRAND HEADER -->
-      <div
-        style="
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          margin-bottom: 16px;
-          padding: 8px 12px;
-          border-radius: 10px;
-          background: #f7f3ed;
-        "
-      >
-        {% with brand=brand_name|default:"MindMines" %} {% if logo_url %}
-        <img
-          src="{{ logo_url }}"
-          alt="{{ brand }}"
-          style="height: 32px; display: block"
-        />
-        {% elif logo_cid %}
-        <img
-          src="cid:{{ logo_cid }}"
-          alt="{{ brand }}"
-          style="height: 32px; display: block"
-        />
-        {% else %}
-        <img
-          src="/static/emails/logo.png"
-          alt="{{ brand }}"
-          style="height: 32px; display: block"
-        />
-        {% endif %}
-        <span
-          style="
-            font-size: 18px;
-            font-weight: 600;
-            letter-spacing: 0.04em;
-            text-transform: uppercase;
-            color: #16150f;
-          "
-        >
-          {{ brand }}
-        </span>
-        {% endwith %}
-      </div>
+      <tr>
+        <td align="center" style="padding: 28px 12px">
+          <table
+            role="presentation"
+            width="680"
+            cellspacing="0"
+            cellpadding="0"
+            style="
+              width: 680px;
+              max-width: 100%;
+              background: #ffffff;
+              border: 1px solid #ebe6de;
+              border-radius: 20px;
+              overflow: hidden;
+            "
+          >
+            <tr>
+              <td
+                style="
+                  padding: 22px 28px;
+                  background: linear-gradient(135deg, #16150f 0%, #2a241d 100%);
+                "
+              >
+                {% with brand=brand_name|default:brand|default:"MindMines" %} {%
+                if logo_url %}<img
+                  src="{{ logo_url }}"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />
+                {% elif logo_cid %}<img
+                  src="cid:{{ logo_cid }}"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />
+                {% else %}<img
+                  src="/static/emails/logo.png"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />{% endif %} {% endwith %}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 30px 28px">
+                <div
+                  style="
+                    font-size: 12px;
+                    letter-spacing: 0.12em;
+                    text-transform: uppercase;
+                    color: #8a8178;
+                    margin-bottom: 10px;
+                  "
+                >
+                  Payment
+                </div>
 
-      <!-- ORIGINAL CONTENT START -->
-      <h2 style="margin: 0 0 8px">
-        Bank transfer details for order {{ order.number }}
-      </h2>
-
-      <p style="margin: 0 0 8px">Amount: {{ amount_display }}</p>
-      <p style="margin: 0 0 8px">Reference: {{ reference }}</p>
-      <p style="margin: 0 0 8px">IBAN: {{ iban }}</p>
-      <p style="margin: 0 0 8px">BIC: {{ bic }}</p>
-      <p style="margin: 0 0 8px">Account holder: {{ bank.account_name }}</p>
-
-      <p style="margin: 16px 0 8px">
-        As soon as we receive your payment, we will send your invoice and
-        shipping confirmation.
-      </p>
-      <!-- ORIGINAL CONTENT END -->
-    </div>
+                <h1
+                  style="
+                    margin: 0 0 12px;
+                    font-size: 28px;
+                    line-height: 1.2;
+                    color: #16150f;
+                  "
+                >
+                  Bank transfer details
+                </h1>
+                <p
+                  style="
+                    margin: 0 0 16px;
+                    font-size: 15px;
+                    line-height: 1.7;
+                    color: #5f584f;
+                  "
+                >
+                  Please use the following details to pay order
+                  <strong>{{ order.number }}</strong>.
+                </p>
+                <table
+                  role="presentation"
+                  width="100%"
+                  cellspacing="0"
+                  cellpadding="0"
+                  style="
+                    margin: 16px 0;
+                    border: 1px solid #e9e5dd;
+                    border-radius: 14px;
+                    background: #faf8f4;
+                  "
+                >
+                  <tr>
+                    <td
+                      style="
+                        padding: 18px 20px;
+                        font-size: 14px;
+                        line-height: 1.8;
+                        color: #1f1a14;
+                      "
+                    >
+                      <div><strong>Amount:</strong> {{ amount_display }}</div>
+                      <div><strong>Reference:</strong> {{ reference }}</div>
+                      <div>
+                        <strong>Account name:</strong> {{ bank.account_name }}
+                      </div>
+                      <div><strong>IBAN:</strong> {{ iban }}</div>
+                      <div><strong>BIC:</strong> {{ bic }}</div>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin: 0; font-size: 13px; color: #7a736b">
+                  Please include the reference exactly as shown so we can match
+                  your payment quickly.
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td
+                style="
+                  padding: 18px 28px;
+                  background: #faf8f4;
+                  border-top: 1px solid #efe9e1;
+                  text-align: center;
+                  font-size: 12px;
+                  color: #7a736b;
+                "
+              >
+                MindMines ·
+                <a
+                  href="https://mindmines.eu"
+                  style="color: #1f1a14; text-decoration: none"
+                  >mindmines.eu</a
+                >
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
   </body>
 </html>

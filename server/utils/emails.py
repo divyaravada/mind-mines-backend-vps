@@ -205,43 +205,71 @@ def _order_header_html(order) -> str:
         num = getattr(order, "number", None) or f"#{order.id}"
         total_val = getattr(order, "total_price", Decimal("0.00"))
         total = _money(total_val)
-        created = getattr(order, "created_at", None) or getattr(
-            order, "created", None
-        )
-        created_str = created.strftime("%Y-%m-%d %H:%M") if created else ""
-        return (
-            f"<p><strong>Order:</strong> {num}<br />"
-            f"<strong>Total:</strong> {total}<br />"
-            f"<strong>Date:</strong> {created_str}</p>"
-        )
+        created = getattr(order, "created_at", None) or getattr(order, "created", None)
+        created_str = created.strftime("%d %b %Y, %H:%M") if created else ""
+        payment_method = getattr(order, "payment_method", "") or "-"
+        status = getattr(order, "status", "") or "-"
+
+        return f"""
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+               style="margin:16px 0;border:1px solid #e9e5dd;border-radius:14px;background:#faf8f4;">
+          <tr>
+            <td style="padding:18px 20px;font-size:14px;line-height:1.7;color:#1f1a14;">
+              <div><strong>Order:</strong> {num}</div>
+              <div><strong>Total:</strong> {total}</div>
+              <div><strong>Date:</strong> {created_str}</div>
+              <div><strong>Payment:</strong> {payment_method}</div>
+              <div><strong>Status:</strong> {status}</div>
+            </td>
+          </tr>
+        </table>
+        """
     except Exception:
-        logger.exception(
-            "Failed to render order header for order %s", getattr(order, "id", "?")
-        )
+        logger.exception("Failed to render order header for order %s", getattr(order, "id", "?"))
         return ""
 
 
 def _line_items_html(order) -> str:
     try:
-        items = getattr(order, "items", None) or getattr(
-            order, "order_items", None
-        ) or []
+        items = getattr(order, "items", None) or getattr(order, "order_items", None) or []
         rows = []
+
         for it in items.all() if hasattr(items, "all") else items:
-            title = getattr(it, "product_title", None) or getattr(
-                getattr(it, "product", None), "title_en", ""
-            )
+            title = getattr(it, "product_title", None) or getattr(getattr(it, "product", None), "title_en", "") or "Item"
             qty = getattr(it, "quantity", 1)
             unit_val = getattr(it, "unit_price", None)
             if unit_val is None:
                 unit_val = getattr(it, "unit_price_gross", Decimal("0.00"))
-            unit = _money(unit_val)
-            rows.append(f"<li>{title} &times; {qty} — {unit}</li>")
-        return "<ul>" + "".join(rows) + "</ul>" if rows else ""
+            line_total_val = Decimal(unit_val) * Decimal(qty)
+
+            rows.append(f"""
+            <tr>
+              <td style="padding:14px 0;border-bottom:1px solid #f0ece6;color:#1f1a14;">{title}</td>
+              <td align="center" style="padding:14px 0;border-bottom:1px solid #f0ece6;color:#5b544c;">{qty}</td>
+              <td align="right" style="padding:14px 0;border-bottom:1px solid #f0ece6;color:#1f1a14;">{_money(line_total_val)}</td>
+            </tr>
+            """)
+
+        if not rows:
+            return ""
+
+        return f"""
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+               style="margin:8px 0 18px;border-collapse:collapse;">
+          <thead>
+            <tr>
+              <th align="left" style="padding:0 0 10px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8a8178;">Item</th>
+              <th align="center" style="padding:0 0 10px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8a8178;">Qty</th>
+              <th align="right" style="padding:0 0 10px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8a8178;">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(rows)}
+          </tbody>
+        </table>
+        """
     except Exception:
-        logger.exception(
-            "Failed to render line items for order %s", getattr(order, "id", "?")
-        )
+        logger.exception("Failed to render line items for order %s", getattr(order, "id", "?"))
         return ""
 
 
@@ -279,15 +307,7 @@ def _send_email(
         return False
 
 
-def _base_wrapper(
-    subject_en: str, subject_de: str, body_en_html: str, body_de_html: str
-) -> EmailBody:
-    """
-    Wrap two language-specific HTML fragments in a branded email shell.
-
-    - Shows EN + DE one under the other.
-    - Adds MindMines logo and a light card-style container.
-    """
+def _base_wrapper(subject_en: str, subject_de: str, body_en_html: str, body_de_html: str) -> EmailBody:
     subject = f"{subject_en} / {subject_de}"
     text_en = _html_to_text(body_en_html)
     text_de = _html_to_text(body_de_html)
@@ -300,9 +320,8 @@ def _base_wrapper(
     site_url = SITE_URL
 
     logo_html = (
-        f'<img src="{logo_url}" alt="{brand}" style="height:32px;display:block;" />'
-        if logo_url
-        else ""
+        f'<img src="{logo_url}" alt="{brand}" style="height:34px;display:block;border:0;" />'
+        if logo_url else ""
     )
 
     html = f"""<!DOCTYPE html>
@@ -311,31 +330,67 @@ def _base_wrapper(
     <meta charset="utf-8" />
     <meta name="color-scheme" content="light only" />
     <meta name="supported-color-schemes" content="light only" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{subject}</title>
   </head>
-  <body style="margin:0;padding:24px;background-color:#f5f5f5;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;line-height:1.5;color:#111;">
-    <div style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:12px;border:1px solid #e5e5e5;overflow:hidden;">
-      <div style="display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid #f0f0f0;">
-        {logo_html}
-        <span style="font-size:18px;font-weight:600;letter-spacing:0.02em;">{brand}</span>
-      </div>
-      <div style="padding:20px;">
-        <h3 style="margin:0 0 12px;font-size:16px;color:#444;">English</h3>
-        {body_en_html}
-        <hr style="margin:24px 0;border:none;border-top:1px solid #eee;" />
-        <h3 style="margin:0 0 12px;font-size:16px;color:#444;">Deutsch</h3>
-        {body_de_html}
-      </div>
-      <div style="padding:12px 20px;border-top:1px solid #f0f0f0;background:#fafafa;font-size:12px;color:#777;text-align:center;">
-        <div style="margin-bottom:4px;">{footer_en}</div>
-        <div style="margin-bottom:4px;">{footer_de}</div>
-        <div style="opacity:0.8;">{site_url}</div>
-      </div>
-    </div>
+  <body style="margin:0;padding:0;background:#f6f3ee;font-family:Inter,Segoe UI,Arial,sans-serif;color:#1f1a14;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f6f3ee;">
+      <tr>
+        <td align="center" style="padding:28px 12px;">
+          <table role="presentation" width="680" cellspacing="0" cellpadding="0"
+                 style="width:680px;max-width:100%;background:#ffffff;border:1px solid #ebe6de;border-radius:20px;overflow:hidden;">
+            <tr>
+              <td style="padding:22px 28px;background:linear-gradient(135deg,#16150f 0%,#2a241d 100%);">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                  <tr>
+                    <td align="left">{logo_html}</td>
+                    <td align="right" style="color:#f3ede4;font-size:12px;letter-spacing:.16em;text-transform:uppercase;">
+                      Natural stone decor
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:28px;">
+                <div style="margin-bottom:22px;padding:14px 16px;background:#faf8f4;border:1px solid #eee6da;border-radius:14px;font-size:12px;color:#8a8178;letter-spacing:.08em;text-transform:uppercase;">
+                  Transactional customer update
+                </div>
+
+                <div style="margin-bottom:30px;">
+                  <div style="font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8178;margin:0 0 10px;">English</div>
+                  {body_en_html}
+                </div>
+
+                <div style="height:1px;background:#efe9e1;margin:26px 0;"></div>
+
+                <div>
+                  <div style="font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8178;margin:0 0 10px;">Deutsch</div>
+                  {body_de_html}
+                </div>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:18px 28px;background:#faf8f4;border-top:1px solid #efe9e1;">
+                <div style="font-size:12px;line-height:1.7;color:#7a736b;text-align:center;">
+                  <div>{footer_en}</div>
+                  <div>{footer_de}</div>
+                  <div style="margin-top:6px;">
+                    <a href="{site_url}" style="color:#1f1a14;text-decoration:none;font-weight:600;">{site_url}</a>
+                  </div>
+                </div>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
   </body>
 </html>"""
     return EmailBody(subject=subject, text=text, html=html)
-
 
 def _send_bilingual(
     subject: str,
@@ -834,19 +889,34 @@ def send_order_confirmation(
     subject_de = _tr("de", "subject_order_confirm", num=num)
 
     body_en = f"""
-      <p>{_tr('en','salute')},</p>
-      <p>{_tr('en','order_confirm_intro')}</p>
-      {_order_header_html(order)}
-      {_line_items_html(order)}
-      <p>{_tr('en','thanks')}<br />{_tr('en','brand')}</p>
-    """
+        <h2 style="margin:0 0 8px;font-size:28px;line-height:1.2;color:#16150f;">Thank you for your order.</h2>
+        <p style="margin:0 0 16px;font-size:15px;color:#5f584f;">
+            We’ve received your order and we’re preparing it carefully.
+        </p>
+        {_order_header_html(order)}
+        {_line_items_html(order)}
+        <p style="margin:16px 0 0;font-size:14px;color:#5f584f;">
+            We’ll send you another email as soon as your order status changes.
+        </p>
+        <p style="margin:18px 0 0;font-size:14px;color:#1f1a14;">
+            {_tr('en','thanks')}<br />{_tr('en','brand')}
+        </p>
+        """
+
     body_de = f"""
-      <p>{_tr('de','salute')},</p>
-      <p>{_tr('de','order_confirm_intro')}</p>
-      {_order_header_html(order)}
-      {_line_items_html(order)}
-      <p>{_tr('de','thanks')}<br />{_tr('de','brand')}</p>
-    """
+        <h2 style="margin:0 0 8px;font-size:28px;line-height:1.2;color:#16150f;">Vielen Dank für Ihre Bestellung.</h2>
+        <p style="margin:0 0 16px;font-size:15px;color:#5f584f;">
+            Wir haben Ihre Bestellung erhalten und bereiten sie sorgfältig vor.
+        </p>
+        {_order_header_html(order)}
+        {_line_items_html(order)}
+        <p style="margin:16px 0 0;font-size:14px;color:#5f584f;">
+            Sobald sich der Status Ihrer Bestellung ändert, informieren wir Sie per E-Mail.
+        </p>
+        <p style="margin:18px 0 0;font-size:14px;color:#1f1a14;">
+            {_tr('de','thanks')}<br />{_tr('de','brand')}
+        </p>
+        """
 
     mail = _base_wrapper(subject_en, subject_de, body_en, body_de)
     ok = _send_email(mail.subject, mail.text, mail.html, to)
