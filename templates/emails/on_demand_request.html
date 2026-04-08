@@ -1,113 +1,180 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light only" />
+    <title>Custom request received</title>
+  </head>
   <body
     style="
       margin: 0;
-      padding: 24px;
-      background: #f5f5f5;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      padding: 0;
+      background: #f6f3ee;
+      font-family:
+        Inter,
+        Segoe UI,
+        Arial,
+        sans-serif;
+      color: #1f1a14;
     "
   >
-    <div
-      style="
-        max-width: 640px;
-        margin: 0 auto;
-        background: #ffffff;
-        border-radius: 12px;
-        border: 1px solid #e5e5e5;
-        overflow: hidden;
-      "
+    <table
+      role="presentation"
+      width="100%"
+      cellspacing="0"
+      cellpadding="0"
+      style="background: #f6f3ee"
     >
-      <!-- Header -->
-      <div
-        style="
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          padding: 16px 20px;
-          background: #16150f;
-        "
-      >
-        {% with brand=brand_name|default:"MindMines" %} {% if logo_url %}
-        <img
-          src="{{ logo_url }}"
-          alt="{{ brand }}"
-          style="height: 32px; display: block"
-        />
-        {% else %}
-        <img
-          src="/static/emails/logo.png"
-          alt="{{ brand }}"
-          style="height: 32px; display: block"
-        />
-        {% endif %}
-        <span
-          style="
-            font-size: 18px;
-            font-weight: 600;
-            letter-spacing: 0.04em;
-            text-transform: uppercase;
-            color: #f7f3ed;
-          "
-        >
-          {{ brand }}
-        </span>
-        {% endwith %}
-      </div>
-
-      <!-- Content -->
-      <div style="padding: 20px">
-        <h2 style="margin: 0 0 10px; font-size: 18px">
-          On-demand product request
-        </h2>
-
-        <p style="margin: 0 0 8px"><strong>Product:</strong> {{ product }}</p>
-        <p style="margin: 0 0 8px">
-          <strong>Quantity:</strong> {{ req.quantity }}
-        </p>
-        <p style="margin: 0 0 8px">
-          <strong>Customer:</strong>
-          {{ req.name|default:"-" }} &lt;{{ req.email }}&gt;
-        </p>
-        <p style="margin: 0 0 8px">
-          <strong>Message:</strong><br />
-          <span style="white-space: pre-wrap"
-            >{{ req.message|default:"(no message)" }}</span
-          >
-        </p>
-
-        <p style="margin: 12px 0 0">
-          <a
-            href="{{ product_url }}"
+      <tr>
+        <td align="center" style="padding: 28px 12px">
+          <table
+            role="presentation"
+            width="680"
+            cellspacing="0"
+            cellpadding="0"
             style="
-              display: inline-block;
-              padding: 10px 16px;
-              background: #000;
-              color: #fff;
-              text-decoration: none;
-              border-radius: 6px;
-              font-size: 14px;
+              width: 680px;
+              max-width: 100%;
+              background: #ffffff;
+              border: 1px solid #ebe6de;
+              border-radius: 20px;
+              overflow: hidden;
             "
-            target="_blank"
           >
-            View product in admin / shop
-          </a>
-        </p>
-      </div>
+            <tr>
+              <td
+                style="
+                  padding: 22px 28px;
+                  background: linear-gradient(135deg, #16150f 0%, #2a241d 100%);
+                "
+              >
+                {% with brand=brand_name|default:brand|default:"MindMines" %} {%
+                if logo_url %}<img
+                  src="{{ logo_url }}"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />
+                {% elif logo_cid %}<img
+                  src="cid:{{ logo_cid }}"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />
+                {% else %}<img
+                  src="/static/emails/logo.png"
+                  alt="{{ brand }}"
+                  style="height: 34px; display: block; border: 0"
+                />{% endif %} {% endwith %}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 30px 28px">
+                <div
+                  style="
+                    font-size: 12px;
+                    letter-spacing: 0.12em;
+                    text-transform: uppercase;
+                    color: #8a8178;
+                    margin-bottom: 10px;
+                  "
+                >
+                  Request
+                </div>
 
-      <!-- Footer -->
-      <div
-        style="
-          padding: 10px 20px 14px;
-          background: #fafafa;
-          border-top: 1px solid #f0f0f0;
-          font-size: 12px;
-          color: #777;
-          text-align: center;
-        "
-      >
-        {{ site_url|default:"https://mindmines.eu" }}
-      </div>
-    </div>
+                <h1
+                  style="
+                    margin: 0 0 12px;
+                    font-size: 28px;
+                    line-height: 1.2;
+                    color: #16150f;
+                  "
+                >
+                  New custom request received
+                </h1>
+                <p
+                  style="
+                    margin: 0 0 16px;
+                    font-size: 15px;
+                    line-height: 1.7;
+                    color: #5f584f;
+                  "
+                >
+                  A new on-demand request was submitted for your product page.
+                </p>
+                <table
+                  role="presentation"
+                  width="100%"
+                  cellspacing="0"
+                  cellpadding="0"
+                  style="
+                    margin-top: 16px;
+                    border: 1px solid #e9e5dd;
+                    border-radius: 14px;
+                    background: #faf8f4;
+                  "
+                >
+                  <tr>
+                    <td
+                      style="
+                        padding: 18px 20px;
+                        font-size: 14px;
+                        line-height: 1.8;
+                        color: #1f1a14;
+                      "
+                    >
+                      <div><strong>Product:</strong> {{ product }}</div>
+                      <div>
+                        <strong>Name:</strong> {{ req.name|default:"-" }}
+                      </div>
+                      <div><strong>Email:</strong> {{ req.email }}</div>
+                      <div><strong>Quantity:</strong> {{ req.quantity }}</div>
+                      <div style="margin-top: 10px">
+                        <strong>Message:</strong><br />{{
+                        req.message|default:"(no message)" }}
+                      </div>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin: 22px 0 0">
+                  <a
+                    href="{{ product_url }}"
+                    style="
+                      display: inline-block;
+                      padding: 14px 22px;
+                      background: #16150f;
+                      color: #ffffff;
+                      text-decoration: none;
+                      border-radius: 12px;
+                      font-size: 14px;
+                      font-weight: 600;
+                    "
+                    >Open product page</a
+                  >
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td
+                style="
+                  padding: 18px 28px;
+                  background: #faf8f4;
+                  border-top: 1px solid #efe9e1;
+                  text-align: center;
+                  font-size: 12px;
+                  color: #7a736b;
+                "
+              >
+                MindMines ·
+                <a
+                  href="https://mindmines.eu"
+                  style="color: #1f1a14; text-decoration: none"
+                  >mindmines.eu</a
+                >
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
   </body>
 </html>

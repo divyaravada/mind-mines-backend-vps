@@ -1,160 +1,242 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
-  <body style="margin: 0; padding: 0; background: #f6f7fb">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light only" />
+    <title>New cancellation request</title>
+  </head>
+  <body
+    style="
+      margin: 0;
+      padding: 0;
+      background: #f6f3ee;
+      font-family:
+        Inter,
+        Segoe UI,
+        Arial,
+        sans-serif;
+      color: #1f1a14;
+    "
+  >
     <table
       role="presentation"
       width="100%"
-      cellpadding="0"
       cellspacing="0"
-      style="background: #f6f7fb"
+      cellpadding="0"
+      style="background: #f6f3ee"
     >
       <tr>
         <td align="center" style="padding: 28px 12px">
           <table
             role="presentation"
-            width="600"
-            cellpadding="0"
+            width="680"
             cellspacing="0"
+            cellpadding="0"
             style="
-              background: #fff;
-              border-radius: 12px;
+              width: 680px;
+              max-width: 100%;
+              background: #ffffff;
+              border: 1px solid #ebe6de;
+              border-radius: 20px;
               overflow: hidden;
-              box-shadow: 0 6px 18px rgba(20, 20, 20, 0.06);
             "
           >
             <tr>
-              <td style="background: #16150f; padding: 18px 24px">
-                {% with brand=brand_name|default:"MindMines" %} {% if logo_url
-                %}
-                <img
+              <td
+                style="
+                  padding: 22px 28px;
+                  background: linear-gradient(135deg, #16150f 0%, #2a241d 100%);
+                "
+              >
+                {% with brand=brand_name|default:brand|default:"MindMines" %} {%
+                if logo_url %}<img
                   src="{{ logo_url }}"
-                  width="80"
                   alt="{{ brand }}"
-                  style="display: block"
+                  style="height: 34px; display: block; border: 0"
                 />
-                {% elif logo_cid %}
-                <img
+                {% elif logo_cid %}<img
                   src="cid:{{ logo_cid }}"
-                  width="80"
                   alt="{{ brand }}"
-                  style="display: block"
+                  style="height: 34px; display: block; border: 0"
                 />
-                {% else %}
-                <img
+                {% else %}<img
                   src="/static/emails/logo.png"
-                  width="80"
                   alt="{{ brand }}"
-                  style="display: block"
-                />
-                {% endif %} {% endwith %}
+                  style="height: 34px; display: block; border: 0"
+                />{% endif %} {% endwith %}
               </td>
             </tr>
             <tr>
-              <td style="font-family: Inter, Arial; padding: 28px">
-                <h1 style="margin: 0 0 6px; font-size: 20px">
+              <td style="padding: 30px 28px">
+                <div
+                  style="
+                    font-size: 12px;
+                    letter-spacing: 0.12em;
+                    text-transform: uppercase;
+                    color: #8a8178;
+                    margin-bottom: 10px;
+                  "
+                >
+                  Cancellation
+                </div>
+
+                <h1
+                  style="
+                    margin: 0 0 12px;
+                    font-size: 28px;
+                    line-height: 1.2;
+                    color: #16150f;
+                  "
+                >
                   New cancellation request
                 </h1>
                 <p
                   style="
-                    margin: 0 0 14px;
-                    color: #444;
-                    font-size: 14px;
-                    line-height: 1.6;
+                    margin: 0 0 16px;
+                    font-size: 15px;
+                    line-height: 1.7;
+                    color: #5f584f;
                   "
                 >
-                  Order <strong>{{ order.number }}</strong> placed on
-                  <strong>{{ created_at_display }}</strong> • Total
-                  <strong>{{ total_display }}</strong><br />
-                  Customer: {{ customer_name }} ({{ customer_email }})
+                  A customer submitted a cancellation request.
                 </p>
-
-                {% if message %}
-                <p style="margin: 0 0 6px">
-                  <strong>Reason:</strong><br />{{ message|linebreaksbr }}
-                </p>
-                {% endif %} {% if items %}
-                <div style="font-weight: 600; margin: 12px 0 6px">Items</div>
                 <table
                   role="presentation"
                   width="100%"
-                  cellpadding="0"
                   cellspacing="0"
+                  cellpadding="0"
                   style="
-                    border-collapse: collapse;
-                    font-family: Inter, Arial;
-                    font-size: 14px;
+                    margin: 16px 0;
+                    border: 1px solid #e9e5dd;
+                    border-radius: 14px;
+                    background: #faf8f4;
                   "
                 >
-                  <tr style="background: #fafafa">
-                    <th
-                      align="left"
-                      style="
-                        padding: 10px 12px;
-                        border: 1px solid #eee;
-                        font-weight: 600;
-                      "
-                    >
-                      Item
-                    </th>
-                    <th
-                      align="center"
-                      style="
-                        padding: 10px 12px;
-                        border: 1px solid #eee;
-                        font-weight: 600;
-                      "
-                    >
-                      Qty
-                    </th>
-                    <th
-                      align="right"
-                      style="
-                        padding: 10px 12px;
-                        border: 1px solid #eee;
-                        font-weight: 600;
-                      "
-                    >
-                      Total
-                    </th>
-                  </tr>
-                  {% for i in items %}
                   <tr>
-                    <td style="padding: 10px 12px; border: 1px solid #eee">
-                      {{ i.name }}
-                    </td>
                     <td
-                      align="center"
-                      style="padding: 10px 12px; border: 1px solid #eee"
+                      style="
+                        padding: 18px 20px;
+                        font-size: 14px;
+                        line-height: 1.8;
+                        color: #1f1a14;
+                      "
                     >
-                      {{ i.qty }}
-                    </td>
-                    <td
-                      align="right"
-                      style="padding: 10px 12px; border: 1px solid #eee"
-                    >
-                      {{ i.total }}
+                      <div><strong>Order ID:</strong> {{ order.id }}</div>
+                      <div>
+                        <strong>Order number:</strong> {{ order.number }}
+                      </div>
+                      <div>
+                        <strong>Created:</strong> {{ created_at_display }}
+                      </div>
+                      <div>
+                        <strong>Customer:</strong> {{ customer_name }} ({{
+                        customer_email }})
+                      </div>
+                      <div><strong>Total:</strong> {{ total_display }}</div>
+                      <div style="margin-top: 10px">
+                        <strong>Message:</strong><br />{{ message|linebreaksbr
+                        }}
+                      </div>
                     </td>
                   </tr>
-                  {% endfor %}
+                </table>
+                {% if items %}
+                <table
+                  role="presentation"
+                  width="100%"
+                  cellspacing="0"
+                  cellpadding="0"
+                  style="margin-top: 18px; border-collapse: collapse"
+                >
+                  <thead>
+                    <tr>
+                      <th
+                        align="left"
+                        style="
+                          padding: 0 0 10px;
+                          font-size: 12px;
+                          letter-spacing: 0.06em;
+                          text-transform: uppercase;
+                          color: #8a8178;
+                        "
+                      >
+                        Item
+                      </th>
+                      <th
+                        align="center"
+                        style="
+                          padding: 0 0 10px;
+                          font-size: 12px;
+                          letter-spacing: 0.06em;
+                          text-transform: uppercase;
+                          color: #8a8178;
+                        "
+                      >
+                        Qty
+                      </th>
+                      <th
+                        align="right"
+                        style="
+                          padding: 0 0 10px;
+                          font-size: 12px;
+                          letter-spacing: 0.06em;
+                          text-transform: uppercase;
+                          color: #8a8178;
+                        "
+                      >
+                        Total
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for i in items %}
+                    <tr>
+                      <td
+                        style="
+                          padding: 12px 0;
+                          border-bottom: 1px solid #f0ece6;
+                        "
+                      >
+                        {{ i.name }}
+                      </td>
+                      <td
+                        align="center"
+                        style="
+                          padding: 12px 0;
+                          border-bottom: 1px solid #f0ece6;
+                        "
+                      >
+                        {{ i.qty }}
+                      </td>
+                      <td
+                        align="right"
+                        style="
+                          padding: 12px 0;
+                          border-bottom: 1px solid #f0ece6;
+                        "
+                      >
+                        {{ i.total }}
+                      </td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
                 </table>
                 {% endif %}
-
-                <p style="margin: 14px 0 0; color: #666; font-size: 13px">
-                  Admin: /admin/server/order/{{ order.id }}/change/
-                </p>
               </td>
             </tr>
             <tr>
               <td
-                align="center"
                 style="
-                  padding: 0 0 26px;
-                  color: #9aa;
-                  font-family: Inter, Arial;
+                  padding: 18px 28px;
+                  background: #faf8f4;
+                  border-top: 1px solid #efe9e1;
+                  text-align: center;
                   font-size: 12px;
+                  color: #7a736b;
                 "
               >
-                © {{ year }} MindMines — All rights reserved
+                © {{ year }} MindMines
               </td>
             </tr>
           </table>

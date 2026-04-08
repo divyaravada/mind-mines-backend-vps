@@ -1,149 +1,179 @@
-{% load tz %}
-<!DOCTYPE html>
+<!doctype html>
 <html>
   <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light only" />
-    <meta name="supported-color-schemes" content="light only" />
-    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
-    <title>Deine Rechnung</title>
+    <title>Rechnung verfügbar</title>
   </head>
-  <body style="margin: 0; padding: 0; background: #f6f7fb">
+  <body
+    style="
+      margin: 0;
+      padding: 0;
+      background: #f6f3ee;
+      font-family:
+        Inter,
+        Segoe UI,
+        Arial,
+        sans-serif;
+      color: #1f1a14;
+    "
+  >
     <table
       role="presentation"
       width="100%"
       cellspacing="0"
       cellpadding="0"
-      style="background: #f6f7fb"
+      style="background: #f6f3ee"
     >
       <tr>
         <td align="center" style="padding: 28px 12px">
           <table
             role="presentation"
-            width="600"
+            width="680"
             cellspacing="0"
             cellpadding="0"
             style="
-              width: 600px;
-              background: #fff;
-              border-radius: 12px;
+              width: 680px;
+              max-width: 100%;
+              background: #ffffff;
+              border: 1px solid #ebe6de;
+              border-radius: 20px;
               overflow: hidden;
-              box-shadow: 0 6px 18px rgba(20, 20, 20, 0.06);
             "
           >
             <tr>
-              <td style="background: #16150f; padding: 18px 24px">
-                {% with brand=brand_name|default:"MindMines" %} {% if logo_url
-                %}
-                <img
+              <td
+                style="
+                  padding: 22px 28px;
+                  background: linear-gradient(135deg, #16150f 0%, #2a241d 100%);
+                "
+              >
+                {% with brand=brand_name|default:brand|default:"MindMines" %} {%
+                if logo_url %}<img
                   src="{{ logo_url }}"
-                  width="80"
                   alt="{{ brand }}"
-                  style="display: block"
+                  style="height: 34px; display: block; border: 0"
                 />
-                {% elif logo_cid %}
-                <img
+                {% elif logo_cid %}<img
                   src="cid:{{ logo_cid }}"
-                  width="80"
                   alt="{{ brand }}"
-                  style="display: block"
+                  style="height: 34px; display: block; border: 0"
                 />
-                {% else %}
-                <img
+                {% else %}<img
                   src="/static/emails/logo.png"
-                  width="80"
                   alt="{{ brand }}"
-                  style="display: block"
-                />
-                {% endif %} {% endwith %}
+                  style="height: 34px; display: block; border: 0"
+                />{% endif %} {% endwith %}
               </td>
             </tr>
-
             <tr>
-              <td style="font-family: Inter, Arial; padding: 28px">
-                <h1 style="margin: 0 0 6px; font-size: 22px">
-                  Zahlung eingegangen — vielen Dank!
+              <td style="padding: 30px 28px">
+                <div
+                  style="
+                    font-size: 12px;
+                    letter-spacing: 0.12em;
+                    text-transform: uppercase;
+                    color: #8a8178;
+                    margin-bottom: 10px;
+                  "
+                >
+                  Rechnung
+                </div>
+
+                <h1
+                  style="
+                    margin: 0 0 12px;
+                    font-size: 28px;
+                    line-height: 1.2;
+                    color: #16150f;
+                  "
+                >
+                  Ihre Rechnung ist verfügbar
                 </h1>
                 <p
                   style="
-                    margin: 0 0 14px;
-                    color: #444;
-                    font-size: 14px;
-                    line-height: 1.6;
+                    margin: 0 0 16px;
+                    font-size: 15px;
+                    line-height: 1.7;
+                    color: #5f584f;
                   "
                 >
-                  Deine Rechnung <strong>{{ order.invoice.number }}</strong> zur
-                  Bestellung <strong>{{ order.number }}</strong> befindet sich
-                  im Anhang.
+                  Vielen Dank für Ihre Bestellung. Ihre Rechnung als PDF ist an
+                  diese E-Mail angehängt.
                 </p>
-
                 <table
                   role="presentation"
+                  width="100%"
                   cellspacing="0"
                   cellpadding="0"
                   style="
-                    border: 1px solid #eee;
-                    border-radius: 10px;
-                    width: 100%;
-                    margin: 8px 0 16px;
+                    margin: 16px 0;
+                    border: 1px solid #e9e5dd;
+                    border-radius: 14px;
+                    background: #faf8f4;
                   "
                 >
                   <tr>
                     <td
                       style="
-                        padding: 12px 16px;
-                        font-family: Inter, Arial;
+                        padding: 18px 20px;
                         font-size: 14px;
+                        line-height: 1.8;
+                        color: #1f1a14;
                       "
                     >
-                      <div><strong>Gezahlt:</strong> {{ total_display }}</div>
+                      <div><strong>Bestellung:</strong> {{ order.number }}</div>
+                      <div>
+                        <strong>Rechnungsnummer:</strong> {{
+                        order.invoice.number }}
+                      </div>
                       <div>
                         <strong>Datum:</strong> {{ created_at_display }}
                       </div>
                       <div>
-                        <strong>Zahlungsmethode:</strong> {{
-                        payment_method_display }}
+                        <strong>Zahlungsart:</strong> {{ payment_method_display
+                        }}
                       </div>
+                      <div><strong>Gesamt:</strong> {{ total_display }}</div>
                     </td>
                   </tr>
                 </table>
-
-                <p style="margin: 0 0 18px; color: #666; font-size: 13px">
-                  Du kannst die Rechnung jederzeit in deinem Konto
-                  herunterladen.
-                </p>
-
-                <p style="margin: 0">
+                <p style="margin: 22px 0 0">
                   <a
                     href="{{ orders_url }}"
-                    target="_blank"
                     style="
-                      background: #0b0b0b;
-                      color: #fff;
-                      text-decoration: none;
-                      padding: 12px 20px;
-                      border-radius: 8px;
                       display: inline-block;
-                      font-weight: 600;
+                      padding: 14px 22px;
+                      background: #16150f;
+                      color: #ffffff;
+                      text-decoration: none;
+                      border-radius: 12px;
                       font-size: 14px;
+                      font-weight: 600;
                     "
+                    >Bestellungen ansehen</a
                   >
-                    Zu deinen Bestellungen
-                  </a>
                 </p>
               </td>
             </tr>
-
             <tr>
               <td
-                align="center"
                 style="
-                  padding: 0 0 26px;
-                  font-family: Inter, Arial;
-                  color: #9aa;
+                  padding: 18px 28px;
+                  background: #faf8f4;
+                  border-top: 1px solid #efe9e1;
+                  text-align: center;
                   font-size: 12px;
+                  color: #7a736b;
                 "
               >
-                © {% now "Y" %} MindMines — Alle Rechte vorbehalten
+                MindMines ·
+                <a
+                  href="https://mindmines.eu"
+                  style="color: #1f1a14; text-decoration: none"
+                  >mindmines.eu</a
+                >
               </td>
             </tr>
           </table>
