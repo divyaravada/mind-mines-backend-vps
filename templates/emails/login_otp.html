@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Your login code</title>
+  </head>
+  <body
+    style="
+      margin: 0;
+      padding: 0;
+      background: #f6f3ee;
+      font-family:
+        Inter,
+        Segoe UI,
+        Arial,
+        sans-serif;
+      color: #1f1a14;
+    "
+  >
+    <table
+      role="presentation"
+      width="100%"
+      cellspacing="0"
+      cellpadding="0"
+      style="background: #f6f3ee"
+    >
+      <tr>
+        <td align="center" style="padding: 28px 12px">
+          <table
+            role="presentation"
+            width="620"
+            cellspacing="0"
+            cellpadding="0"
+            style="
+              width: 620px;
+              max-width: 100%;
+              background: #ffffff;
+              border: 1px solid #ebe6de;
+              border-radius: 20px;
+              overflow: hidden;
+            "
+          >
+            <tr>
+              <td
+                style="
+                  padding: 22px 28px;
+                  background: linear-gradient(135deg, #16150f 0%, #2a241d 100%);
+                "
+              >
+                {% if logo_url %}
+                <img
+                  src="{{ logo_url }}"
+                  alt="{{ brand_name }}"
+                  style="height: 34px; display: block; border: 0"
+                />
+                {% endif %}
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding: 28px">
+                <div style="margin-bottom: 28px">
+                  <div
+                    style="
+                      font-size: 12px;
+                      font-weight: 700;
+                      letter-spacing: 0.08em;
+                      text-transform: uppercase;
+                      color: #8a8178;
+                      margin: 0 0 10px;
+                    "
+                  >
+                    English
+                  </div>
+                  <h1
+                    style="
+                      margin: 0 0 10px;
+                      font-size: 28px;
+                      line-height: 1.2;
+                      color: #16150f;
+                    "
+                  >
+                    Your login code
+                  </h1>
+                  <p
+                    style="
+                      margin: 0 0 16px;
+                      font-size: 15px;
+                      line-height: 1.7;
+                      color: #5f584f;
+                    "
+                  >
+                    Use the code below to complete your login.
+                  </p>
+                  <div
+                    style="
+                      display: inline-block;
+                      padding: 14px 22px;
+                      border: 1px solid #e7dfd3;
+                      border-radius: 14px;
+                      background: #faf8f4;
+                      font-size: 30px;
+                      font-weight: 700;
+                      letter-spacing: 0.12em;
+                      color: #16150f;
+                    "
+                  >
+                    {{ code }}
+                  </div>
+                  <p style="margin: 16px 0 0; font-size: 13px; color: #7a736b">
+                    Valid for {{ ttl_minutes }} minutes.
+                  </p>
+                </div>
+
+                <div
+                  style="height: 1px; background: #efe9e1; margin: 26px 0"
+                ></div>
+
+                <div>
+                  <div
+                    style="
+                      font-size: 12px;
+                      font-weight: 700;
+                      letter-spacing: 0.08em;
+                      text-transform: uppercase;
+                      color: #8a8178;
+                      margin: 0 0 10px;
+                    "
+                  >
+                    Deutsch
+                  </div>
+                  <h1
+                    style="
+                      margin: 0 0 10px;
+                      font-size: 28px;
+                      line-height: 1.2;
+                      color: #16150f;
+                    "
+                  >
+                    Ihr Login-Code
+                  </h1>
+                  <p
+                    style="
+                      margin: 0 0 16px;
+                      font-size: 15px;
+                      line-height: 1.7;
+                      color: #5f584f;
+                    "
+                  >
+                    Verwenden Sie den folgenden Code, um Ihre Anmeldung
+                    abzuschließen.
+                  </p>
+                  <div
+                    style="
+                      display: inline-block;
+                      padding: 14px 22px;
+                      border: 1px solid #e7dfd3;
+                      border-radius: 14px;
+                      background: #faf8f4;
+                      font-size: 30px;
+                      font-weight: 700;
+                      letter-spacing: 0.12em;
+                      color: #16150f;
+                    "
+                  >
+                    {{ code }}
+                  </div>
+                  <p style="margin: 16px 0 0; font-size: 13px; color: #7a736b">
+                    Gültig für {{ ttl_minutes }} Minuten.
+                  </p>
+                </div>
+              </td>
+            </tr>
+
+            <tr>
+              <td
+                style="
+                  padding: 18px 28px;
+                  background: #faf8f4;
+                  border-top: 1px solid #efe9e1;
+                "
+              >
+                <div
+                  style="
+                    font-size: 12px;
+                    line-height: 1.7;
+                    color: #7a736b;
+                    text-align: center;
+                  "
+                >
+                  <div>MindMines</div>
+                  <div style="margin-top: 6px">
+                    <a
+                      href="https://mindmines.eu"
+                      style="
+                        color: #1f1a14;
+                        text-decoration: none;
+                        font-weight: 600;
+                      "
+                      >mindmines.eu</a
+                    >
+                  </div>
+                </div>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
