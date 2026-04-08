@@ -31,6 +31,8 @@ from django.utils.timezone import make_aware,now
 from django.views.decorators.csrf import csrf_exempt
 from django.db.models.deletion import ProtectedError
 from django.db import IntegrityError
+from django.utils.html import strip_tags
+from django.contrib.staticfiles.storage import staticfiles_storage
 
 from rest_framework import generics, permissions, serializers, filters, status
 from rest_framework.decorators import api_view, permission_classes
@@ -314,11 +316,38 @@ class LoginStartAPIView(APIView):
         # Send email (EN/DE). Reuse your existing helper.
         try:
             subj = "Your login code / Ihr Login-Code"
-            en = f"<p>Your MindMines login code is: <b>{code}</b></p><p>Valid for 10 minutes.</p>"
-            de = f"<p>Ihr MindMines Login-Code lautet: <b>{code}</b></p><p>Gültig für 10 Minuten.</p>"
-            _send_bilingual(subj, user.email, en, de)  # ✅ you already have this helper
+
+            logo_url = request.build_absolute_uri(staticfiles_storage.url("emails/logo.png"))
+
+            context = {
+                "code": code,
+                "ttl_minutes": 10,
+                "brand_name": "MindMines",
+                "logo_url": logo_url,
+            }
+
+            html_body = render_to_string("emails/login_otp.html", context)
+            text_body = (
+                f"ENGLISH\n\n"
+                f"Your MindMines login code is: {code}\n"
+                f"Valid for 10 minutes.\n\n"
+                f"----------------------------------------\n\n"
+                f"DEUTSCH\n\n"
+                f"Ihr MindMines Login-Code lautet: {code}\n"
+                f"Gültig für 10 Minuten.\n"
+            )
+
+            msg = EmailMultiAlternatives(
+                subject=subj,
+                body=text_body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[user.email],
+            )
+            msg.attach_alternative(html_body, "text/html")
+            msg.send(fail_silently=False)
+
         except Exception:
-            # If email fails, don’t allow login to proceed
+            logger.exception("Failed to send login OTP email to %s", user.email)
             return Response({"ok": False, "detail": "Could not send OTP email."}, status=500)
 
         payload = {"ok": True, "otp_id": str(otp.id), "detail": "OTP sent to email."}
