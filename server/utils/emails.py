@@ -760,14 +760,20 @@ def send_delivered_update(order):
     if not to_email:
         return False
 
+    tracking_number = getattr(order, "tracking_number", None) or "-"
+    tracking_carrier = getattr(order, "tracking_carrier", None) or "-"
+    tracking_url = getattr(order, "tracking_url", None) or ""
+
     ctx = {
         "order": order,
+        "tracking_number": tracking_number,
+        "tracking_carrier": tracking_carrier,
+        "tracking_url": tracking_url,
         "brand_name": BRAND_NAME,
         "logo_url": _email_logo_url(),
         "site_url": SITE_URL,
     }
 
-    # ✅ try template first
     try:
         html = render_to_string("emails/delivered_update.html", ctx)
         msg = EmailMultiAlternatives(
@@ -784,17 +790,40 @@ def send_delivered_update(order):
     except Exception:
         logger.exception("Delivered template send failed for order %s", getattr(order, "id", "?"))
 
-    # ✅ fallback bilingual
     num = getattr(order, "number", None) or f"#{order.id}"
 
-    en = (
-        f"<p>Your order <b>{num}</b> has been delivered.</p>"
-        f"<p>Thank you for shopping with MindMines!</p>"
+    track_button_en = (
+        f'<p><a href="{tracking_url}" '
+        f'style="display:inline-block;padding:12px 18px;background:#16150f;color:#ffffff;'
+        f'text-decoration:none;border-radius:10px;font-weight:600;">View shipment</a></p>'
+        if tracking_url else ""
     )
-    de = (
-        f"<p>Ihre Bestellung <b>{num}</b> wurde zugestellt.</p>"
-        f"<p>Vielen Dank, dass Sie bei MindMines eingekauft haben!</p>"
+    track_button_de = (
+        f'<p><a href="{tracking_url}" '
+        f'style="display:inline-block;padding:12px 18px;background:#16150f;color:#ffffff;'
+        f'text-decoration:none;border-radius:10px;font-weight:600;">Sendung ansehen</a></p>'
+        if tracking_url else ""
     )
+
+    en = f"""
+        <p>Your order <b>{num}</b> has been delivered.</p>
+        <p><b>Tracking carrier:</b> {tracking_carrier}</p>
+        <p><b>Tracking number:</b> {tracking_number}</p>
+        {"<p><b>Tracking link:</b> <a href='" + tracking_url + "'>" + tracking_url + "</a></p>" if tracking_url else ""}
+        {track_button_en}
+        <p>Please note that tracking updates may take a short time to appear.</p>
+        <p>Thank you for shopping with MindMines!</p>
+    """
+
+    de = f"""
+        <p>Ihre Bestellung <b>{num}</b> wurde zugestellt.</p>
+        <p><b>Versanddienstleister:</b> {tracking_carrier}</p>
+        <p><b>Sendungsnummer:</b> {tracking_number}</p>
+        {"<p><b>Tracking-Link:</b> <a href='" + tracking_url + "'>" + tracking_url + "</a></p>" if tracking_url else ""}
+        {track_button_de}
+        <p>Bitte beachten Sie, dass es kurze Zeit dauern kann, bis die Sendungsverfolgung aktualisiert wird.</p>
+        <p>Vielen Dank, dass Sie bei MindMines eingekauft haben!</p>
+    """
 
     return _send_bilingual(
         "Order delivered / Bestellung zugestellt",
@@ -808,13 +837,22 @@ def send_shipping_update(order, tracking: str | None = None):
     to_email = order_recipient_email(order)
     if not to_email:
         return
+
+    tracking_number = tracking or getattr(order, "tracking_number", None) or "-"
+    tracking_carrier = getattr(order, "tracking_carrier", None) or "-"
+    tracking_url = getattr(order, "tracking_url", None) or ""
+
     ctx = {
         "order": order,
-        "tracking": tracking,
+        "tracking": tracking_number,
+        "tracking_number": tracking_number,
+        "tracking_carrier": tracking_carrier,
+        "tracking_url": tracking_url,
         "brand_name": BRAND_NAME,
         "logo_url": _email_logo_url(),
         "site_url": SITE_URL,
     }
+
     try:
         html = render_to_string("emails/shipping_update.html", ctx)
         msg = EmailMultiAlternatives(
@@ -828,19 +866,48 @@ def send_shipping_update(order, tracking: str | None = None):
         return
     except TemplateDoesNotExist:
         pass
+    except Exception:
+        logger.exception("Shipping template send failed for order %s", getattr(order, "id", "?"))
 
-    en = (
-        f"<p>Your order <b>{order.number}</b> has been shipped.</p>"
-        f"<p>If available, your tracking number is: {tracking or '-'}.</p>"
+    num = getattr(order, "number", None) or f"#{order.id}"
+
+    track_button_en = (
+        f'<p><a href="{tracking_url}" '
+        f'style="display:inline-block;padding:12px 18px;background:#16150f;color:#ffffff;'
+        f'text-decoration:none;border-radius:10px;font-weight:600;">Track shipment</a></p>'
+        if tracking_url else ""
     )
-    de = (
-        f"<p>Ihre Bestellung <b>{order.number}</b> wurde versendet.</p>"
-        f"<p>Sofern verfügbar, lautet Ihre Sendungsnummer: {tracking or '-'}.</p>"
+    track_button_de = (
+        f'<p><a href="{tracking_url}" '
+        f'style="display:inline-block;padding:12px 18px;background:#16150f;color:#ffffff;'
+        f'text-decoration:none;border-radius:10px;font-weight:600;">Sendung verfolgen</a></p>'
+        if tracking_url else ""
     )
+
+    en = f"""
+        <p>Your order <b>{num}</b> has been shipped.</p>
+        <p><b>Tracking carrier:</b> {tracking_carrier}</p>
+        <p><b>Tracking number:</b> {tracking_number}</p>
+        {"<p><b>Tracking link:</b> <a href='" + tracking_url + "'>" + tracking_url + "</a></p>" if tracking_url else ""}
+        {track_button_en}
+        <p>You can use the tracking details above to check the latest shipment status.</p>
+    """
+
+    de = f"""
+        <p>Ihre Bestellung <b>{num}</b> wurde versendet.</p>
+        <p><b>Versanddienstleister:</b> {tracking_carrier}</p>
+        <p><b>Sendungsnummer:</b> {tracking_number}</p>
+        {"<p><b>Tracking-Link:</b> <a href='" + tracking_url + "'>" + tracking_url + "</a></p>" if tracking_url else ""}
+        {track_button_de}
+        <p>Mit den obigen Versanddaten können Sie den aktuellen Sendungsstatus verfolgen.</p>
+    """
+
     _send_bilingual(
-        "Order shipped / Bestellung versendet", to_email, en, de
+        "Order shipped / Bestellung versendet",
+        to_email,
+        en,
+        de,
     )
-
 
 def send_cancellation_email(order):
     to_email = order_recipient_email(order)
