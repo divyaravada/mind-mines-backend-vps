@@ -1,11 +1,8 @@
-
 from pathlib import Path
 from datetime import timedelta
 import os, environ
 
 env = environ.Env()
-
-
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -21,12 +18,7 @@ SECRET_KEY = 'django-insecure-7^uze)9(a$8&l#o&$h&6%x)t!es*(uvf3gqpcod$z%xrqi@)2y
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
 
-ALLOWED_HOSTS = [
-    "mindmines.eu",
-    "www.mindmines.eu",
-    "127.0.0.1",
-    "localhost",
-]
+ALLOWED_HOSTS = ["mindmines.eu", "www.mindmines.eu", "72.60.129.151", "127.0.0.1", "localhost"]
 
 AUTH_USER_MODEL = 'server.User'
 
@@ -101,24 +93,6 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = 'mindminesbackend.urls'
-
-CSP_DEFAULT_SRC = ("'self'",)
-CSP_SCRIPT_SRC = (
-    "'self'",
-    "https://js.stripe.com",
-    "https://www.paypal.com",
-    "https://www.paypalobjects.com",
-)
-CSP_STYLE_SRC = (
-    "'self'",
-    "'unsafe-inline'",
-    "https://fonts.googleapis.com",
-)
-CSP_FONT_SRC = (
-    "'self'",
-    "https://fonts.gstatic.com",
-)
-CSP_IMG_SRC = ("'self'", "data:", "https:")
 
 CONTENT_SECURITY_POLICY = {
     "DIRECTIVES": {
@@ -296,6 +270,7 @@ X_FRAME_OPTIONS = "SAMEORIGIN"
 
 # If you deploy to a domain, add it here too.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 
