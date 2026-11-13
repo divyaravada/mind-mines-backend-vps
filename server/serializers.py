@@ -16,6 +16,7 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.core.mail import EmailMultiAlternatives
 
+from .promotions.config import is_christmas_gift_only
 from .models import (
     Cart,
     CartItem,
@@ -401,6 +402,10 @@ class ProductMediaSerializer(serializers.ModelSerializer):
 
 
 class ProductSerializer(serializers.ModelSerializer):
+    christmas_gift_only = serializers.SerializerMethodField()
+
+    def get_christmas_gift_only(self, obj):
+        return is_christmas_gift_only(obj.pk)
     media = ProductMediaSerializer(many=True, read_only=True)
     image = serializers.SerializerMethodField()
     stone_color_image_url = serializers.SerializerMethodField()
@@ -465,6 +470,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "out_of_stock",
             "media",
             "stock_status",
+            "christmas_gift_only",
             "reviews_count",
             "average_rating",
         ]
@@ -676,6 +682,8 @@ class CartItemSerializer(serializers.ModelSerializer):
             prod = Product.objects.only("id").get(pk=pid)
         except Product.DoesNotExist:
             raise serializers.ValidationError({"product": f"Invalid product id: {pid}"})
+        if is_christmas_gift_only(pid):
+            raise serializers.ValidationError({"product": "This product is available only as a Christmas gift."})
         attrs["product"] = prod
         return attrs
 
@@ -1024,6 +1032,11 @@ class ShippingInSerializer(serializers.Serializer):
 class OrderItemIn(serializers.Serializer):
     product_id = serializers.IntegerField(min_value=1)
     qty = serializers.IntegerField(min_value=1, max_value=99)
+    
+    def validate_product_id(self, value):
+        if is_christmas_gift_only(value):
+            raise serializers.ValidationError("This product is available only as a Christmas gift.")
+        return value
 
 class CheckoutPromotionIn(serializers.Serializer):
     gift_product_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)

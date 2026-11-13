@@ -41,6 +41,8 @@ def vase_product_ids():
         )
     }
 
+def is_christmas_gift_only(product_id):
+    return campaign_active() and product_id in (approved_gift_ids() or ())
 
 def approved_gift_ids():
     """
