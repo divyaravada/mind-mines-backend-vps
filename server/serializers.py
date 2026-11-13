@@ -682,8 +682,7 @@ class CartItemSerializer(serializers.ModelSerializer):
             prod = Product.objects.only("id").get(pk=pid)
         except Product.DoesNotExist:
             raise serializers.ValidationError({"product": f"Invalid product id: {pid}"})
-        if is_christmas_gift_only(pid):
-            raise serializers.ValidationError({"product": "This product is available only as a Christmas gift."})
+        
         attrs["product"] = prod
         return attrs
 

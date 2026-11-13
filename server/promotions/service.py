@@ -10,7 +10,7 @@ from .config import (
     MAX_GIFT_PRICE,
     vase_product_ids,
     approved_gift_ids,
-    is_christmas_gift_only,
+    
 )
 from .rules import (
     CartLine,
@@ -69,8 +69,7 @@ def build_promotion_quote(items, gift_product_id=None, *, locked_products=None):
         if product_id <= 0 or qty < 1 or qty > 99:
             raise ValidationError("Invalid quantity or product.")
 
-        if is_christmas_gift_only(product_id):
-            raise ValidationError({"items": "This product is available only as a Christmas gift."})
+        
 
         quantities[product_id] += qty
 
