@@ -835,6 +835,8 @@ class Order(models.Model):
 
     subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     discount_total = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    promotion_code = models.CharField(max_length=32, blank=True, default="")
+    promotion_discount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     shipping_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     vat_total = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     total_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
@@ -937,16 +939,18 @@ class Order(models.Model):
             subtotal += (unit * qty)
         subtotal = _q2(subtotal)
 
-        discount = Decimal("0.00")
-        try:
-            red = getattr(self, "coupon_redemption", None)  # OneToOne; may not exist
-            if red is not None:
-                coupon = getattr(red, "coupon", None)
-                if coupon is not None:
-                    # coupon.discount_amount(user, items, cart_subtotal)
-                    discount = coupon.discount_amount(self.user, items_qs, subtotal)
-        except Exception:
+        discount = self.promotion_discount
+        if not self.promotion_code:
             discount = Decimal("0.00")
+            try:
+                red = getattr(self, "coupon_redemption", None)  # OneToOne; may not exist
+                if red is not None:
+                    coupon = getattr(red, "coupon", None)
+                    if coupon is not None:
+                        # coupon.discount_amount(user, items, cart_subtotal)
+                       discount = coupon.discount_amount(self.user, items_qs, subtotal)
+            except Exception:
+                discount = Decimal("0.00")
 
         ship = _q2(Decimal(shipping_price) if shipping_price is not None else Decimal(self.shipping_price or 0))
 
@@ -963,10 +967,42 @@ class Order(models.Model):
 
     # ---- stock helpers (to be called from service layer) ----
 
+
+    def _promotion_stock_quantities(self):
+        quantities = Counter()
+        for product_id, quantity in self.items.values_list("product_id", "quantity"):
+            if product_id is not None:
+                quantities[product_id] += quantity
+        return quantities
+
+    def _update_promotion_stock(self, *, reserve):
+        with transaction.atomic():
+            order = type(self).objects.select_for_update().get(pk=self.pk)
+            if reserve and order.stock_released:
+                raise ValidationError("The promotion reservation has already been released.")
+            if order.stock_locked != reserve:
+                quantities = order._promotion_stock_quantities()
+                products = Product.objects.select_for_update().filter(
+                    pk__in=quantities
+                ).order_by("pk")
+                for product in products:
+                    quantity = quantities[product.pk]
+                    if reserve and product.quantity < quantity:
+                        raise ValidationError(f"Insufficient stock for {product}.")
+                    delta = -quantity if reserve else quantity
+                    Product.objects.filter(pk=product.pk).update(quantity=F("quantity") + delta)
+                order.stock_locked = reserve
+                order.stock_released = not reserve
+                order.save(update_fields=["stock_locked", "stock_released"])
+            self.stock_locked = order.stock_locked
+            self.stock_released = order.stock_released
+
     def reserve_stock_atomic(self):
         """
         Decrement product.quantity for each item atomically with row locks.
         """
+        if self.promotion_code:
+            return self._update_promotion_stock(reserve=False)
         with transaction.atomic():
             items_mgr = getattr(self, "items", None)
             if not items_mgr:
@@ -1029,6 +1065,8 @@ class Order(models.Model):
         """
         Reserve stock for all items on this order (idempotent).
         """
+        if self.promotion_code:
+            return self._update_promotion_stock(reserve=True)
         if self.stock_locked:
             return
 
@@ -1074,6 +1112,8 @@ class Order(models.Model):
         """
         Put reserved stock back (used on cancellation).
         """
+        if self.promotion_code:
+            return self._update_promotion_stock(reserve=False)
         if not self.stock_locked:
             return
 
@@ -1190,6 +1230,8 @@ class OrderItem(models.Model):
     product_name_snapshot = models.CharField(max_length=255)
     quantity = models.PositiveIntegerField(default=1)
     unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+
+    is_complimentary = models.BooleanField(default=False)
 
     def line_total(self) -> Decimal:
         return _q2(Decimal(self.unit_price or 0) * int(self.quantity or 0))

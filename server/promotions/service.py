@@ -2,7 +2,6 @@
 from collections import Counter
 from decimal import Decimal
 
-from django.db.models import Q
 from rest_framework.exceptions import ValidationError
 
 from server.models import Product
@@ -42,7 +41,7 @@ def eligible_gifts():
     ]
 
 
-def build_promotion_quote(items, gift_product_id=None):
+def build_promotion_quote(items, gift_product_id=None, *, locked_products=None):
     """
     items = [
         {"product_id": 12, "qty": 1},
@@ -76,11 +75,12 @@ def build_promotion_quote(items, gift_product_id=None):
                 "Maximum quantity exceeded."
             )
 
-    products = Product.objects.filter(
-        pk__in=list(quantities.keys())
-    )
-
-    product_map = {p.pk: p for p in products}
+    if locked_products is None:
+        product_map = Product.objects.in_bulk(quantities)
+    else:
+        product_map = {
+            pk: locked_products[pk] for pk in quantities if pk in locked_products
+        }
 
     if len(product_map) != len(quantities):
         raise ValidationError(
@@ -118,14 +118,18 @@ def build_promotion_quote(items, gift_product_id=None):
                 "Invalid gift product ID."
             )
 
-        gift_map = {
-            product.pk: product
-            for product in eligible_gifts()
-        }
-
-        product = gift_map.get(gift_id)
-
-        if product is None:
+        product = (
+            Product.objects.filter(pk=gift_id).first()
+            if locked_products is None else locked_products.get(gift_id)
+        )
+        approved = approved_gift_ids()
+        if (
+            product is None
+            or (approved is not None and gift_id not in approved)
+            or not 0 < product.price_gross < MAX_GIFT_PRICE
+            or not 0 < product.final_price_gross < MAX_GIFT_PRICE
+            or product.quantity < 1
+        ):
             raise ValidationError(
                 "Selected gift is not eligible."
             )

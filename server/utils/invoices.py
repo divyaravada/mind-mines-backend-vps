@@ -163,9 +163,12 @@ def _build_invoice_content(order: Any, lang: str = "en") -> bytes:
     row0: List[Union[str, Paragraph]] = [item_col, qty_col, unit_col, total_col]
     data: List[List[Union[str, Paragraph]]] = [row0]
     for oi in order.items.all():  # type: ignore[attr-defined]
+        item_name = str(oi.product_name)[:80]
+        if oi.is_complimentary:
+            item_name += " (Gratisartikel)" if lang == "de" else " (Complimentary)"
         data.append(
             [
-                Paragraph(str(oi.product_name)[:80], N),
+                Paragraph(item_name, N),
                 str(oi.quantity),
                 _eur(oi.unit_price),
                 _eur(oi.line_total()),
@@ -204,12 +207,17 @@ def _build_invoice_content(order: Any, lang: str = "en") -> bytes:
 
     def bold(text: str) -> str:
         return f"{text}"
+ 
+    promotion_label = "Weihnachtsrabatt" if lang == "de" else "Christmas discount"
+    promotion_row = ["", ""]
+    if order.promotion_discount:
+        promotion_row = [promotion_label, _eur(-order.promotion_discount)]
 
     totals_tbl = Table(
         [
             [subtotal_label, _eur(order.subtotal)],
+            promotion_row,
             [shipping_label, ship_display],
-            ["", ""],
             [total_label, bold(f"{_eur(order.total_price)}")],
         ],
         colWidths=[120 * mm, 50 * mm],

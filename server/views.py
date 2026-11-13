@@ -1536,7 +1536,12 @@ class OrderCreateView(APIView):
         # ✅ send email to admin after order is successfully created
         send_admin_new_order_email(order)
 
-        return Response(OrderReadSerializer(order, context={"request": request}).data, status=201)
+        return Response(
+            OrderReadSerializer(
+                order, context={"request": request, "issue_promotion_token": True}
+            ).data,
+            status=201,
+        )
 
 class OrderDetailPublicAPIView(APIView):
     permission_classes = [AllowAny]
@@ -1908,11 +1913,14 @@ class PaypalCreateOrder(PaypalBase):
                 order.payment_method = "paypal"
                 order.status = "pending"
                 order.save(update_fields=["payment_method", "status"])
+        except serializers.ValidationError:
+            raise
         except Exception as e:
             return Response({"detail": "LOCAL_ORDER_CREATE_FAILED", "error": str(e)}, status=500)
 
         token, err = self._token()
         if not token:
+            _fail_unstarted_promotion(order)
             return Response({"detail": "FAILED_TO_GET_TOKEN", "error": err}, status=502)
 
         payload = {
@@ -1929,19 +1937,31 @@ class PaypalCreateOrder(PaypalBase):
             },
         }
 
-        resp = http.post(
-            f"{self._base()}/v2/checkout/orders",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            data=json.dumps(payload),
-            timeout=30,
-        )
+        # resp = http.post(
+        #     f"{self._base()}/v2/checkout/orders",
+        #     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        #     data=json.dumps(payload),
+        #     timeout=30,
+        # )
+        try:
+            resp = http.post(
+                f"{self._base()}/v2/checkout/orders",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                data=json.dumps(payload),
+                timeout=30,
+            )
+        except http.RequestException:
+            # The provider ID has never been returned to the browser for approval.
+            _fail_unstarted_promotion(order)
+            return Response({"detail": "PayPal order creation is temporarily unavailable."}, status=502)
 
         try:
             data = resp.json()
         except Exception:
             data = {}
 
-        if resp.status_code not in (200, 201):
+        if resp.status_code not in (200, 201) or not data.get("id"):
+            _fail_unstarted_promotion(order)
             return Response({"detail": "PAYPAL_CREATE_ERROR", "paypal": data}, status=502)
 
         try:
@@ -1961,7 +1981,7 @@ class PaypalCaptureOrder(PaypalBase):
       - capture via PayPal API
       - mark local order paid if COMPLETED
     """
-
+    @transaction.atomic
     def post(self, request, order_id):
         if not self._creds_ok():
             return Response({"detail": "PayPal credentials not configured."}, status=400)
@@ -1977,6 +1997,13 @@ class PaypalCaptureOrder(PaypalBase):
         except Order.DoesNotExist:
             return Response({"detail": "Local order not found for this PayPal order."}, status=404)
 
+        if order.promotion_code and (
+            order.payment_method != "paypal"
+            or not order.stock_locked
+            or order.status in ("cancelled", "failed")
+        ):
+            return Response({"detail": "Promotion order is no longer payable."}, status=409)
+
         if order.status == "paid":
             return Response({"status": "COMPLETED"}, status=200)
 
@@ -1986,11 +2013,26 @@ class PaypalCaptureOrder(PaypalBase):
 
         cap_url = f"{self._base()}/v2/checkout/orders/{order_id}/capture"
 
-        resp = http.post(
-            cap_url,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            timeout=30,
-        )
+        # resp = http.post(
+        #     cap_url,
+        #     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        #     timeout=30,
+        # )
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        if order.promotion_code:
+            headers.update({
+                "PayPal-Request-Id": f"mindmines-capture-{order.pk}",
+                "Prefer": "return=representation",
+            })
+        try:
+            resp = http.post(cap_url, headers=headers, timeout=30)
+        except http.RequestException:
+            return Response({"detail": "PayPal capture status is temporarily unavailable."}, status=502)
+
         try:
             data = resp.json()
         except Exception:
@@ -2001,6 +2043,22 @@ class PaypalCaptureOrder(PaypalBase):
 
         if data.get("status") != "COMPLETED":
             return Response({"detail": "CAPTURE_NOT_COMPLETED", "paypal": data}, status=400)
+
+        if order.promotion_code:
+            captures = [
+                capture
+                for unit in data.get("purchase_units", [])
+                if unit.get("reference_id") == str(order.pk)
+                for capture in unit.get("payments", {}).get("captures", [])
+                if capture.get("status") == "COMPLETED"
+            ]
+            if not any(
+                capture.get("amount", {}).get("currency_code") == "EUR"
+                and capture.get("amount", {}).get("value") == f"{order.total_price:.2f}"
+                for capture in captures
+            ):
+                logger.error("PayPal capture amount mismatch for order %s", order.pk)
+                return Response({"detail": "Capture amount could not be verified."}, status=502)
 
         # we consider "COMPLETED" as paid.
         with transaction.atomic():
@@ -2048,6 +2106,34 @@ METHOD_MINS = {
     "giropay": Decimal("1.00"),   # giropay generally requires >= €1.00
     "klarna":  Decimal("1.00"),   # Klarna commonly requires >= €1.00 in many regions
 }
+
+def _fail_unstarted_promotion(order):
+    if order.promotion_code and not order.payment_ref:
+        with transaction.atomic():
+            locked = Order.objects.select_for_update().get(pk=order.pk)
+            if locked.payment_ref or locked.status == "paid":
+                return
+            locked.status = "failed"
+            locked.payment_status = "failed"
+            locked.save(update_fields=["status", "payment_status"])
+            locked.release_stock_atomic()
+
+
+def _promotion_payment_allowed(request, order):
+    if not order.promotion_code:
+        return True
+    if not order.stock_locked or order.stock_released:
+        return False
+    if order.user_id:
+        return getattr(request.user, "pk", None) == order.user_id
+    try:
+        return signing.loads(
+            request.data.get("promotion_payment_token") or "",
+            salt="promotion-payment",
+            max_age=3600,
+        ) == order.pk
+    except (signing.BadSignature, TypeError):
+        return False
 
 def _amount_cents(value: Decimal) -> int:
     return int((Decimal(value) * Decimal("100")).quantize(Decimal("1")))
@@ -2111,11 +2197,17 @@ class StripeCreateIntent(APIView):
             try:
                 with transaction.atomic():
                     order: Order = cast(Order, Order.objects.select_for_update().get(pk=order_id))
+                    if not _promotion_payment_allowed(request, order):
+                        return Response({"detail": "Promotion order is unavailable."}, status=403)
 
                     if order.total_price is None or Decimal(order.total_price) <= Decimal("0.00"):
                         return Response({"detail": "Total must be > 0."}, status=400)
                     if order.status not in ("pending", "processing"):
                         return Response({"detail": f"Order not payable in status '{order.status}'"}, status=400)
+                
+ 
+                    if order.promotion_code and order.payment_method != "card":
+                        return Response({"detail": "Payment method does not match the order."}, status=409)
 
                     if order.stripe_pi:
                         intent = stripe.PaymentIntent.retrieve(order.stripe_pi)
@@ -2130,6 +2222,9 @@ class StripeCreateIntent(APIView):
                         email = (order.email or "").strip()
                         if email:
                             create_kwargs["receipt_email"] = email
+ 
+                        if order.promotion_code:
+                            create_kwargs["idempotency_key"] = f"promotion-card-{order.pk}"
 
                         intent = stripe.PaymentIntent.create(**create_kwargs)
                         order.payment_method = "card"
@@ -2181,8 +2276,11 @@ class StripeCreateIntent(APIView):
 
             intent = stripe.PaymentIntent.create(**create_kwargs)
         except stripe_error.StripeError as e:
-            order.status = "failed"
-            order.save(update_fields=["status"])
+            if not order.promotion_code:
+                order.status = "failed"
+                order.save(update_fields=["status"])
+            elif isinstance(e, (stripe_error.InvalidRequestError, stripe_error.AuthenticationError)):
+                _fail_unstarted_promotion(order)
             return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
 
         order.payment_ref = intent.id
@@ -2208,6 +2306,7 @@ class StripeCreateRedirectIntent(APIView):
     """
     permission_classes = [permissions.AllowAny]
 
+    @transaction.atomic
     def post(self, request):
         
         method = (request.data.get("method") or "").strip().lower()
@@ -2224,8 +2323,14 @@ class StripeCreateRedirectIntent(APIView):
         try:
             with transaction.atomic():
                 order = Order.objects.select_for_update().get(pk=order_id)
+                if not _promotion_payment_allowed(request, order):
+                    return Response({"detail": "Promotion order is unavailable."}, status=403)
         except Order.DoesNotExist:
             return Response({"detail": "Order not found."}, status=404)
+ 
+        expected_method = "klarna" if order.payment_method.startswith("klarna") else order.payment_method
+        if order.promotion_code and method != expected_method:
+            return Response({"detail": "Payment method does not match the order."}, status=409)
 
         # sanity checks
         if order.total_price is None or Decimal(order.total_price) <= Decimal("0.00"):
@@ -2263,6 +2368,8 @@ class StripeCreateRedirectIntent(APIView):
                     description=f"Order {order.number or order.id} — MindMines Payment",
                     metadata={"order_id": str(order.id)},
                 )
+                if order.promotion_code:
+                    kwargs["idempotency_key"] = f"promotion-redirect-{order.pk}-{method}"
                 # Only include receipt_email if we actually have one (avoids Optional[str])
                 if email_str:
                     kwargs["receipt_email"] = email_str
@@ -2272,8 +2379,8 @@ class StripeCreateRedirectIntent(APIView):
                 intent = cast(_PaymentIntent, created)
             except stripe_error.StripeError as e:
                 return Response({"detail": f"Stripe error: {str(e)}"}, status=502)
-
-            order.payment_method = method
+            if not order.promotion_code:
+                order.payment_method = method
             order.payment_ref = intent.get("id", "")  # safe even if missing
             order.stripe_pi = intent.get("id", "")
             order.save(update_fields=["payment_method", "payment_ref", "stripe_pi"])
@@ -2338,6 +2445,9 @@ class StripeCardInstallmentsView(APIView):
             return Response({"installments_months": ["Choose 3, 6, or 9 months for card installments."]}, status=400)
 
         # 2) Prepare serializer input
+        pm_id = str(request.data.get("payment_method_id") or "").strip()
+        if not pm_id:
+            return Response({"detail": "payment_method_id is required"}, status=400)
         data = request.data.copy()
         data["payment_method"] = "card_installments"
         data["installments_months"] = months
@@ -2357,13 +2467,12 @@ class StripeCardInstallmentsView(APIView):
                 order.status = "processing"
                 order.confirmation_sent_at = timezone.now()
                 order.save(update_fields=["payment_method", "installments_months", "status", "confirmation_sent_at"])
+        except serializers.ValidationError:
+            raise
         except Exception as e:
             return Response({"detail": f"Order creation failed: {e}"}, status=500)
 
-        # 5) Require payment_method_id as a non-empty string
-        pm_id = str(request.data.get("payment_method_id") or "").strip()
-        if not pm_id:
-            return Response({"detail": "payment_method_id is required"}, status=400)
+       
 
         try:
             # Retrieve PM and ensure we have a customer id (string)
@@ -2527,8 +2636,12 @@ class StripeCreateSepaIntent(APIView):
             intent = stripe.PaymentIntent.create(**create_kwargs)
 
         except stripe_error.StripeError as e:
-            order.status = "failed"
-            order.save(update_fields=["status"])
+            
+            if not order.promotion_code:
+                order.status = "failed"
+                order.save(update_fields=["status"])
+            elif isinstance(e, (stripe_error.InvalidRequestError, stripe_error.AuthenticationError)):
+                _fail_unstarted_promotion(order)
             return Response({"detail": str(e)}, status=502)
 
         order.payment_ref = intent.id
@@ -2593,6 +2706,10 @@ class StripeSepaInstallmentsView(APIView):
             return Response({"detail": "Installments are available in DE only."}, status=400)
         
         # --- run serializer with explicit inputs for validation ---
+        pm_id = request.data.get("payment_method_id")
+        if not pm_id:
+            return Response({"detail": "payment_method_id is required"}, status=400)
+
         data = request.data.copy()
         data["payment_method"] = "sepa_installments"
         data["installments_months"] = months
@@ -2612,9 +2729,9 @@ class StripeSepaInstallmentsView(APIView):
             order.confirmation_sent_at = timezone.now()
             order.save(update_fields=["payment_method","installments_months","status","confirmation_sent_at"])
 
-        pm_id = request.data.get("payment_method_id")
-        if not pm_id:
-            return Response({"detail": "payment_method_id is required"}, status=400)
+        # pm_id = request.data.get("payment_method_id")
+        # if not pm_id:
+        #     return Response({"detail": "payment_method_id is required"}, status=400)
 
         try:
             # Retrieve PM; ensure we end up with a string customer_id
@@ -2752,6 +2869,11 @@ class SepaPostConfirmView(APIView):
             return Response({"ok": False, "skipped": True}, status=200)
 
         order = get_object_or_404(Order, pk=order_id)
+        if order.promotion_code:
+            return Response({
+                "ok": True, "id": order.pk, "status": order.status,
+                "payment_status": order.payment_status,
+            })
 
         # reserve stock immediately
         _safe(order.reserve_stock_atomic)
@@ -2792,6 +2914,26 @@ def stripe_webhook(request):
         oid = meta.get("order_id")
 
     def _mark_paid(order: Order, pi_data: dict):
+        if order.promotion_code:
+            if not order.stock_locked or order.stock_released:
+                logger.error("Payment arrived after reservation release for order %s", order.pk)
+                return
+            if etype == "payment_intent.succeeded" and (
+                pi_data.get("id") != order.stripe_pi
+                or pi_data.get("currency") != "eur"
+                or pi_data.get("amount_received") != _amount_cents(order.total_price)
+            ):
+                logger.error("Stripe intent or amount mismatch for order %s", order.pk)
+                return
+            if etype == "invoice.payment_succeeded" and (
+                order.payment_method not in ("card_installments", "sepa_installments")
+                or not order.payment_ref
+                or pi_data.get("currency") != "eur"
+            ):
+                logger.error("Unexpected Stripe invoice for promotion order %s", order.pk)
+                return
+            if order.status in ("shipped", "delivered", "cancelled"):
+                return
         changed = False
         if order.status != "paid":
             order.status = "paid"
@@ -2867,6 +3009,11 @@ def stripe_webhook(request):
                 else:
                     order = _ensure_order_from_checkout_token(data)
                     if not order: return HttpResponse(status=200)
+                if order.promotion_code and (
+                    order.status not in ("pending", "processing")
+                    or data.get("id") != order.stripe_pi
+                ):
+                    return HttpResponse(status=200)
                 if order.status != "processing":
                     order.status = "processing"
                     order.payment_status = "processing"
@@ -2874,7 +3021,7 @@ def stripe_webhook(request):
         except Order.DoesNotExist:
             pass
 
-    elif etype in ("payment_intent.payment_failed", "invoice.payment_failed"):
+    elif etype in ("payment_intent.payment_failed", "invoice.payment_failed", "payment_intent.canceled"):
         try:
             with transaction.atomic():
                 if oid:
@@ -2882,6 +3029,15 @@ def stripe_webhook(request):
                 else:
                     order = _ensure_order_from_checkout_token(data)
                     if not order: return HttpResponse(status=200)
+                if order.promotion_code and (
+                    etype != "payment_intent.canceled"
+                    or data.get("id") != order.stripe_pi
+                    or order.status in ("paid", "shipped", "delivered", "cancelled")
+                ):
+                    # A declined intent or invoice can still be retried at Stripe.
+                    return HttpResponse(status=200)
+                if not order.promotion_code and etype == "payment_intent.canceled":
+                    return HttpResponse(status=200)
                 order.status = "failed"
                 order.payment_status = "failed"
                 order.save(update_fields=["status","payment_status"])
@@ -3077,7 +3233,7 @@ def send_on_demand_request_email(req: OnDemandOrderRequest):
     ctx = {
         "req": req,
         "product": product,
-        "product_url": f"{getattr(settings, 'SITE_URL', 'https://mindmines.eu')}/products/{product.id}/",
+        "product_url": f"{getattr(settings, 'SITE_URL', 'http://mindmines.eu')}/products/{product.id}/",
         "current_stock": getattr(product, "quantity", 0),
     }
 
@@ -3511,6 +3667,12 @@ class OrderPaymentStatusUpdateAPIView(APIView):
 
     def post(self, request, pk):
         order = get_object_or_404(Order, pk=pk)
+        if order.promotion_code:
+            return Response({
+                "ok": True, "id": order.pk, "status": order.status,
+                "payment_status": order.payment_status,
+            })
+
         intent_id = (request.data.get("intent_id") or "").strip()
         payment_status = (request.data.get("payment_status") or "").strip().lower()
         gateway_ref = (request.data.get("gateway_ref") or "").strip()

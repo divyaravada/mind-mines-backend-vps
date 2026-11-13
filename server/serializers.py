@@ -3,6 +3,7 @@ from sqlite3 import IntegrityError
 from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 
 from django.conf import settings
+from django.core import signing
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.template.loader import render_to_string, TemplateDoesNotExist
@@ -292,7 +293,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = default_token_generator.make_token(user)
-        base = getattr(settings, "FRONTEND_URL", "https://mindmines.eu").rstrip("/")
+        base = getattr(settings, "FRONTEND_URL", "http://localhost:3000").rstrip("/")
         verification_link = f"{base}/verify-email/{uid}/{token}/"
 
         subject = "Verify your MindMines account"
@@ -742,7 +743,7 @@ class OrderItemReadSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OrderItem
-        fields = ["id", "product", "quantity", "unit_price", "line_total"]
+        fields = ["id", "product", "quantity", "unit_price", "line_total", "is_complimentary"]
 
     def get_line_total(self, obj):
         try:
@@ -766,6 +767,7 @@ class OrderReadSerializer(serializers.ModelSerializer):
                 "unit_price",
                 "line_total",
                 "product_image",
+                "is_complimentary",
             )
 
         def get_product_name(self, obj):
@@ -807,6 +809,14 @@ class OrderReadSerializer(serializers.ModelSerializer):
     invoice_pdf = serializers.SerializerMethodField()
     is_returnable = serializers.SerializerMethodField()
     return_deadline = serializers.SerializerMethodField()
+    promotion_payment_token = serializers.SerializerMethodField()
+
+    def get_promotion_payment_token(self, order):
+        request = self.context.get("request")
+        if order.promotion_code and request and self.context.get("issue_promotion_token"):
+            return signing.dumps(order.pk, salt="promotion-payment")
+        return None
+    
     coupon_code = serializers.SerializerMethodField()
     has_return_request = serializers.SerializerMethodField()
     has_cancel_request = serializers.SerializerMethodField()
@@ -824,6 +834,9 @@ class OrderReadSerializer(serializers.ModelSerializer):
             "email",
             # money breakdown
             "subtotal",
+            "promotion_code",
+            "promotion_discount",
+            "promotion_payment_token",
             "discount_total",
             "shipping_price",
             "vat_total",
@@ -1009,13 +1022,16 @@ class ShippingInSerializer(serializers.Serializer):
 
 
 class OrderItemIn(serializers.Serializer):
-    product_id = serializers.IntegerField()
+    product_id = serializers.IntegerField(min_value=1)
     qty = serializers.IntegerField(min_value=1, max_value=99)
 
+class CheckoutPromotionIn(serializers.Serializer):
+    gift_product_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
 
 class OrderCreateSerializer(serializers.Serializer):
     email = serializers.EmailField()
-    items = OrderItemIn(many=True)
+    items = OrderItemIn(many=True, allow_empty=False)
+    promotion = CheckoutPromotionIn(required=False)
     shipping = ShippingInSerializer()
     coupon_code = serializers.CharField(max_length=64, allow_blank=True, required=False)
 
@@ -1141,12 +1157,12 @@ class OrderCreateSerializer(serializers.Serializer):
 
     # --- pricing & coupon ---
 
-    def _calc_subtotal(self, items_validated: List[Dict[str, Any]]) -> Decimal:
+    def _calc_subtotal(self, items_validated, products) -> Decimal:
         total = Decimal("0.00")
         for it in items_validated:
             pid = int(it["product_id"])  # validated by OrderItemIn
             qty = int(it["qty"])
-            prod = Product.objects.get(pk=pid)
+            prod = products[pid]
             unit = Decimal(
                 str(getattr(prod, "final_price_gross", None) or prod.price_gross)
             )
@@ -1154,7 +1170,7 @@ class OrderCreateSerializer(serializers.Serializer):
         return quant2(total)
 
     def _apply_coupon(
-        self, subtotal: Decimal, code: str, user: Optional[Any]
+        self, subtotal: Decimal, code: str, user: Optional[Any], items, email: str
     ) -> Tuple[Decimal, Decimal, Optional["Coupon"]]:
         if not code:
             return subtotal, Decimal("0.00"), None
@@ -1163,20 +1179,20 @@ class OrderCreateSerializer(serializers.Serializer):
         if not coup or not coup.active:
             return subtotal, Decimal("0.00"), None
 
-        # validated_data may be “empty” at type time; guard + cast to Mapping
-        vd: Mapping[str, Any] = cast(
-            Mapping[str, Any], getattr(self, "validated_data", {}) or {}
-        )
-        raw_items = vd.get("items") or []  # safe even if missing/None
+        # # validated_data may be “empty” at type time; guard + cast to Mapping
+        # vd: Mapping[str, Any] = cast(
+        #     Mapping[str, Any], getattr(self, "validated_data", {}) or {}
+        # )
+        # raw_items = vd.get("items") or []  # safe even if missing/None
 
-        # ensure a concrete list[dict] for the coupon API
-        items_for_coupon: List[Dict[str, Any]] = cast(List[Dict[str, Any]], raw_items)
+        # # ensure a concrete list[dict] for the coupon API
+        # items_for_coupon: List[Dict[str, Any]] = cast(List[Dict[str, Any]], raw_items)
 
-        ok, _ = coup.can_apply(user, items_for_coupon, subtotal)
+        ok, _ = coup.can_apply(user, items, subtotal, email=email)
         if not ok:
             return subtotal, Decimal("0.00"), None
 
-        discount = quant2(coup.discount_amount(user, items_for_coupon, subtotal))
+        discount = quant2(coup.discount_amount(user, items, subtotal))
         total = quant2(subtotal - discount)
         if total < Decimal("0.00"):
             total = Decimal("0.00")
@@ -1201,9 +1217,9 @@ class OrderCreateSerializer(serializers.Serializer):
         installments_months = cast(
             Optional[int], validated_data.get("installments_months")
         )
-        idempotency_key = (
-            str((validated_data.get("idempotency_key") or "")).strip() or None
-        )
+        # idempotency_key = (
+        #     str((validated_data.get("idempotency_key") or "")).strip() or None
+        # )
 
         # If a key is supplied and an order already exists, return it (idempotent)
         # if idempotency_key:
@@ -1212,10 +1228,39 @@ class OrderCreateSerializer(serializers.Serializer):
         #         return existing
 
         # totals (preliminary)
-        subtotal = self._calc_subtotal(items_data)
+        from .promotions.config import campaign_active
+        from .promotions.service import build_promotion_quote
+
+        promotion = validated_data.get("promotion")
+        gift_id = promotion.get("gift_product_id") if promotion is not None else None
+        paid_ids = {item["product_id"] for item in items_data}
+        product_ids = paid_ids | ({gift_id} if gift_id is not None else set())
+        products = {
+            product.pk: product
+            for product in Product.objects.select_for_update().filter(
+                pk__in=product_ids
+            ).order_by("pk")
+        }
+        if not paid_ids.issubset(products):
+            raise serializers.ValidationError({"items": "One or more products are unavailable."})
+        subtotal = self._calc_subtotal(items_data, products)
         total_after_discount, discount, coupon_obj = self._apply_coupon(
-            subtotal, coupon_code, user
+            subtotal, coupon_code, user, items_data, validated_data["email"]
         )
+        promotion_code = ""
+        promotion_discount = Decimal("0.00")
+        complimentary_product = None
+        if promotion is not None:
+            if not (getattr(settings, "CHRISTMAS_CHECKOUT_ENABLED", False) and campaign_active()):
+                raise serializers.ValidationError({"promotion": "Promotion is not active."})
+            quote = build_promotion_quote(items_data, gift_id, locked_products=products)
+            if quote["offer_code"] and Decimal(quote["customer_benefit"]) >= discount:
+                promotion_code = quote["offer_code"]
+                promotion_discount = Decimal(quote["promotion_discount"])
+                complimentary_product = products[quote["gift_product_id"]]
+                discount = promotion_discount
+                total_after_discount = subtotal - discount
+                coupon_obj = None
 
         # safety: online payment cannot be 0 €
         if total_after_discount <= Decimal("0.00"):
@@ -1225,99 +1270,200 @@ class OrderCreateSerializer(serializers.Serializer):
                 }
             )
 
-        with transaction.atomic():
+        # with transaction.atomic():
            
-            order = Order.objects.create(
-                user=user if user else None,
-                email=str(validated_data.get("email") or ""),
+        #     order = Order.objects.create(
+        #         user=user if user else None,
+        #         email=str(validated_data.get("email") or ""),
 
-                # money fields (shipping/vat will be recomputed below)
-                subtotal=subtotal,
-                discount_total=discount,
-                shipping_price=Decimal("0.00"),
-                vat_total=Decimal("0.00"),
-                total_price=total_after_discount,
-                # payment
-                payment_method=payment_method,
-                installments_months=(
-                    installments_months if installments_months else None
+        #         # money fields (shipping/vat will be recomputed below)
+        #         subtotal=subtotal,
+        #         discount_total=discount,
+        #         shipping_price=Decimal("0.00"),
+        #         vat_total=Decimal("0.00"),
+        #         total_price=total_after_discount,
+        #         # payment
+        #         payment_method=payment_method,
+        #         installments_months=(
+        #             installments_months if installments_months else None
+        order = Order.objects.create(
+            user=user if user else None,
+            email=str(validated_data.get("email") or ""),
+
+            # money fields (shipping/vat will be recomputed below)
+            subtotal=subtotal,
+            discount_total=discount,
+            promotion_code=promotion_code,
+            promotion_discount=promotion_discount,
+            shipping_price=Decimal("0.00"),
+            vat_total=Decimal("0.00"),
+            total_price=total_after_discount,
+            # payment
+            payment_method=payment_method,
+            installments_months=(
+                installments_months if installments_months else None
+            ),
+            stock_locked=False,
+            stock_released=False,
+            status="pending",
+            # snapshot shipping
+            ship_first_name=str(shipping_data.get("first_name") or ""),
+            ship_last_name=str(shipping_data.get("last_name") or ""),
+            ship_line1=str(shipping_data.get("line1") or ""),
+            ship_line2=str(shipping_data.get("line2") or ""),
+            ship_postal=str(shipping_data.get("postal_code") or ""),
+            ship_city=str(shipping_data.get("city") or ""),
+            ship_country=str(shipping_data.get("country") or ""),
+            ship_phone=str(shipping_data.get("phone") or ""),
+            ship_street_name=str(shipping_data.get("street_name") or ""),
+            ship_house_number=str(shipping_data.get("house_number") or ""),
+        )
+
+        # Create items and compute using product.final_price_gross
+        for it in items_data:
+            pid = int(it["product_id"])
+            qty = int(it["qty"])
+            prod = products[pid]
+            unit = Decimal(
+                str(getattr(prod, "final_price_gross", None) or prod.price_gross)
+            )
+            OrderItem.objects.create(
+                order=order,
+                product=prod,
+                product_name_snapshot=(
+                    prod.title_en or prod.title_de or str(prod)
                 ),
-                stock_locked=False,
-                stock_released=False,
-                status="pending",
-                # snapshot shipping
-                ship_first_name=str(shipping_data.get("first_name") or ""),
-                ship_last_name=str(shipping_data.get("last_name") or ""),
-                ship_line1=str(shipping_data.get("line1") or ""),
-                ship_line2=str(shipping_data.get("line2") or ""),
-                ship_postal=str(shipping_data.get("postal_code") or ""),
-                ship_city=str(shipping_data.get("city") or ""),
-                ship_country=str(shipping_data.get("country") or ""),
-                ship_phone=str(shipping_data.get("phone") or ""),
-                ship_street_name=str(shipping_data.get("street_name") or ""),
-                ship_house_number=str(shipping_data.get("house_number") or ""),
+                # stock_locked=False,
+                # stock_released=False,
+                # status="pending",
+                # # snapshot shipping
+                # ship_first_name=str(shipping_data.get("first_name") or ""),
+                # ship_last_name=str(shipping_data.get("last_name") or ""),
+                # ship_line1=str(shipping_data.get("line1") or ""),
+                # ship_line2=str(shipping_data.get("line2") or ""),
+                # ship_postal=str(shipping_data.get("postal_code") or ""),
+                # ship_city=str(shipping_data.get("city") or ""),
+                # ship_country=str(shipping_data.get("country") or ""),
+                # ship_phone=str(shipping_data.get("phone") or ""),
+                # ship_street_name=str(shipping_data.get("street_name") or ""),
+                # ship_house_number=str(shipping_data.get("house_number") or ""),
+                quantity=qty,
+                unit_price=unit,
             )
            
 
-            # Create items and compute using product.final_price_gross
-            for it in items_data:
-                pid = int(it["product_id"])
-                qty = int(it["qty"])
-                prod = Product.objects.select_for_update().get(pk=pid)
-                unit = Decimal(
-                    str(getattr(prod, "final_price_gross", None) or prod.price_gross)
-                )
-                OrderItem.objects.create(
-                    order=order,
-                    product=prod,
-                    product_name_snapshot=(
-                        prod.title_en or prod.title_de or str(prod)
-                    ),
-                    quantity=qty,
-                    unit_price=unit,
-                )
+            # # Create items and compute using product.final_price_gross
+            # for it in items_data:
+            #     pid = int(it["product_id"])
+            #     qty = int(it["qty"])
+            #     prod = Product.objects.select_for_update().get(pk=pid)
+            #     unit = Decimal(
+            #         str(getattr(prod, "final_price_gross", None) or prod.price_gross)
+            #     )
+            #     OrderItem.objects.create(
+            #         order=order,
+            #         product=prod,
+            #         product_name_snapshot=(
+            #             prod.title_en or prod.title_de or str(prod)
+            #         ),
+            #         quantity=qty,
+            #         unit_price=unit,
+            #     )
 
+            # # attach coupon to order NOW so UI can show it under the input
+            # if coupon_obj:
+            #     CouponRedemption.objects.create(
+            #         coupon=coupon_obj,
+            #         user=user if user else None,
+            #         order=order,
+            #     )
+        if complimentary_product is not None:
+            OrderItem.objects.create(
+                order=order,
+                product=complimentary_product,
+                product_name_snapshot=(
+                    complimentary_product.title_en
+                    or complimentary_product.title_de
+                    or str(complimentary_product)
+                ),
+                quantity=1,
+                unit_price=Decimal("0.00"),
+                is_complimentary=True,
+            )
+            order.reserve_stock_atomic()
+
+            # # recompute totals to populate vat_total, etc.
+            # order.compute_totals(shipping_price=order.shipping_price)  # uses default VAT
+            # order.save(
+            #     update_fields=[
+            #         "subtotal",
+            #         "discount_total",
+            #         "shipping_price",
+            #         "vat_total",
+            #         "total_price",
+            #     ]
             # attach coupon to order NOW so UI can show it under the input
-            if coupon_obj:
-                CouponRedemption.objects.create(
-                    coupon=coupon_obj,
-                    user=user if user else None,
-                    order=order,
-                )
-
-            # recompute totals to populate vat_total, etc.
-            order.compute_totals(shipping_price=order.shipping_price)  # uses default VAT
-            order.save(
-                update_fields=[
-                    "subtotal",
-                    "discount_total",
-                    "shipping_price",
-                    "vat_total",
-                    "total_price",
-                ]
+        if coupon_obj:
+            CouponRedemption.objects.create(
+                coupon=coupon_obj,
+                user=user if user else None,
+                order=order,
             )
 
-            # log checkout-start marketing event (best-effort, non-blocking)
-            try:
-                session_id = ""
-                if req is not None:
-                    headers = getattr(req, "headers", None)
-                    if headers:
-                        session_id = (
-                            headers.get("X-Client-Id", "")
-                            or headers.get("X-Session-Id", "")
-                        )
-                    if not session_id:
-                        session_id = (
-                            getattr(req, "session", None)
-                            and getattr(req.session, "session_key", "")
-                        ) or ""
+            # # log checkout-start marketing event (best-effort, non-blocking)
+            # try:
+            #     session_id = ""
+            #     if req is not None:
+            #         headers = getattr(req, "headers", None)
+            #         if headers:
+            #             session_id = (
+            #                 headers.get("X-Client-Id", "")
+            #                 or headers.get("X-Session-Id", "")
+            #             )
+            #         if not session_id:
+            #             session_id = (
+            #                 getattr(req, "session", None)
+            #                 and getattr(req.session, "session_key", "")
+            #             ) or ""
 
-                    params = (
-                        getattr(req, "query_params", None)
-                        or getattr(req, "GET", {})
-                        or {}
-                    )
+            #         params = (
+            #             getattr(req, "query_params", None)
+            #             or getattr(req, "GET", {})
+            #             or {}
+        # recompute totals to populate vat_total, etc.
+        order.compute_totals(shipping_price=order.shipping_price)  # uses default VAT
+        order.save(
+            update_fields=[
+                "subtotal",
+                "discount_total",
+                "shipping_price",
+                "vat_total",
+                "total_price",
+            ]
+        )
+        # log checkout-start marketing event (best-effort, non-blocking)
+        try:
+            session_id = ""
+            if req is not None:
+                headers = getattr(req, "headers", None)
+                if headers:
+                    session_id = (
+                        headers.get("X-Client-Id", "")
+                        or headers.get("X-Session-Id", "")
+                     )
+                if not session_id:
+                    session_id = (
+                        getattr(req, "session", None)
+                        and getattr(req.session, "session_key", "")
+                    ) or ""
+
+                params = (
+                    getattr(req, "query_params", None)
+                    or getattr(req, "GET", {})
+                    or {}
+                )
+ 
+                with transaction.atomic():
 
                     MarketingEvent.objects.create(
                         user=(
@@ -1344,9 +1490,9 @@ class OrderCreateSerializer(serializers.Serializer):
                             "coupon_code": coupon_code or "",
                         },
                     )
-            except Exception:
-                # never break checkout if tracking fails
-                pass
+        except Exception:
+            # never break checkout if tracking fails
+            pass
 
         return order
 
