@@ -165,6 +165,14 @@ urlpatterns = [
     path("coupons/preview/", CouponPreviewAPIView.as_view(), name="coupon_preview"),
     path("promotions/active/", ActivePromotionAPIView.as_view(), name="active_promotion"),
 
+
+    
+
+    # NEW: Phase 2 Christmas promotion endpoints
+    path("promotions/christmas/",include("server.promotions.urls")),
+    
+
+
     # -------- Misc --------
     path("", getRoutes, name="routes"),
     path("test/", testEndPoint, name="test_endpoint"),
