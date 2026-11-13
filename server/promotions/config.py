@@ -24,11 +24,13 @@ def campaign_active():
     )
 
 def checkout_enabled():
-    return bool(
-        campaign_active()
-        and getattr(settings, "CHRISTMAS_CHECKOUT_ENABLED", False)
-        and ("server", "0022_christmas_checkout")
-        in MigrationRecorder(connection).applied_migrations()
+    if not campaign_active() or not getattr(settings, "CHRISTMAS_CHECKOUT_ENABLED", False):
+        return False
+
+    applied = MigrationRecorder(connection).applied_migrations()
+    return (
+        ("server", "0022_christmas_checkout") in applied
+        or ("server", "0022_order_promotion_code_order_promotion_discount_and_more") in applied
     )
 
 def vase_product_ids():
