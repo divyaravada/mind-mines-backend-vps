@@ -14,7 +14,7 @@ START_AT = datetime(2026, 11, 13, 0, 0, tzinfo=BERLIN)
 END_AT = datetime(2027, 1, 16, 0, 0, tzinfo=BERLIN)
 
 MAX_GIFT_PRICE = Decimal("80.00")
-TWO_ITEM_DISCOUNT = Decimal("0.25")
+TWO_ITEM_DISCOUNT = Decimal("0.15")
 
 
 def campaign_active():
