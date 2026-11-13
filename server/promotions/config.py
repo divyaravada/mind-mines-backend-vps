@@ -4,6 +4,8 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
+from django.db import connection
+from django.db.migrations.recorder import MigrationRecorder
 from django.utils import timezone
 
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -21,6 +23,13 @@ def campaign_active():
         and START_AT <= timezone.now() < END_AT
     )
 
+def checkout_enabled():
+    return bool(
+        campaign_active()
+        and getattr(settings, "CHRISTMAS_CHECKOUT_ENABLED", False)
+        and ("server", "0022_christmas_checkout")
+        in MigrationRecorder(connection).applied_migrations()
+    )
 
 def vase_product_ids():
     return {

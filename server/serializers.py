@@ -1027,6 +1027,9 @@ class OrderItemIn(serializers.Serializer):
 
 class CheckoutPromotionIn(serializers.Serializer):
     gift_product_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
+    expected_total = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    expected_offer = serializers.CharField(max_length=32, required=False, allow_null=True)
+    expected_gift_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
 
 class OrderCreateSerializer(serializers.Serializer):
     email = serializers.EmailField()
@@ -1199,7 +1202,7 @@ class OrderCreateSerializer(serializers.Serializer):
         return total, discount, coup
 
     # --- creation ---
-
+    @transaction.atomic
     def create(self, validated_data: Dict[str, Any]) -> Order:
         req = self.context.get("request")
         user = getattr(req, "user", None)
@@ -1228,7 +1231,7 @@ class OrderCreateSerializer(serializers.Serializer):
         #         return existing
 
         # totals (preliminary)
-        from .promotions.config import campaign_active
+        from .promotions.config import checkout_enabled
         from .promotions.service import build_promotion_quote
 
         promotion = validated_data.get("promotion")
@@ -1251,7 +1254,7 @@ class OrderCreateSerializer(serializers.Serializer):
         promotion_discount = Decimal("0.00")
         complimentary_product = None
         if promotion is not None:
-            if not (getattr(settings, "CHRISTMAS_CHECKOUT_ENABLED", False) and campaign_active()):
+            if not checkout_enabled():
                 raise serializers.ValidationError({"promotion": "Promotion is not active."})
             quote = build_promotion_quote(items_data, gift_id, locked_products=products)
             if quote["offer_code"] and Decimal(quote["customer_benefit"]) >= discount:
@@ -1261,6 +1264,16 @@ class OrderCreateSerializer(serializers.Serializer):
                 discount = promotion_discount
                 total_after_discount = subtotal - discount
                 coupon_obj = None
+ 
+        if promotion is not None and "expected_total" in promotion and (
+            promotion["expected_total"] != total_after_discount
+            or promotion.get("expected_offer") != (promotion_code or None)
+            or promotion.get("expected_gift_id") != getattr(complimentary_product, "pk", None)
+        ):
+            raise serializers.ValidationError({
+                "promotion": "The checkout offer changed. Refresh the promotion and try again."
+            })
+
 
         # safety: online payment cannot be 0 €
         if total_after_discount <= Decimal("0.00"):

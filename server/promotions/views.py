@@ -1,10 +1,14 @@
-
+from decimal import Decimal
+from shlex import quote
+from django.db.migrations import serializer
+from django.db.migrations import serializer
 from rest_framework import serializers, status
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 
-from .config import campaign_active
+from server.serializers import OrderCreateSerializer
+from .config import campaign_active, checkout_enabled
 from .service import eligible_gifts, build_promotion_quote
 
 
@@ -17,6 +21,8 @@ class QuoteItemSerializer(serializers.Serializer):
 
 class QuoteRequestSerializer(serializers.Serializer):
     items = QuoteItemSerializer(many=True)
+    coupon_code = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
     gift_product_id = serializers.IntegerField(
         min_value=1,
         required=False,
@@ -57,6 +63,7 @@ class ChristmasGiftAPIView(APIView):
 
         return Response({
             "active": True,
+            "checkout_enabled": checkout_enabled(),
             "currency": "EUR",
             "max_gift_price_exclusive": "80.00",
             "products": products,
@@ -84,5 +91,25 @@ class ChristmasQuoteAPIView(APIView):
                 "gift_product_id"
             ),
         )
-
+        coupon_code = serializer.validated_data.get("coupon_code", "")
+        if coupon_code:
+            quote_serializer = OrderCreateSerializer()
+            subtotal = Decimal(quote["subtotal"])
+            coupon_total, coupon_discount, coupon = quote_serializer._apply_coupon(
+                subtotal, coupon_code, request.user, serializer.validated_data["items"],
+                serializer.validated_data.get("email", ""),
+            )
+            if coupon and (
+                not quote["offer_code"] or coupon_discount > Decimal(quote["customer_benefit"])
+            ):
+                quote.update({
+                    "offer_code": None,
+                    "gift_product_id": None,
+                    "gift_value": "0.00",
+                    "customer_benefit": str(coupon_discount),
+                    "promotion_discount": "0.00",
+                    "total_before_shipping": str(coupon_total),
+                   "coupon_discount": str(coupon_discount),
+                    "coupon_code": coupon.code,
+                })
         return Response(quote)
